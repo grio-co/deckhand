@@ -1,5 +1,10 @@
 #include "deckhand/app/api_bridge.hpp"
 
+#ifndef DECKHAND_WITH_API
+#define DECKHAND_WITH_API 1
+#endif
+#if DECKHAND_WITH_API
+
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -803,3 +808,16 @@ std::string ApiBridge::describe() const { return impl_->description; }
 void ApiBridge::engine_event(const EngineEvent& e) { impl_->engine_event(e); }
 
 }  // namespace deckhand
+
+#else  // built without the API server (no OpenSSL on this platform)
+
+namespace deckhand {
+struct ApiBridge::Impl {};
+ApiBridge::ApiBridge(ApiHost&, const std::string&) : impl_(std::make_unique<Impl>()) {}
+ApiBridge::~ApiBridge() = default;
+bool ApiBridge::running() const { return false; }
+std::string ApiBridge::describe() const { return "API off"; }
+void ApiBridge::engine_event(const EngineEvent&) {}
+}  // namespace deckhand
+
+#endif
