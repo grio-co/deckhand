@@ -1,0 +1,156 @@
+// DeckHand default skin. Original design: procedural shapes and tokens only, no image assets.
+dhskin 1
+
+meta name="DeckHand Default" author="DeckHand contributors" license="MIT" min_version="0.1" description="Conventional two-deck layout with central mixer and library browser"
+
+tokens {
+  color bg       #0e1014
+  color panel    #161a20
+  color panel2   #1b2027
+  color line     #2a303a
+  color text     #e6e8ec
+  color dim      #8a93a2
+  color accent   #3ea6ff
+  color deck1    #3ea6ff
+  color deck2    #ff8a3d
+  color good     #3ddc84
+  color warn     #ffb020
+  color hover    #ffffff14
+  color press    #ffffff26
+  number r 4
+  number gap 4
+  font ui    size=12
+  font small size=10 bold=true
+  font title size=14 bold=true
+  font big   size=24 bold=true
+  font mono  size=22 bold=true
+}
+
+animation beat_flash property=glow from=1 to=0 duration=180 ease=out trigger=beat
+
+// One deck: header, platter + tempo, transport, pads.
+template deck n color {
+  column bg=panel radius=r pad=8 gap=6 {
+    row h=40 gap=8 {
+      label bind="deck[${n}].letter" w=30 font=big color=${color}
+      column gap=2 {
+        label bind="deck[${n}].title" font=ui color=text
+        label bind="deck[${n}].artist" font=ui color=dim
+      }
+      column w=96 gap=0 {
+        label bind="deck[${n}].bpm" format=fixed1 font=mono color=text text_align=right
+        label bind="deck[${n}].key" font=small color=dim text_align=right
+      }
+    }
+    row gap=8 {
+      jog bind="deck[${n}].jog" aspect=1 color=${color} bg=panel2 border=line border_w=1 anim=beat_flash glow=${color} {
+        state hover { border=${color} }
+        state pressed { bg=press }
+      }
+      column w=44 gap=2 {
+        fader bind="deck[${n}].tempo" orientation=vertical color=${color} bg=panel2 radius=2
+        label bind="deck[${n}].tempo" format=signed font=small color=dim text_align=center h=14
+      }
+    }
+    row h=30 gap=6 {
+      button bind="deck[${n}].cue" text="@deck.cue" font=ui bg=panel2 border=line border_w=1 radius=r {
+        state hover { bg=hover }
+        state pressed { bg=press }
+        state on { bg=warn color=bg }
+      }
+      button bind="deck[${n}].play" text="@deck.play" text_on="@deck.pause" font=ui bg=panel2 border=line border_w=1 radius=r {
+        state hover { bg=hover }
+        state pressed { bg=press }
+        state on { bg=good color=bg }
+      }
+      button bind="deck[${n}].sync" text="@deck.sync" font=ui bg=panel2 border=line border_w=1 radius=r {
+        state hover { bg=hover }
+        state pressed { bg=press }
+        state on { bg=accent color=bg }
+      }
+      label bind="deck[${n}].loop" font=small color=accent w=70 text_align=right
+    }
+    pads bind="deck[${n}].pads" cols=4 rows=2 h=56 gap=4 bg=panel2 radius=r color=${color}
+  }
+}
+
+// One mixer channel strip.
+template strip n color {
+  column gap=4 {
+    grid cols=2 gap=4 flex=3 {
+      knob bind="mixer.ch[${n}].trim" text="@mixer.trim" color=${color} font=small
+      knob bind="mixer.ch[${n}].eq.high" text="@mixer.eq.high" color=${color} font=small
+      knob bind="mixer.ch[${n}].eq.mid" text="@mixer.eq.mid" color=${color} font=small
+      knob bind="mixer.ch[${n}].eq.low" text="@mixer.eq.low" color=${color} font=small
+      knob bind="mixer.ch[${n}].filter" text="@mixer.filter" bipolar=true color=accent font=small
+      button bind="mixer.ch[${n}].cue" text="@mixer.cue" font=small bg=panel radius=r {
+        state hover { bg=hover }
+        state on { bg=warn color=bg }
+      }
+    }
+    row gap=4 flex=4 {
+      meter bind="mixer.ch[${n}].level" orientation=vertical w=14 bg=panel
+      fader bind="mixer.ch[${n}].fader" orientation=vertical color=${color} bg=panel radius=2
+    }
+  }
+}
+
+window main size=1280x720 min=960x560 title="@app.title" {
+  column bg=bg pad=4 gap=gap {
+    row h=32 bg=panel radius=r pad=8,0 gap=8 {
+      label text="@app.title" font=title color=text w=120
+      spacer
+      label bind="app.controller" font=ui color=dim w=200 text_align=right
+      label bind="app.audio" font=ui color=dim w=260 text_align=right
+      button bind="app.import" text="@app.import_library" font=ui bg=panel2 border=line border_w=1 radius=r w=130 margin=4,3 {
+        state hover { bg=hover }
+        state pressed { bg=press }
+      }
+    }
+    column h=20% gap=2 {
+      waveform bind="deck[1].waveform" mode=zoomed color=deck1 bg=panel radius=r
+      waveform bind="deck[2].waveform" mode=zoomed color=deck2 bg=panel radius=r
+    }
+    row flex=3 gap=gap {
+      use deck n=1 color=deck1
+      column w=300 bg=panel2 radius=r pad=8 gap=6 {
+        row h=22 gap=6 {
+          label text="@mixer.master" font=small color=dim w=60
+          meter bind="mixer.master.level" orientation=horizontal bg=panel
+        }
+        row gap=8 {
+          use strip n=1 color=deck1
+          use strip n=2 color=deck2
+        }
+        label text="@mixer.crossfader" font=small color=dim h=12 text_align=center
+        fader bind="mixer.crossfader" orientation=horizontal color=accent bg=panel radius=2 h=26
+        row h=44 gap=8 {
+          knob bind="mixer.headphone.volume" text="@mixer.headphones" font=small color=text
+          knob bind="mixer.headphone.mix" text="@mixer.headphone_mix" font=small color=text
+        }
+      }
+      use deck n=2 color=deck2
+    }
+    row flex=2 gap=gap {
+      tree bind="browser.tree" text="@browser.collection" w=200 bg=panel radius=r font=ui color=text
+      column bg=panel radius=r pad=6 gap=4 {
+        row h=24 gap=6 {
+          label bind="browser.search" text="@browser.search" editable=true font=ui color=text bg=panel2 radius=r w=240 pad=6,0
+          label bind="browser.count" text="@browser.tracks" font=small color=dim
+          spacer
+          button bind="deck[1].load" text="@browser.load" args="deck=A" font=small color=deck1 bg=panel2 radius=r w=70 {
+            state hover { bg=hover }
+          }
+          button bind="deck[2].load" text="@browser.load" args="deck=B" font=small color=deck2 bg=panel2 radius=r w=70 {
+            state hover { bg=hover }
+          }
+        }
+        browser bind="browser.tracks" columns="title,artist,bpm,key,time" row_h=20 font=ui color=text
+      }
+    }
+  }
+}
+
+strings {
+  skin.credit "Default skin by the DeckHand contributors"
+}

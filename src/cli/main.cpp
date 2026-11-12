@@ -4,15 +4,19 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 #include <string>
+#include <vector>
 
 #include <chrono>
 #include <thread>
 
+#include "deckhand/api/auth.hpp"
 #include "deckhand/audio/engine.hpp"
 #include "deckhand/import/import.hpp"
 #include "deckhand/library/library.hpp"
 #include "deckhand/log/log.hpp"
+#include "deckhand/services/usb_export.hpp"
 
 using namespace deckhand;
 
@@ -44,6 +48,8 @@ int usage() {
                "  import     [--source DB] [--key-file FILE] [--analysis DIR] [--data DIR]\n"
                "  playlists  [--data DIR]\n"
                "  list       [--playlist ID] [--search TEXT] [--data DIR]\n"
+               "  export DIR [--playlist ID] [--no-copy 1] [--data DIR]   write a club-player USB export\n"
+               "  token list | create NAME SCOPE[,SCOPE...] | revoke ID   [--data DIR]   API access tokens\n"
                "  devices                      list audio outputs\n"
                "  play FILE  [--seconds N] [--silent 1] [--device NAME]   decode and play through the engine\n");
   return 2;
@@ -110,6 +116,53 @@ int main(int argc, char** argv) {
       const ImportStats s = import_library_v6(lib, o);
       std::printf("tracks added %d, updated %d; playlists %d; cues %d; beatgrids %d\n", s.tracks_added,
                   s.tracks_updated, s.playlists, s.cues, s.beatgrids);
+    } else if (cmd == "token" && argc >= 3) {
+      api::TokenStore store(data + "/api-tokens.json");
+      std::string error;
+      if (!store.load(&error)) std::fprintf(stderr, "warning: %s\n", error.c_str());
+      const std::string sub = argv[2];
+      if (sub == "list") {
+        for (const auto& t : store.list()) {
+          std::string scopes;
+          for (const auto& sc : t.scopes) scopes += (scopes.empty() ? "" : ",") + sc;
+          std::printf("%s\t%s\t%s\n", t.id.c_str(), t.name.c_str(), scopes.c_str());
+        }
+      } else if (sub == "create" && argc >= 5) {
+        std::vector<std::string> scopes;
+        std::string list = argv[4];
+        for (std::size_t a = 0; a <= list.size();) {
+          const std::size_t b = std::min(list.find(',', a), list.size());
+          if (b > a) scopes.push_back(list.substr(a, b - a));
+          a = b + 1;
+        }
+        api::TokenStore::Created c;
+        if (!store.create(argv[3], scopes, 0, {}, &c, &error)) {
+          std::fprintf(stderr, "error: %s\n", error.c_str());
+          return 1;
+        }
+        std::printf("id %s\ntoken %s\n(shown once; restart DeckHand to pick it up)\n", c.info.id.c_str(), c.secret.c_str());
+      } else if (sub == "revoke" && argc >= 4) {
+        if (!store.revoke(argv[3])) {
+          std::fprintf(stderr, "error: no such token\n");
+          return 1;
+        }
+      } else {
+        return usage();
+      }
+    } else if (cmd == "export" && argc >= 3) {
+      UsbExportRequest req;
+      req.destination = argv[2];
+      for (int i = 3; i + 1 < argc; ++i)
+        if (std::strcmp(argv[i], "--playlist") == 0) req.playlist_ids.push_back(std::atoll(argv[i + 1]));
+      req.copy_audio = !std::atoi(arg_value(argc, argv, "--no-copy", "0"));
+      UsbExportResult res;
+      std::string error;
+      if (!export_library_to_usb(lib, req, res, error)) {
+        std::fprintf(stderr, "error: %s\n", error.c_str());
+        return 1;
+      }
+      std::printf("exported %d tracks, %d playlists; %d files missing\n", res.tracks, res.playlists, res.missing_files);
+      for (const auto& m : res.missing) std::printf("  missing: %s\n", m.c_str());
     } else if (cmd == "playlists") {
       for (const auto& p : lib.playlists())
         std::printf("%lld\t%s%s\t(%d)\n", static_cast<long long>(p.id), p.is_folder ? "[folder] " : "",

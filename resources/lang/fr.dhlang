@@ -1,0 +1,86 @@
+@lang fr
+@name Français
+@dir ltr
+@version 1.0
+@fallback en
+
+app.title = DeckHand
+app.start_failed = Échec du démarrage de DeckHand : {message}
+app.no_controller = Aucun contrôleur
+app.no_audio = Aucune sortie audio
+app.audio = {device}  {channels} can.  {khz, number, 1} kHz
+app.import_library = Importer la bibliothèque
+
+status.error = Erreur : {message}
+status.added = Ajouté : {title}
+status.importing = Importation de la bibliothèque...
+status.import_needs_key = L’importation nécessite le fichier de clé {path}
+status.imported = {added, plural, one {# nouveau morceau importé} other {# nouveaux morceaux importés}}, {updated, plural, one {# morceau existant mis à jour} other {# morceaux existants mis à jour}}, {playlists, plural, one {# playlist} other {# playlists}}
+
+deck.name = Platine {deck}
+deck.empty = La platine {deck} est vide
+deck.loading = Chargement...
+deck.no_track = Aucun morceau chargé
+deck.file_not_found = Fichier introuvable : {path}
+deck.playing_stop_first = La platine {deck} joue ; arrêtez-la avant de charger
+deck.cue = CUE
+deck.play = LECTURE
+deck.pause = PAUSE
+deck.sync = SYNC
+deck.loop = BOUCLE {beats}
+deck.loop_fraction = BOUCLE 1/{divisor}
+
+mixer.trim = GAIN
+mixer.eq.high = AIGUS
+mixer.eq.mid = MÉDIUMS
+mixer.eq.low = GRAVES
+mixer.filter = FILTRE
+mixer.cue = CUE
+mixer.master = MASTER
+mixer.crossfader = CROSSFADER
+mixer.headphones = CASQUE
+mixer.headphone_mix = MIX
+
+browser.collection = Collection
+browser.search = Rechercher
+browser.tracks = {count, plural, one {# morceau} other {# morceaux}}
+browser.load = Charger {deck}
+browser.col.title = TITRE
+browser.col.artist = ARTISTE
+browser.col.bpm = BPM
+browser.col.key = TON
+browser.col.time = DURÉE
+browser.empty = Aucun morceau. Déposez des fichiers audio ici ou importez la bibliothèque.
+browser.no_matches = Aucun résultat
+
+app.export_usb = Exporter USB
+status.exporting = Exportation {done} / {total}  {title}
+status.export_failed = Échec de l’exportation : {message}
+status.exported = {tracks, plural, one {# morceau exporté} other {# morceaux exportés}} et {playlists, plural, one {# playlist} other {# playlists}} vers {path}
+status.exported_missing = {tracks, plural, one {# morceau exporté} other {# morceaux exportés}}, {playlists, plural, one {# playlist} other {# playlists}} ; {missing, plural, one {# fichier illisible} other {# fichiers illisibles}}
+status.added_to = Ajouté à {name}
+
+export.all_playlists = toutes les playlists
+export.title = Exporter {what} vers :
+
+playlist.add_list = + Liste
+playlist.add_folder = + Dossier
+playlist.new_list = Nouvelle playlist
+playlist.new_folder = Nouveau dossier
+playlist.rename = Renommer
+playlist.delete = Supprimer
+playlist.confirm = Sûr ?
+playlist.none = Aucune playlist
+
+browser.add_to = Ajouter à...
+browser.remove = Retirer
+browser.history = Historique
+
+deck.key_lock = KEY
+deck.quantize = QNT
+deck.slip = SLIP
+app.rec = REC
+status.recording = Enregistrement vers {path}
+status.recording_saved = Enregistrement sauvegardé : {path}
+status.sample_loaded = Sampler {slot} : {title}
+fx.on = ON

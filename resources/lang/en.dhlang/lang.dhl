@@ -1,0 +1,86 @@
+# DeckHand English (built-in, fallback for every other language)
+@lang en
+@name English
+@dir ltr
+@version 1.0
+
+app.title = DeckHand
+app.start_failed = DeckHand failed to start: {message}
+app.no_controller = No controller
+app.no_audio = No audio output
+app.audio = {device}  {channels} ch  {khz, number, 1} kHz
+app.import_library = Import library
+
+status.error = Error: {message}
+status.added = Added {title}
+status.importing = Importing library...
+status.import_needs_key = Import needs the key file {path}
+status.imported = Imported {added, plural, one {# new track} other {# new tracks}}, updated {updated, plural, one {# existing track} other {# existing tracks}}, {playlists, plural, one {# playlist} other {# playlists}}
+
+deck.name = Deck {deck}
+deck.empty = Deck {deck} is empty
+deck.loading = Loading...
+deck.no_track = No track loaded
+deck.file_not_found = File not found: {path}
+deck.playing_stop_first = Deck {deck} is playing; stop it before loading
+deck.cue = CUE
+deck.play = PLAY
+deck.pause = PAUSE
+deck.sync = SYNC
+deck.loop = LOOP {beats}
+deck.loop_fraction = LOOP 1/{divisor}
+
+mixer.trim = TRIM
+mixer.eq.high = HI
+mixer.eq.mid = MID
+mixer.eq.low = LOW
+mixer.filter = FILT
+mixer.cue = CUE
+mixer.master = MASTER
+mixer.crossfader = CROSSFADER
+mixer.headphones = PHONES
+mixer.headphone_mix = MIX
+
+browser.collection = Collection
+browser.search = Search
+browser.tracks = {count, plural, one {# track} other {# tracks}}
+browser.load = Load {deck}
+browser.col.title = TITLE
+browser.col.artist = ARTIST
+browser.col.bpm = BPM
+browser.col.key = KEY
+browser.col.time = TIME
+browser.empty = No tracks yet. Drop audio files here, or use Import library.
+browser.no_matches = No matches
+
+app.export_usb = Export USB
+status.exporting = Exporting {done} / {total}  {title}
+status.export_failed = Export failed: {message}
+status.exported = Exported {tracks, plural, one {# track} other {# tracks}} and {playlists, plural, one {# playlist} other {# playlists}} to {path}
+status.exported_missing = Exported {tracks, plural, one {# track} other {# tracks}}, {playlists, plural, one {# playlist} other {# playlists}}; {missing, plural, one {# file} other {# files}} could not be read
+status.added_to = Added to {name}
+
+export.all_playlists = all playlists
+export.title = Export {what} to:
+
+playlist.add_list = + List
+playlist.add_folder = + Folder
+playlist.new_list = New playlist
+playlist.new_folder = New folder
+playlist.rename = Rename
+playlist.delete = Delete
+playlist.confirm = Sure?
+playlist.none = No playlists yet
+
+browser.add_to = Add to...
+browser.remove = Remove
+browser.history = History
+
+deck.key_lock = KEY
+deck.quantize = QNT
+deck.slip = SLIP
+app.rec = REC
+status.recording = Recording to {path}
+status.recording_saved = Saved recording {path}
+status.sample_loaded = Sampler {slot}: {title}
+fx.on = ON

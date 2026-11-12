@@ -1,0 +1,89 @@
+// Voidwave: a deliberately exotic skin. Hexagonal window, free-form stack, orbiting decorations,
+// beat-reactive glows. Procedural only; shows the range of the format.
+dhskin 1
+
+meta name="Voidwave" author="DeckHand contributors" license="MIT" min_version="0.1" description="Hexagonal, animated, deck-flanked layout"
+
+tokens {
+  color void    #07060f
+  color glass   #14102acc
+  color violet  #8a5cff
+  color cyan    #29f2ff
+  color magenta #ff3df0
+  color dim     #7d77a6
+  color ink     #f1eeff
+  color rim     #8a5cff66
+  color haze    #8a5cff22
+  font ui    size=12
+  font small size=10 bold=true
+  font title size=18 bold=true
+  font big   size=20 bold=true
+}
+
+shape hex { polygon 0.06,0 0.94,0 1,0.5 0.94,1 0.06,1 0,0.5 }
+
+animation pulse     property=opacity from=0.55 to=1 duration=1400 ease=inout loop=pingpong
+animation drift     property=offset_x from=-40 to=40 duration=9000 ease=inout loop=pingpong
+animation orbit     property=rotate from=0 to=360 duration=14000 ease=linear loop=repeat
+animation beat_glow property=glow from=1 to=0 duration=160 ease=out trigger=beat
+animation hover_pop property=scale from=1 to=1.06 duration=120 ease=out trigger=hover
+
+// A deck flank: big platter on top, small transport and pads beneath.
+template flank n color {
+  column gap=8 {
+    label bind="deck[${n}].title" font=ui color=ink text_align=center h=16
+    jog bind="deck[${n}].jog" aspect=1 color=${color} bg=glass border=${color} border_w=2 glow=${color} glow_r=18 anim=beat_glow
+    label bind="deck[${n}].bpm" format=fixed1 font=big color=${color} text_align=center h=26
+    row h=28 gap=6 {
+      button bind="deck[${n}].cue" text="@deck.cue" font=small bg=glass border=rim border_w=1 radius=14 anim=hover_pop { state on { bg=magenta } }
+      button bind="deck[${n}].play" text="@deck.play" font=small bg=glass border=rim border_w=1 radius=14 anim=hover_pop { state on { bg=cyan color=void } }
+      button bind="deck[${n}].sync" text="@deck.sync" font=small bg=glass border=rim border_w=1 radius=14 anim=hover_pop { state on { bg=violet } }
+    }
+    pads bind="deck[${n}].pads" cols=4 rows=2 gap=4 h=52 radius=8 color=${color}
+  }
+}
+
+window main size=1100x620 min=800x480 shape=hex title="@app.title" {
+  stack bg=void {
+    // ambient layers behind everything
+    panel w=70% h=62% anchor=c bg=haze radius=200 anim=drift
+    panel w=46% h=90% anchor=c border=rim border_w=1 radius=300 anim=orbit
+
+    column pad=48,34,48,26 gap=10 {
+      row h=30 {
+        label text="@app.title" font=title color=cyan glow=cyan glow_r=10 anim=pulse w=200
+        spacer
+        label bind="app.audio" font=small color=dim w=260 text_align=right
+      }
+      row flex=1 gap=18 {
+        use flank n=1 color=cyan
+        column flex=1 gap=8 {
+          waveform bind="deck[1].waveform" mode=zoomed color=cyan bg=glass radius=10 h=22%
+          waveform bind="deck[2].waveform" mode=zoomed color=magenta bg=glass radius=10 h=22%
+          row flex=1 gap=10 bg=glass radius=12 pad=8 {
+            fader bind="mixer.ch[1].fader" orientation=vertical color=cyan w=26
+            meter bind="mixer.ch[1].level" orientation=vertical w=10
+            column flex=1 gap=6 {
+              knob bind="mixer.ch[1].eq.high" text="@mixer.eq.high" font=small color=cyan
+              knob bind="mixer.ch[1].eq.mid" text="@mixer.eq.mid" font=small color=cyan
+              knob bind="mixer.ch[1].eq.low" text="@mixer.eq.low" font=small color=cyan
+            }
+            column flex=1 gap=6 {
+              knob bind="mixer.ch[2].eq.high" text="@mixer.eq.high" font=small color=magenta
+              knob bind="mixer.ch[2].eq.mid" text="@mixer.eq.mid" font=small color=magenta
+              knob bind="mixer.ch[2].eq.low" text="@mixer.eq.low" font=small color=magenta
+            }
+            meter bind="mixer.ch[2].level" orientation=vertical w=10
+            fader bind="mixer.ch[2].fader" orientation=vertical color=magenta w=26
+          }
+          fader bind="mixer.crossfader" orientation=horizontal color=violet h=24
+        }
+        use flank n=2 color=magenta
+      }
+      row h=24% gap=6 {
+        tree bind="browser.tree" text="@browser.collection" w=18% bg=glass radius=8 font=ui color=ink
+        browser bind="browser.tracks" columns="title,artist,bpm,key,time" row_h=18 bg=glass radius=8 font=ui color=ink
+      }
+    }
+  }
+}

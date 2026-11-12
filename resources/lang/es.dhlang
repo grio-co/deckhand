@@ -1,0 +1,86 @@
+@lang es
+@name Español
+@dir ltr
+@version 1.0
+@fallback en
+
+app.title = DeckHand
+app.start_failed = DeckHand no pudo iniciarse: {message}
+app.no_controller = Sin controlador
+app.no_audio = Sin salida de audio
+app.audio = {device}  {channels} can.  {khz, number, 1} kHz
+app.import_library = Importar biblioteca
+
+status.error = Error: {message}
+status.added = Añadido: {title}
+status.importing = Importando biblioteca...
+status.import_needs_key = La importación necesita el archivo de clave {path}
+status.imported = {added, plural, one {# pista nueva importada} other {# pistas nuevas importadas}}, {updated, plural, one {# pista existente actualizada} other {# pistas existentes actualizadas}}, {playlists, plural, one {# lista} other {# listas}}
+
+deck.name = Plato {deck}
+deck.empty = El plato {deck} está vacío
+deck.loading = Cargando...
+deck.no_track = Ninguna pista cargada
+deck.file_not_found = Archivo no encontrado: {path}
+deck.playing_stop_first = El plato {deck} está sonando; deténgalo antes de cargar
+deck.cue = CUE
+deck.play = PLAY
+deck.pause = PAUSA
+deck.sync = SYNC
+deck.loop = LOOP {beats}
+deck.loop_fraction = LOOP 1/{divisor}
+
+mixer.trim = GAIN
+mixer.eq.high = AGUDOS
+mixer.eq.mid = MEDIOS
+mixer.eq.low = GRAVES
+mixer.filter = FILTRO
+mixer.cue = CUE
+mixer.master = MASTER
+mixer.crossfader = CROSSFADER
+mixer.headphones = AURIC.
+mixer.headphone_mix = MIX
+
+browser.collection = Colección
+browser.search = Buscar
+browser.tracks = {count, plural, one {# pista} other {# pistas}}
+browser.load = Cargar {deck}
+browser.col.title = TÍTULO
+browser.col.artist = ARTISTA
+browser.col.bpm = BPM
+browser.col.key = TONO
+browser.col.time = TIEMPO
+browser.empty = Aún no hay pistas. Suelta archivos de audio aquí o usa Importar biblioteca.
+browser.no_matches = Sin resultados
+
+app.export_usb = Exportar USB
+status.exporting = Exportando {done} / {total}  {title}
+status.export_failed = Error al exportar: {message}
+status.exported = {tracks, plural, one {# pista exportada} other {# pistas exportadas}} y {playlists, plural, one {# lista} other {# listas}} a {path}
+status.exported_missing = {tracks, plural, one {# pista exportada} other {# pistas exportadas}}, {playlists, plural, one {# lista} other {# listas}}; {missing, plural, one {# archivo no pudo leerse} other {# archivos no pudieron leerse}}
+status.added_to = Añadido a {name}
+
+export.all_playlists = todas las listas
+export.title = Exportar {what} a:
+
+playlist.add_list = + Lista
+playlist.add_folder = + Carpeta
+playlist.new_list = Lista nueva
+playlist.new_folder = Carpeta nueva
+playlist.rename = Renombrar
+playlist.delete = Eliminar
+playlist.confirm = ¿Seguro?
+playlist.none = Aún no hay listas
+
+browser.add_to = Añadir a...
+browser.remove = Quitar
+browser.history = Historial
+
+deck.key_lock = KEY
+deck.quantize = QNT
+deck.slip = SLIP
+app.rec = REC
+status.recording = Grabando en {path}
+status.recording_saved = Grabación guardada: {path}
+status.sample_loaded = Sampler {slot}: {title}
+fx.on = ON

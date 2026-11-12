@@ -1,0 +1,86 @@
+@lang ja
+@name 日本語
+@dir ltr
+@version 1.0
+@fallback en
+
+app.title = DeckHand
+app.start_failed = DeckHand を起動できませんでした: {message}
+app.no_controller = コントローラーなし
+app.no_audio = オーディオ出力なし
+app.audio = {device}  {channels} ch  {khz, number, 1} kHz
+app.import_library = ライブラリを読み込む
+
+status.error = エラー: {message}
+status.added = 追加しました: {title}
+status.importing = ライブラリを読み込み中...
+status.import_needs_key = 読み込みにはキーファイル {path} が必要です
+status.imported = 新規 {added, plural, other {#曲}}、更新 {updated, plural, other {#曲}}、プレイリスト {playlists, plural, other {#件}} を読み込みました
+
+deck.name = デッキ {deck}
+deck.empty = デッキ {deck} は空です
+deck.loading = 読み込み中...
+deck.no_track = トラックが読み込まれていません
+deck.file_not_found = ファイルが見つかりません: {path}
+deck.playing_stop_first = デッキ {deck} は再生中です。読み込む前に停止してください
+deck.cue = キュー
+deck.play = 再生
+deck.pause = 一時停止
+deck.sync = シンク
+deck.loop = ループ {beats}
+deck.loop_fraction = ループ 1/{divisor}
+
+mixer.trim = トリム
+mixer.eq.high = ハイ
+mixer.eq.mid = ミッド
+mixer.eq.low = ロー
+mixer.filter = フィルター
+mixer.cue = キュー
+mixer.master = マスター
+mixer.crossfader = クロスフェーダー
+mixer.headphones = ヘッドホン
+mixer.headphone_mix = ミックス
+
+browser.collection = コレクション
+browser.search = 検索
+browser.tracks = {count, plural, other {#曲}}
+browser.load = {deck} に読み込む
+browser.col.title = タイトル
+browser.col.artist = アーティスト
+browser.col.bpm = BPM
+browser.col.key = キー
+browser.col.time = 時間
+browser.empty = トラックがありません。音声ファイルをここにドロップするか、ライブラリを読み込んでください。
+browser.no_matches = 一致なし
+
+app.export_usb = USBに書き出す
+status.exporting = 書き出し中 {done} / {total}  {title}
+status.export_failed = 書き出しに失敗しました: {message}
+status.exported = {tracks, plural, other {#曲}}と{playlists, plural, other {#件のプレイリスト}}を {path} に書き出しました
+status.exported_missing = {tracks, plural, other {#曲}}、{playlists, plural, other {#件のプレイリスト}}を書き出しました。{missing, plural, other {#件のファイル}}を読み込めませんでした
+status.added_to = {name} に追加しました
+
+export.all_playlists = すべてのプレイリスト
+export.title = {what} の書き出し先:
+
+playlist.add_list = + リスト
+playlist.add_folder = + フォルダ
+playlist.new_list = 新規プレイリスト
+playlist.new_folder = 新規フォルダ
+playlist.rename = 名前変更
+playlist.delete = 削除
+playlist.confirm = 本当に?
+playlist.none = プレイリストはまだありません
+
+browser.add_to = 追加先...
+browser.remove = 削除
+browser.history = 履歴
+
+deck.key_lock = KEY
+deck.quantize = QNT
+deck.slip = SLIP
+app.rec = REC
+status.recording = {path} に録音中
+status.recording_saved = 録音を保存しました: {path}
+status.sample_loaded = サンプラー {slot}: {title}
+fx.on = ON

@@ -7,9 +7,16 @@
 #include <cstring>
 #include <mutex>
 
+#include <chrono>
+#include <thread>
+
 #include "deckhand/core/spsc.hpp"
 #include "deckhand/log/log.hpp"
+#include "dsp.hpp"
+#include "fx.hpp"
 #include "miniaudio.h"
+#include "recorder.hpp"
+#include "stretch.hpp"
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -179,6 +186,21 @@ struct Deck {
   float g_trim_prev = 1, g_master_prev = 0, g_cue_prev = 0;
   float peak = 0;
 
+  // key lock, quantise, slip, reverse, auto-gain, colour effect
+  bool keylock = false, quantize = false, slip = false, slip_on = false, reverse = false;
+  float key_shift = 0;
+  double slip_pos = 0;
+  int hold_slot = -1;         // hot cue held while playing (slip excursion)
+  float autogain_db = 0, s_auto = 1.0f;
+  int color = 0;
+  double pos_prev = 0;        // play position at the end of the previous block (jump detection)
+  double xf_pos = 0;          // old read position while crossfading across a jump
+  int xf_left = 0;
+  float kl_w = 0;             // 0..1 blend between varispeed and the time-stretcher
+  bool st_live = false;
+  bool kl_hot = false;        // key lock engaged (hysteresis)
+  Stretcher st;
+
   Deck() {
     for (int i = 0; i < kHotCues; ++i) hot[i] = hot_end[i] = -1;
   }
@@ -211,6 +233,43 @@ struct Engine::Impl {
   Snapshot<DeckView> deck_views[kMaxDecks];
   Snapshot<MixerView> mixer_view;
 
+  // effects, sampler, taps
+  FxBus fxb[kMaxDecks];
+  FxBus master_fx;
+  double master_bpm_manual = 0, master_bpm = 0;
+  double master_clock = 0;
+
+  struct SamplerSlot {
+    LoadedSample* s = nullptr;
+    bool playing = false, loop = false, sync = false;
+    double pos = 0;
+    float env = 0, tgt = 0, vel = 1, gain = 0.8f;
+    double tail_pos = 0;
+    int tail_left = 0;
+    float tail_gain = 0;
+  };
+  SamplerSlot sampler_slots[kSamplerSlots];
+  float sampler_level = 0.8f;
+  SpscRing<LoadedSample*, 64> sample_garbage;
+  Snapshot<SamplerView> sampler_views[kSamplerSlots];
+
+  Recorder rec;
+  bool rec_pre = false;
+  FrameRing stream;
+  std::atomic<bool> stream_on{false};
+  bool stream_pre = false;
+  std::atomic<std::uint64_t> stream_dropped{0};
+
+  void prepare_audio() {
+    for (Deck& d : decks) d.st.prepare(sr);
+    for (FxBus& b : fxb) b.prepare(sr);
+    master_fx.prepare(sr);
+    std::size_t cap = 1;
+    while (cap < static_cast<std::size_t>(sr) * 3) cap <<= 1;
+    if (stream.capacity() != cap) stream.init(cap);
+    for (Deck& d : decks) d.c_low = d.c_mid = d.c_high = d.c_filter = -1;
+  }
+
   // ---- helpers (audio thread) ----------------------------------------------------
   const GridSection* section_at(const Deck& d) const {
     if (!d.trk || d.trk->grid.empty()) return nullptr;
@@ -233,6 +292,23 @@ struct Engine::Impl {
     if (!s || s->bpm <= 0) return -1;
     const double beats = (d.pos - s->first_beat_frame) / beat_frames(d);
     return beats - std::floor(beats);
+  }
+  const GridSection* section_for(const Deck& d, double p) const {
+    if (!d.trk || d.trk->grid.empty()) return nullptr;
+    const auto& g = d.trk->grid;
+    auto it = std::upper_bound(g.begin(), g.end(), p, [](double x, const GridSection& s) { return x < s.first_beat_frame; });
+    return it == g.begin() ? &g.front() : &*(it - 1);
+  }
+  // Nearest beat of the loaded grid (the position itself without a grid).
+  double snap_beat(const Deck& d, double p) const {
+    const GridSection* s = section_for(d, p);
+    if (!s || s->bpm <= 0) return p;
+    const double bf = 60.0 / s->bpm * d.trk->audio->sample_rate;
+    double q = s->first_beat_frame + std::round((p - s->first_beat_frame) / bf) * bf;
+    const auto& g = d.trk->grid;
+    for (const GridSection& n : g)
+      if (n.first_beat_frame > s->first_beat_frame && q > n.first_beat_frame) { q = n.first_beat_frame; break; }
+    return std::clamp(q, 0.0, static_cast<double>(d.trk->audio->frames));
   }
   double own_tempo(const Deck& d) const { return 1.0 + static_cast<double>(d.tempo_fader) * d.tempo_range; }
 
@@ -292,7 +368,7 @@ struct Engine::Impl {
     d.preview_slot = -1;
   }
 
-  void apply(const Command& c) {
+  void apply_core(const Command& c) {
     if (c.op == Op::Crossfader) { crossfader = std::clamp(c.f, 0.0f, 1.0f); return; }
     if (c.op == Op::HeadMix) { head_mix = std::clamp(c.f, 0.0f, 1.0f); return; }
     if (c.op == Op::HeadLevel) { head_level = std::clamp(c.f, 0.0f, 1.0f); return; }
@@ -314,8 +390,14 @@ struct Engine::Impl {
         d.speed = 0;
         d.bend = 0;
         d.amp = 0;
+        d.slip_on = d.reverse = false;
+        d.hold_slot = -1;
+        d.xf_left = 0;
+        d.kl_w = 0;
+        d.st_live = false;
         if (d.trk) {
           d.cue = d.pos = clamp_pos(d, d.trk->cue_point);
+          d.pos_prev = d.pos;
           for (int i = 0; i < kHotCues; ++i) {
             d.hot[i] = d.trk->hot_cue[i];
             d.hot_end[i] = d.trk->hot_loop_end[i];
@@ -381,18 +463,21 @@ struct Engine::Impl {
       case Op::HotCueDown: {
         if (c.i < 0 || c.i >= kHotCues) break;
         if (d.hot[c.i] < 0) {
-          d.hot[c.i] = d.pos;
+          const double at = d.quantize ? snap_beat(d, d.pos) : d.pos;
+          d.hot[c.i] = at;
           d.hot_end[c.i] = -1;
-          emit(EventType::HotCueSet, di, c.i, d.pos);
+          emit(EventType::HotCueSet, di, c.i, at);
           break;
         }
+        const bool was_playing = d.playing;
         if (!d.playing) {
           d.preview = true;
           d.preview_slot = c.i;
           d.preview_return = d.hot[c.i];
           d.playing = true;
         }
-        d.pos = d.hot[c.i];
+        d.pos = d.quantize ? snap_beat(d, d.hot[c.i]) : d.hot[c.i];
+        if (d.slip && was_playing) d.hold_slot = c.i;
         if (d.hot_end[c.i] > d.hot[c.i]) {
           d.loop_in = d.hot[c.i];
           d.loop_out = d.hot_end[c.i];
@@ -402,6 +487,7 @@ struct Engine::Impl {
       }
       case Op::HotCueUp:
         if (d.preview && d.preview_slot == c.i) end_preview(d);
+        if (d.hold_slot == c.i) d.hold_slot = -1;
         break;
       case Op::HotCueClear:
         if (c.i >= 0 && c.i < kHotCues && d.hot[c.i] >= 0) {
@@ -425,26 +511,28 @@ struct Engine::Impl {
         }
         break;
       case Op::LoopIn:
-        d.loop_in = d.pos;
+        d.loop_in = d.quantize ? snap_beat(d, d.pos) : d.pos;
         d.loop_out = -1;
         d.loop_active = false;
         break;
-      case Op::LoopOut:
-        if (d.loop_in >= 0 && d.pos > d.loop_in + tol) {
-          d.loop_out = d.pos;
+      case Op::LoopOut: {
+        const double at = d.quantize ? snap_beat(d, d.pos) : d.pos;
+        if (d.loop_in >= 0 && at > d.loop_in + tol) {
+          d.loop_out = at;
           d.loop_active = true;
           d.pos = d.loop_in;
         }
         break;
+      }
       case Op::LoopToggle:
       case Op::BeatLoop: {
-        const double len = std::max(c.f, 1.0f / 32) * beat_frames(d);
+        const double len = std::clamp(c.f, 1.0f / 32, 32.0f) * beat_frames(d);
         const bool same = d.loop_active && std::fabs((d.loop_out - d.loop_in) - len) < 2.0;
         if (d.loop_active && (c.op == Op::LoopToggle || same)) {
           d.loop_active = false;
           break;
         }
-        if (!d.loop_active) d.loop_in = d.pos;
+        if (!d.loop_active) d.loop_in = d.quantize ? snap_beat(d, d.pos) : d.pos;
         d.loop_out = d.loop_in + len;
         d.loop_active = true;
         if (d.pos >= d.loop_out) d.pos = d.loop_in;
@@ -466,7 +554,7 @@ struct Engine::Impl {
         }
         break;
       case Op::BeatJump:
-        d.pos = clamp_pos(d, d.pos + c.f * beat_frames(d));
+        d.pos = clamp_pos(d, (d.quantize ? snap_beat(d, d.pos) : d.pos) + c.f * beat_frames(d));
         if (d.touching) d.scratch_target = d.pos;
         break;
       case Op::CueCall: {
@@ -475,7 +563,7 @@ struct Engine::Impl {
           s.op = Op::LoopScale;
           s.deck = c.deck;
           s.f = c.i < 0 ? 0.5f : 2.0f;
-          apply(s);
+          apply_core(s);
           break;
         }
         const auto& m = d.trk->memory_cues;
@@ -498,6 +586,144 @@ struct Engine::Impl {
     }
   }
 
+  // ---- appended commands: key lock, quantise, slip, reverse, effects, sampler, recording ----------
+  static bool flag(bool cur, int i) { return i < 0 ? !cur : i != 0; }
+  bool exc_active(const Deck& d) const { return d.touching || d.loop_active || d.reverse || d.hold_slot >= 0; }
+  FxUnit* fx_unit(int target, int slot) {
+    if (slot < 0 || slot >= kFxSlots) return nullptr;
+    if (target == kFxMaster) return &master_fx.slot[slot];
+    if (target >= 0 && target < kMaxDecks) return &fxb[target].slot[slot];
+    return nullptr;
+  }
+  static EffectKind color_kind(int c) {
+    switch (c) {
+      case 1: return EffectKind::ColorNoise;
+      case 2: return EffectKind::ColorDubEcho;
+      case 3: return EffectKind::ColorCrush;
+      case 4: return EffectKind::ColorPitch;
+      case 5: return EffectKind::ColorSpace;
+      default: return EffectKind::None;
+    }
+  }
+
+  bool apply_ext(const Command& c) {
+    if (c.op < Op::KeyLock) return false;
+    const int di = c.deck;
+    Deck* dp = di < kMaxDecks ? &decks[di] : nullptr;
+    switch (c.op) {
+      case Op::KeyLock: if (dp) dp->keylock = flag(dp->keylock, c.i); return true;
+      case Op::KeyShift: if (dp) dp->key_shift = std::clamp(c.f, -12.0f, 12.0f); return true;
+      case Op::Quantize: if (dp) dp->quantize = flag(dp->quantize, c.i); return true;
+      case Op::Slip:
+        if (dp) {
+          dp->slip = flag(dp->slip, c.i);
+          if (!dp->slip) dp->slip_on = false;
+        }
+        return true;
+      case Op::Reverse: if (dp) dp->reverse = flag(dp->reverse, c.i); return true;
+      case Op::LoopExit: if (dp) dp->loop_active = false; return true;
+      case Op::LoopMove:
+        if (dp && dp->trk && dp->loop_in >= 0 && dp->loop_out > dp->loop_in) {
+          Deck& d = *dp;
+          const double len = d.loop_out - d.loop_in;
+          const double bf = 60.0 / std::max(1.0, bpm_at(d) > 0 ? bpm_at(d) : 120.0) * d.trk->audio->sample_rate;
+          const double ni = std::clamp(d.loop_in + c.f * bf, 0.0, std::max(0.0, static_cast<double>(d.trk->audio->frames) - len));
+          const double delta = ni - d.loop_in;
+          d.loop_in = ni;
+          d.loop_out = ni + len;
+          if (d.loop_active) d.pos = clamp_pos(d, d.pos + delta);
+        }
+        return true;
+      case Op::AutoGain: if (dp) dp->autogain_db = std::clamp(c.f, -24.0f, 12.0f); return true;
+      case Op::ColorFx:
+        if (dp) {
+          dp->color = std::clamp(c.i, 0, static_cast<int>(ColorFx::Count) - 1);
+          dp->c_filter = -1;
+          fxb[di].select(kFxSlots, color_kind(dp->color));
+        }
+        return true;
+      case Op::FxSelect: {
+        FxBus* b = c.deck == kFxMaster ? &master_fx : (c.deck < kMaxDecks ? &fxb[c.deck] : nullptr);
+        if (b && c.i >= 0 && c.i < kFxSlots) {
+          const int k = static_cast<int>(c.d);
+          b->select(c.i, k > 0 && k < static_cast<int>(EffectKind::Count) ? static_cast<EffectKind>(k) : EffectKind::None);
+        }
+        return true;
+      }
+      case Op::FxEnable: if (FxUnit* u = fx_unit(c.deck, c.i)) u->on = c.f > 0.5f; return true;
+      case Op::FxWet: if (FxUnit* u = fx_unit(c.deck, c.i)) u->wet = std::clamp(c.f, 0.0f, 1.0f); return true;
+      case Op::FxParam: if (FxUnit* u = fx_unit(c.deck, c.i)) u->param = std::clamp(c.f, 0.0f, 1.0f); return true;
+      case Op::FxTime:
+        if (FxUnit* u = fx_unit(c.deck, c.i)) {
+          u->beats = std::clamp(c.f, 1.0f / 16, 16.0f);
+          u->seconds = c.d > 0 ? c.d : 0;
+        }
+        return true;
+      case Op::MasterBpm: master_bpm_manual = std::max(0.0f, c.f); return true;
+      case Op::SamplerLoad:
+        if (c.deck < kSamplerSlots) {
+          SamplerSlot& s = sampler_slots[c.deck];
+          if (s.s) sample_garbage.push(s.s);
+          s = SamplerSlot{};
+          s.s = c.sample;
+          if (c.sample) {
+            s.loop = c.sample->loop;
+            s.sync = c.sample->sync;
+          }
+        } else if (c.sample) {
+          sample_garbage.push(c.sample);
+        }
+        return true;
+      case Op::SamplerTrigger:
+        if (c.deck < kSamplerSlots && sampler_slots[c.deck].s && sampler_slots[c.deck].s->audio) {
+          SamplerSlot& s = sampler_slots[c.deck];
+          if (s.playing) {
+            s.tail_pos = s.pos;
+            s.tail_left = 96;
+            s.tail_gain = s.env;
+          }
+          s.pos = 0;
+          s.env = 0;
+          s.vel = c.f > 0 ? std::min(c.f, 1.0f) : 1.0f;
+          s.tgt = s.vel;
+          s.playing = true;
+        }
+        return true;
+      case Op::SamplerStop:
+        for (int k = 0; k < kSamplerSlots; ++k)
+          if (c.i < 0 || c.i == k) sampler_slots[k].tgt = 0;
+        return true;
+      case Op::SamplerLevel: sampler_level = std::clamp(c.f, 0.0f, 1.0f); return true;
+      case Op::SamplerSync: if (c.deck < kSamplerSlots) sampler_slots[c.deck].sync = c.i != 0; return true;
+      case Op::SamplerLoop: if (c.deck < kSamplerSlots) sampler_slots[c.deck].loop = c.i != 0; return true;
+      case Op::SamplerGain: if (c.deck < kSamplerSlots) sampler_slots[c.deck].gain = std::clamp(c.f, 0.0f, 1.0f); return true;
+      case Op::RecStart: rec_pre = c.f > 0.5f; rec.start(); return true;
+      case Op::RecStop: rec.stop(); return true;
+      case Op::StreamEnable: stream_pre = c.f > 0.5f; stream_on.store(c.i != 0); return true;
+      default: return true;
+    }
+  }
+
+  void apply(const Command& c) {
+    Deck* d = c.deck < kMaxDecks ? &decks[c.deck] : nullptr;
+    const bool track = d && d->trk && d->slip;
+    const bool was = track && exc_active(*d);
+    const double before = track ? d->pos : 0;
+    const bool was_play = track && d->playing && !d->preview;
+    if (!apply_ext(c)) apply_core(c);
+    if (d && d->trk && d->slip) {
+      const bool now = exc_active(*d);
+      if (!was && now && was_play) {
+        d->slip_on = true;
+        d->slip_pos = before;
+      } else if (was && !now && d->slip_on) {
+        d->pos = clamp_pos(*d, d->slip_pos);
+        d->slip_on = false;
+      }
+      if (!d->playing) d->slip_on = false;
+    }
+  }
+
   // Raw deck audio (after the play/scratch transport, before the mixer) into buf.
   void render_deck(Deck& d, int di, float* buf, int n) {
     const TrackAudio& a = *d.trk->audio;
@@ -516,6 +742,7 @@ struct Engine::Impl {
       target = std::clamp((d.scratch_target - d.pos) / (kScratchTau * a.sample_rate), -12.0, 12.0);
     } else if (d.playing) {
       target = d.tempo_mult * (1.0 + bend);
+      if (d.reverse) target = -target;
     } else {
       target = bend * 6.0;  // nudging a stopped deck searches slowly
     }
@@ -523,9 +750,30 @@ struct Engine::Impl {
     if (!steady && target == 0 && std::fabs(d.speed) < 1e-4 && d.amp < 1e-4f) {
       d.speed = 0;
       d.amp = 0;
+      d.pos_prev = d.pos;
+      d.kl_w = 0;
+      d.st_live = false;
+      d.xf_left = 0;
       std::memset(buf, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
       return;
     }
+
+    // A jump of the play position (command, loop, slip return): crossfade from where we would have been.
+    if (d.pos != d.pos_prev && steady && d.amp > 0.01f) {
+      d.xf_pos = d.pos_prev;
+      d.xf_left = 128;
+      if (d.st_live) d.st.flush();
+    }
+    if (d.slip_on) d.slip_pos = std::min(d.slip_pos + d.tempo_mult * ratio * n, static_cast<double>(total));
+
+    // Key lock engages for steady forward play away from 1.0 (or with a key shift).
+    const double pitch = std::exp2(static_cast<double>(d.key_shift) / 12.0);
+    const double dev = std::fabs(d.tempo_mult - 1.0);
+    const bool away = dev > (d.kl_hot ? 0.0005 : 0.001) || d.key_shift != 0.0f;
+    const bool want = d.keylock && steady && target > 0 && away;
+    d.kl_hot = want;
+    const float w_target = want ? 1.0f : 0.0f;
+    const float w_step = 1.0f / 256.0f;
 
     const double slew = 1.0 - std::exp(-1.0 / (0.003 * sr));
     const float amp_slew = static_cast<float>(1.0 - std::exp(-1.0 / (0.004 * sr)));
@@ -533,15 +781,53 @@ struct Engine::Impl {
       d.speed += (target - d.speed) * slew;
       const float amp_target = steady ? 1.0f : static_cast<float>(std::min(1.0, std::fabs(d.speed) * 25.0));
       d.amp += (amp_target - d.amp) * amp_slew;
-      float l, r;
-      read_frame(a.pcm.data(), total, d.pos, l, r);
+      if (d.kl_w < w_target) d.kl_w = std::min(w_target, d.kl_w + w_step);
+      else if (d.kl_w > w_target) d.kl_w = std::max(w_target, d.kl_w - w_step);
+      if (d.kl_w > 0 && !d.st_live) {
+        d.st.reset();
+        d.st_live = true;
+      } else if (d.kl_w == 0) {
+        d.st_live = false;
+      }
+      float l = 0, r = 0;
+      if (d.kl_w < 1.0f) read_frame(a.pcm.data(), total, d.pos, l, r);
+      if (d.xf_left > 0) {
+        if (d.kl_w < 1.0f) {
+          float ol, orr;
+          read_frame(a.pcm.data(), total, d.xf_pos, ol, orr);
+          const float t = static_cast<float>(d.xf_left) / 128.0f;
+          l = l * (1.0f - t) + ol * t;
+          r = r * (1.0f - t) + orr * t;
+        }
+        d.xf_pos += d.speed * ratio;
+        --d.xf_left;
+      }
+      if (d.kl_w > 0.0f) {
+        float sl, sr_;
+        d.st.next(a.pcm.data(), total, ratio, d.pos, std::fabs(d.speed) * ratio, pitch, sl, sr_);
+        if (d.kl_w < 1.0f) {
+          l = l * (1.0f - d.kl_w) + sl * d.kl_w;
+          r = r * (1.0f - d.kl_w) + sr_ * d.kl_w;
+        } else {
+          l = sl;
+          r = sr_;
+        }
+      }
       buf[i * 2] = l * d.amp;
       buf[i * 2 + 1] = r * d.amp;
       d.pos += d.speed * ratio;
       if (d.loop_active && d.speed > 0 && d.pos >= d.loop_out) {
         const double len = d.loop_out - d.loop_in;
+        d.xf_pos = d.pos;
+        d.xf_left = 128;
+        if (d.st_live) d.st.flush();
         d.pos = len > 1 ? d.loop_in + std::fmod(d.pos - d.loop_out, len) : d.loop_in;
         if (d.touching) d.scratch_target -= len;
+      } else if (d.loop_active && d.speed < 0 && d.pos < d.loop_in) {
+        const double len = d.loop_out - d.loop_in;
+        d.xf_pos = d.pos;
+        d.xf_left = 128;
+        d.pos = len > 1 ? d.loop_out - std::fmod(d.loop_in - d.pos, len) : d.loop_out;
       }
       if (d.pos >= static_cast<double>(total)) {
         d.pos = static_cast<double>(total);
@@ -552,12 +838,17 @@ struct Engine::Impl {
         }
       } else if (d.pos < 0) {
         d.pos = 0;
+        if (d.playing && !d.touching && d.reverse) {
+          d.playing = d.preview = false;
+          target = 0;
+        }
       }
     }
+    d.pos_prev = d.pos;
   }
 
   // Trim, three-band EQ and the filter knob, in place. Also tracks the pre-fader level.
-  void process_channel(Deck& d, float* buf, int n) {
+  void process_channel(Deck& d, int di, float* buf, int n, const FxCtx& cx) {
     const float sm = 0.4f;
     d.s_trim += (d.trim - d.s_trim) * sm;
     d.s_high += (d.eq_high - d.s_high) * sm;
@@ -568,8 +859,9 @@ struct Engine::Impl {
     if (std::fabs(d.s_low - d.c_low) > 1e-4f) low_shelf(d.q_low, fs, 180.0, eq_db(d.c_low = d.s_low));
     if (std::fabs(d.s_mid - d.c_mid) > 1e-4f) peaking(d.q_mid, fs, 1000.0, 0.8, eq_db(d.c_mid = d.s_mid));
     if (std::fabs(d.s_high - d.c_high) > 1e-4f) high_shelf(d.q_high, fs, 5000.0, eq_db(d.c_high = d.s_high));
-    if (std::fabs(d.s_filter - d.c_filter) > 1e-4f) {
-      const float f = d.c_filter = d.s_filter;
+    const float fk = d.color == 0 ? d.s_filter : 0.5f;  // other colour effects take the knob instead
+    if (std::fabs(fk - d.c_filter) > 1e-4f) {
+      const float f = d.c_filter = fk;
       const double top = std::min(20000.0, fs * 0.45);
       if (f < 0.47f) {
         low_pass(d.q_filter, fs, top * std::pow(80.0 / top, (0.47 - f) / 0.47), 1.0);
@@ -579,7 +871,8 @@ struct Engine::Impl {
         d.q_filter.identity();
       }
     }
-    const float g0 = d.g_trim_prev, g1 = trim_gain(d.s_trim);
+    d.s_auto += (std::pow(10.0f, d.autogain_db / 20.0f) - d.s_auto) * sm;
+    const float g0 = d.g_trim_prev, g1 = trim_gain(d.s_trim) * d.s_auto;
     d.g_trim_prev = g1;
     float peak = 0;
     for (int i = 0; i < n; ++i) {
@@ -595,6 +888,58 @@ struct Engine::Impl {
       }
     }
     d.peak = std::max(peak, d.peak * static_cast<float>(std::exp(-static_cast<double>(n) / (0.3 * sr))));
+    if (d.color != 0) fxb[di].run_colour(buf, n, cx, d.s_filter);
+  }
+
+  FxCtx make_ctx(const Deck& d, FxBus& b, int n) {
+    FxCtx cx;
+    cx.sr = sr;
+    double bpm = d.bpm_now * d.tempo_mult;
+    if (bpm <= 0) bpm = master_bpm > 0 ? master_bpm : 120.0;
+    cx.bf = 60.0 / bpm * sr;
+    const GridSection* s = d.trk && d.playing && !d.touching ? section_at(d) : nullptr;
+    cx.beat_pos = s && s->bpm > 0 ? (d.pos - s->first_beat_frame) / beat_frames(d) : b.clock;
+    b.clock += n / cx.bf;
+    return cx;
+  }
+
+  void render_sampler(float* master, int n) {
+    const float lg = level_gain(sampler_level);
+    for (int k = 0; k < kSamplerSlots; ++k) {
+      SamplerSlot& s = sampler_slots[k];
+      if (!s.playing || !s.s || !s.s->audio) continue;
+      const TrackAudio& a = *s.s->audio;
+      const std::int64_t total = static_cast<std::int64_t>(a.frames);
+      const double rate = (s.sync && s.s->bpm > 0 && master_bpm > 0) ? std::clamp(master_bpm / s.s->bpm, 0.5, 2.0) : 1.0;
+      const double step = static_cast<double>(a.sample_rate) / sr * rate;
+      const float g = level_gain(s.gain) * s.s->gain * lg;
+      for (int i = 0; i < n; ++i) {
+        if (s.env < s.tgt) s.env = std::min(s.tgt, s.env + 1.0f / 96.0f);
+        else if (s.env > s.tgt) s.env = std::max(s.tgt, s.env - 1.0f / 256.0f);
+        if (s.tgt == 0 && s.env == 0) {
+          s.playing = false;
+          break;
+        }
+        float l, r;
+        read_frame(a.pcm.data(), total, s.pos, l, r);
+        master[i * 2] += l * s.env * g;
+        master[i * 2 + 1] += r * s.env * g;
+        if (s.tail_left > 0) {
+          float tl, tr;
+          read_frame(a.pcm.data(), total, s.tail_pos, tl, tr);
+          const float tg = s.tail_gain * static_cast<float>(s.tail_left) / 96.0f * g;
+          master[i * 2] += tl * tg;
+          master[i * 2 + 1] += tr * tg;
+          s.tail_pos += step;
+          --s.tail_left;
+        }
+        s.pos += step;
+        if (s.pos >= static_cast<double>(total)) {
+          if (s.loop) s.pos = std::fmod(s.pos, static_cast<double>(std::max<std::int64_t>(total, 1)));
+          else s.tgt = 0;
+        }
+      }
+    }
   }
 
   void render_chunk(float* out, int n) {
@@ -610,10 +955,17 @@ struct Engine::Impl {
       if (!d.trk) {
         d.peak = 0;
         d.g_master_prev = 0;
+        if (!fxb[di].busy()) continue;
+        std::memset(buf, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));  // let effect tails ring out
+        const FxCtx cx = make_ctx(d, fxb[di], n);
+        fxb[di].run_slots(buf, n, cx);
+        for (int i = 0; i < n * 2; ++i) master[i] += buf[i] * d.fader * d.fader;
         continue;
       }
       render_deck(d, di, buf, n);
-      process_channel(d, buf, n);
+      const FxCtx cx = make_ctx(d, fxb[di], n);
+      process_channel(d, di, buf, n, cx);
+      fxb[di].run_slots(buf, n, cx);
       const float xf = (di % 2 == 0) ? std::min(1.0f, 2.0f * (1.0f - crossfader)) : std::min(1.0f, 2.0f * crossfader);
       const float gm1 = d.fader * d.fader * xf, gm0 = d.g_master_prev;
       const float gc1 = d.pfl ? 1.0f : 0.0f, gc0 = d.g_cue_prev;
@@ -629,6 +981,24 @@ struct Engine::Impl {
       }
     }
 
+    // master tempo: the manual value, else the first playing deck
+    master_bpm = master_bpm_manual;
+    const Deck* lead = nullptr;
+    for (const Deck& d : decks)
+      if (d.trk && d.playing && d.bpm_now > 0) { lead = &d; break; }
+    if (master_bpm <= 0 && lead) master_bpm = lead->bpm_now * lead->tempo_mult;
+    render_sampler(master, n);
+    {
+      FxCtx cx;
+      cx.sr = sr;
+      const double bpm = master_bpm > 0 ? master_bpm : 120.0;
+      cx.bf = 60.0 / bpm * sr;
+      const GridSection* s = lead ? section_at(*lead) : nullptr;
+      cx.beat_pos = s && s->bpm > 0 ? (lead->pos - s->first_beat_frame) / beat_frames(*lead) : master_clock;
+      master_clock += n / cx.bf;
+      master_fx.run_slots(master, n, cx);
+    }
+
     const float mg1 = level_gain(master_level), mg0 = g_master_prev;
     const float hg1 = level_gain(head_level), hg0 = g_head_prev;
     g_master_prev = mg1;
@@ -636,11 +1006,16 @@ struct Engine::Impl {
     s_head_mix += (head_mix - s_head_mix) * 0.4f;
     const float mix = s_head_mix;
     float pl = 0, pr = 0;
+    float tap_pre[kChunk * 2], tap_post[kChunk * 2];
     for (int i = 0; i < n; ++i) {
       const float t = static_cast<float>(i) * inv_n;
       const float mg = mg0 + (mg1 - mg0) * t, hg = hg0 + (hg1 - hg0) * t;
       const float ml = soft_clip(master[i * 2] * mg), mr = soft_clip(master[i * 2 + 1] * mg);
       float* frame = out + static_cast<std::size_t>(i) * static_cast<std::size_t>(channels);
+      tap_pre[i * 2] = master[i * 2] * mg;
+      tap_pre[i * 2 + 1] = master[i * 2 + 1] * mg;
+      tap_post[i * 2] = ml;
+      tap_post[i * 2 + 1] = mr;
       frame[master_ch] = ml;
       frame[master_ch + 1] = mr;
       if (phones_ch >= 0) {
@@ -649,6 +1024,11 @@ struct Engine::Impl {
       }
       pl = std::max(pl, std::fabs(ml));
       pr = std::max(pr, std::fabs(mr));
+    }
+    if (rec.recording()) rec.push(rec_pre ? tap_pre : tap_post, static_cast<std::size_t>(n));
+    if (stream_on.load(std::memory_order_relaxed)) {
+      const std::size_t wr = stream.push(stream_pre ? tap_pre : tap_post, static_cast<std::size_t>(n));
+      if (wr < static_cast<std::size_t>(n)) stream_dropped.fetch_add(static_cast<std::size_t>(n) - wr, std::memory_order_relaxed);
     }
     const float decay = static_cast<float>(std::exp(-static_cast<double>(n) / (0.3 * sr)));
     peak_l = std::max(pl, peak_l * decay);
@@ -673,6 +1053,17 @@ struct Engine::Impl {
       v.fader = d.fader;
       v.tempo_range = d.tempo_range;
       v.level = d.peak;
+      v.key_lock = d.keylock;
+      v.key_lock_active = d.kl_w > 0;
+      v.quantize = d.quantize;
+      v.slip = d.slip;
+      v.slip_active = d.slip_on;
+      v.slip_position = d.slip_on ? d.slip_pos : -1;
+      v.reverse = d.reverse;
+      v.key_shift = d.key_shift;
+      v.auto_gain_db = d.autogain_db;
+      v.color_fx = d.color;
+      fxb[di].view(v.fx);
       if (d.trk) {
         v.track_id = d.trk->track_id;
         v.position = d.pos;
@@ -696,6 +1087,21 @@ struct Engine::Impl {
     m.master_level = master_level;
     m.peak_left = peak_l;
     m.peak_right = peak_r;
+    master_fx.view(m.fx);
+    m.sampler_level = sampler_level;
+    m.master_bpm = master_bpm;
+    m.stream_enabled = stream_on.load();
+    for (int k = 0; k < kSamplerSlots; ++k) {
+      const SamplerSlot& s = sampler_slots[k];
+      SamplerView sv;
+      sv.loaded = s.s != nullptr;
+      sv.playing = s.playing;
+      sv.loop = s.loop;
+      sv.sync = s.sync;
+      sv.position = s.pos;
+      sv.length = s.s && s.s->audio ? static_cast<double>(s.s->audio->frames) : 0;
+      sampler_views[k].write(sv);
+    }
     mixer_view.write(m);
   }
 
@@ -717,12 +1123,21 @@ struct Engine::Impl {
   }
 };
 
-Engine::Engine() : impl_(std::make_unique<Impl>()) { impl_->publish(); }
+Engine::Engine() : impl_(std::make_unique<Impl>()) {
+  impl_->prepare_audio();
+  impl_->publish();
+}
 
 Engine::~Engine() {
   stop();
   Command c;
-  while (impl_->commands.pop(c)) delete c.track;
+  impl_->rec.abort();
+  while (impl_->commands.pop(c)) {
+    delete c.track;
+    delete c.sample;
+  }
+  for (auto& sl : impl_->sampler_slots) delete sl.s;
+  { LoadedSample* ls = nullptr; while (impl_->sample_garbage.pop(ls)) delete ls; }
   for (Deck& d : impl_->decks) delete d.trk;
   collect_garbage();
 }
@@ -798,7 +1213,7 @@ bool Engine::start(const OutputConfig& config, std::string& error) {
                  config.phones_channel != s.master_ch)
                     ? config.phones_channel
                     : -1;
-  for (Deck& d : s.decks) d.c_low = d.c_mid = d.c_high = d.c_filter = -1;  // rebuild filters for this rate
+  s.prepare_audio();  // rebuild filters, stretchers and effect memory for this rate
 
   if (ma_device_start(&s.dev) != MA_SUCCESS) {
     error = "could not start audio device: " + s.dev_name;
@@ -828,6 +1243,7 @@ void Engine::send(const Command& c) {
   if (!impl_->commands.push(c)) {
     DH_LOG(Warn, "engine command queue full; dropped a command");
     delete c.track;
+    delete c.sample;
   }
 }
 
@@ -839,6 +1255,59 @@ void Engine::load(int deck, std::unique_ptr<LoadedTrack> track) {
   send(c);
 }
 
+SamplerView Engine::sampler(int slot) const { return impl_->sampler_views[std::clamp(slot, 0, kSamplerSlots - 1)].read(); }
+
+void Engine::sampler_load(int slot, std::unique_ptr<LoadedSample> sample) {
+  Command c;
+  c.op = Op::SamplerLoad;
+  c.deck = static_cast<std::uint8_t>(std::clamp(slot, 0, 255));
+  c.sample = sample.release();
+  send(c);
+}
+
+bool Engine::record_open(const std::string& path, bool pre_clip, std::string& error) {
+  if (!impl_->rec.open(path, impl_->sr, error)) return false;
+  Command c;
+  c.op = Op::RecStart;
+  c.f = pre_clip ? 1.0f : 0.0f;
+  send(c);
+  return true;
+}
+void Engine::record_stop() {
+  Command c;
+  c.op = Op::RecStop;
+  send(c);
+}
+void Engine::record_close() {
+  record_stop();
+  for (int i = 0; i < 400 && impl_->rec.state() != Recorder::Done && impl_->rec.state() != Recorder::Idle; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  if (impl_->rec.state() != Recorder::Done && impl_->rec.state() != Recorder::Idle) impl_->rec.abort();
+  impl_->rec.close();
+}
+RecorderStatus Engine::recorder_status() const {
+  RecorderStatus st;
+  const Recorder& r = impl_->rec;
+  const int s = r.state();
+  st.open = s == Recorder::Armed || s == Recorder::Recording || s == Recorder::Stopping;
+  st.recording = s == Recorder::Recording;
+  st.finished = r.finished();
+  st.error = r.error();
+  st.seconds = r.seconds();
+  st.dropped_frames = r.dropped();
+  st.bytes = r.bytes();
+  return st;
+}
+void Engine::stream_enable(bool on, bool pre_clip) {
+  Command c;
+  c.op = Op::StreamEnable;
+  c.i = on ? 1 : 0;
+  c.f = pre_clip ? 1.0f : 0.0f;
+  send(c);
+}
+std::size_t Engine::stream_read(float* out, std::size_t max_frames) { return impl_->stream.pop(out, max_frames); }
+std::uint64_t Engine::stream_dropped_frames() const { return impl_->stream_dropped.load(); }
+
 DeckView Engine::deck(int index) const { return impl_->deck_views[std::clamp(index, 0, kMaxDecks - 1)].read(); }
 MixerView Engine::mixer() const { return impl_->mixer_view.read(); }
 bool Engine::poll(EngineEvent& out) { return impl_->events.pop(out); }
@@ -846,6 +1315,8 @@ bool Engine::poll(EngineEvent& out) { return impl_->events.pop(out); }
 void Engine::collect_garbage() {
   LoadedTrack* t = nullptr;
   while (impl_->garbage.pop(t)) delete t;
+  LoadedSample* ls = nullptr;
+  while (impl_->sample_garbage.pop(ls)) delete ls;
 }
 
 void Engine::configure_offline(std::uint32_t sample_rate, int channels) {
@@ -853,6 +1324,7 @@ void Engine::configure_offline(std::uint32_t sample_rate, int channels) {
   impl_->channels = channels;
   impl_->master_ch = 0;
   impl_->phones_ch = channels >= 4 ? 2 : -1;
+  impl_->prepare_audio();
 }
 
 void Engine::render(float* out, std::uint32_t frames) { impl_->render(out, frames); }

@@ -1,0 +1,163 @@
+# DeckHand example mapping: a generic two-deck controller.
+# Every directive and argument of the format appears at least once. The MIDI numbers are made up
+# for illustration; this is not a real device and nothing here has been tested on hardware.
+# Copy it, rename it to <device>.dhmap, change `match` and the numbers.
+#
+# Syntax: one directive per line, "#" starts a comment, bytes are hex, decks, slots and pads count from 1.
+
+name  "Generic 2-deck example"
+match "Example Controller"            # case-insensitive part of the MIDI device name
+
+audio match=Example master=1 phones=3 # prefer this audio device; first channel of each stereo pair
+jog   ticks_per_rev=720               # jog messages for one platter revolution
+init  90 17 7F                        # bytes sent when the device connects (any number of init lines)
+
+# Soft takeover and a centre dead zone for every absolute control. Rules can override with
+# pickup=0|1 and deadzone=X.
+defaults pickup=1 deadzone=0.02
+
+# Modifiers: a held button. Without deck= it is global; with deck=N it only affects deck N.
+in  button 90 30 modifier name=shift
+in  button 91 30 modifier name=shift deck=2         # a second shift only for deck 2 (same name)
+out 90 30 modifier name=shift                       # LED shows the modifier is held
+
+# ---- transport (kinds: button, abs, abs14, rel, rel2) ----------------------------
+in button 90 01 play deck=1
+in button 90 02 cue deck=1
+in button 90 03 sync deck=1
+in button 90 04 tempo_range deck=1
+in button 90 05 seek_start deck=1
+in button 90 06 jog_touch deck=1
+in rel    B0 10 jog deck=1 surface=top               # surface=top|side
+in rel    B0 11 jog deck=1 surface=side scale=8
+in abs14  B0 00 20 tempo deck=1 invert=1             # MSB then LSB controller numbers
+in button 90 07 pfl deck=1
+in button 90 08 load deck=1
+in rel2   B0 40 browse scale=3
+in button 90 09 browse_press
+
+# ---- loops, cues -----------------------------------------------------------------
+in button 90 10 loop_in deck=1
+in button 90 11 loop_out deck=1
+in button 90 12 loop_toggle deck=1 beats=4
+in button 90 13 reloop deck=1
+in button 90 14 loop_exit deck=1
+in button 90 15 loop_halve deck=1
+in button 90 16 loop_double deck=1
+in button 90 17 loop_move deck=1 beats=-1
+in button 90 18 loop_move deck=1 beats=1
+in button 90 19 cue_call deck=1 dir=1
+in rel    B0 12 loop_move deck=1 scale=0.5           # an encoder moves the loop (beats per tick)
+
+# ---- mixer -----------------------------------------------------------------------
+in abs14 B0 01 21 trim deck=1
+in abs   B0 02 eq_high deck=1
+in abs   B0 03 eq_mid deck=1
+in abs   B0 04 eq_low deck=1 pickup=0                # this one never waits for a crossing
+in abs   B0 05 filter deck=1 deadzone=0.04           # centre detent
+in abs   B0 06 fader deck=1
+in abs   B0 07 crossfader
+in abs   B0 08 head_mix
+in abs   B0 09 head_level
+in abs   B0 0A master_level
+in abs   B0 0B auto_gain deck=1 lo=-12 hi=6          # lo= and hi= set the range a knob sweeps (dB)
+
+# ---- flags: toggles, or value=0|1 to set, or hold=1 for momentary ------------------
+in button 90 20 key_lock deck=1
+in button 90 21 quantize deck=1
+in button 90 22 slip deck=1
+in button 90 23 reverse deck=1 hold=1                # on while held
+in button 90 24 quantize deck=1 value=1 when=shift   # shift + button: force on
+out 90 20 key_lock deck=1
+out 90 21 quantize deck=1
+out 90 22 slip deck=1
+out 90 23 reverse deck=1
+
+# ---- key shift, master tempo ------------------------------------------------------
+in button 90 25 key_shift deck=1 dir=1               # one semitone up
+in button 90 26 key_shift deck=1 dir=-1
+in button 90 27 key_shift deck=1 semitones=0 when=shift   # shift + button: reset
+in abs    B0 0C key_shift deck=2 lo=-6 hi=6          # a knob sweeps -6..+6, rounded to whole semitones
+in button 90 28 master_bpm value=128                 # value=0 follows the decks
+in rel    B0 13 master_bpm scale=0.5                 # encoder: BPM per tick
+
+# ---- colour effect (the filter knob's effect) --------------------------------------
+in button 90 29 color_fx deck=1 dir=1                # next
+in button 90 2A color_fx deck=1 effect=dub_echo      # filter noise dub_echo crush pitch space
+
+# ---- effect slots (unit=deck|master, slot=1..3) ------------------------------------
+in button 90 40 fx_select unit=master slot=1 dir=1   # next effect
+in button 90 41 fx_select unit=master slot=1 dir=-1  # previous
+in button 90 42 fx_select unit=master slot=1 effect=echo   # absolute (see effect names in docs)
+in rel    B0 14 fx_select unit=master slot=2         # encoder steps through the effects
+in button 90 43 fx_on unit=master slot=1
+in button 90 44 fx_on unit=deck deck=1 slot=2 hold=1
+in abs    B0 0D fx_wet unit=master slot=1
+in abs    B0 0E fx_param unit=master slot=1
+in button 90 45 fx_time unit=master slot=1 dir=1     # 1/16 ... 16 beats, one step longer
+in button 90 46 fx_time unit=master slot=1 dir=-1
+in button 90 47 fx_time unit=master slot=1 beats=0.5
+out 90 43 fx_on unit=master slot=1
+out 90 44 fx_on deck=1 slot=2 effect=echo            # lit only while that effect runs
+
+# ---- sampler -----------------------------------------------------------------------
+in button 90 50 sampler slot=1                       # press = trigger; with shift held = stop
+in button 90 51 sampler slot=2 offset=8              # offset= shifts the slot (per-deck banks)
+in button 90 52 sampler_stop slot=1
+in button 90 53 sampler_stop                         # no slot: stop everything
+in abs    B0 0F sampler_level
+out 90 50 sampler_playing slot=1
+
+# ---- pads: pad_mode selects a mode per deck, mode= limits a rule to one mode --------
+in button 90 60 pad_mode deck=1 mode=hotcue          # modes: hotcue padfx1 beatjump sampler keyboard padfx2 beatloop keyshift
+in button 90 61 pad_mode deck=1 mode=beatloop
+in button 90 62 pad_mode deck=1 mode=beatjump
+in button 90 63 pad_mode deck=1 mode=sampler
+in button 90 64 pad_mode deck=1 mode=keyboard
+in button 90 65 pad_mode deck=1 mode=keyshift
+in button 90 66 pad_mode deck=1 mode=padfx1
+in button 90 67 pad_mode deck=1 mode=padfx2
+out 90 60 pad_mode deck=1 mode=hotcue
+out 90 61 pad_mode deck=1 mode=beatloop
+out 90 62 pad_mode deck=1 mode=beatjump
+out 90 63 pad_mode deck=1 mode=sampler
+out 90 64 pad_mode deck=1 mode=keyboard
+out 90 65 pad_mode deck=1 mode=keyshift
+out 90 66 pad_mode deck=1 mode=padfx1
+out 90 67 pad_mode deck=1 mode=padfx2
+
+# The same eight pads (notes 9n 00-07) do something different in each mode.
+in button 97 00 hotcue deck=1 slot=1 mode=hotcue
+in button 97 01 hotcue deck=1 slot=2 mode=hotcue
+in button 97 02 hotcue_clear deck=1 slot=3 mode=hotcue when=shift
+in button 97 00 beatloop deck=1 slot=1 mode=beatloop          # beats default: 0.25, 0.5, 1, 2, 4, 8, 16, 32
+in button 97 01 beatloop deck=1 slot=2 mode=beatloop beats=3  # beats= overrides
+in button 97 00 beatjump deck=1 slot=1 mode=beatjump          # default: -1, +1, -2, +2, -4, +4, -8, +8
+in button 97 01 beatjump deck=1 slot=2 mode=beatjump beats=16
+in button 97 00 sampler deck=1 slot=1 mode=sampler
+in button 97 01 sampler deck=1 slot=2 mode=sampler offset=8
+in button 97 00 keyboard deck=1 slot=1 mode=keyboard semitones=0   # key shift + play the hot cue pressed last
+in button 97 01 keyboard deck=1 slot=2 mode=keyboard               # default semitones = pad number - 1
+in button 97 00 keyshift deck=1 slot=1 mode=keyshift semitones=-3  # sets the key shift; default pad number - 5
+in button 97 00 padfx deck=1 pad=1 mode=padfx1 effect=echo beats=1 slot=1
+in button 97 01 padfx deck=1 pad=2 mode=padfx1 effect=roll beats=0.25 slot=1
+in button 97 00 padfx deck=1 pad=1 mode=padfx2 effect=vinyl_brake      # release effect: acts while held
+in button 97 01 padfx deck=1 pad=2 mode=padfx2 unit=master effect=reverb
+
+# Pad LEDs: out rules with mode= are dark unless that mode is selected.
+out 97 00 hotcue deck=1 slot=1 mode=hotcue
+out 97 00 loop_beats deck=1 beats=0.25 mode=beatloop
+out 97 00 loaded deck=1 mode=beatjump
+out 97 00 sampler_playing slot=1 mode=sampler
+out 97 00 key_shift deck=1 slot=1 mode=keyboard semitones=0
+out 97 00 fx_on deck=1 slot=1 effect=echo mode=padfx1
+
+# ---- other LED states (blink=1, on=XX off=XX) ---------------------------------------
+out 90 01 playing deck=1 blink=1
+out 90 02 cue deck=1 blink=1
+out 90 03 sync deck=1
+out 90 07 pfl deck=1
+out 90 10 loop deck=1
+out 90 11 loop_in deck=1 on=7F off=00
+out 9F 00 loaded deck=1
+out B0 20 level deck=1 min=10 max=7F                 # meter: min = lowest lit value, max = full scale

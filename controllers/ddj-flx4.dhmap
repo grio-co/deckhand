@@ -7,6 +7,8 @@
 #   jog                 jog wheel resolution
 #   init <bytes>        message sent to the device when it connects
 #   in  <kind> <status> <data1> [<lsb data1>] <action> [key=value ...]
+#   defaults pickup=1 deadzone=0.03    optional: soft takeover / centre dead zone for all absolute controls
+#   modifier / when=shift              held buttons and rules that depend on them (see docs/CONTROLLERS.md)
 #         kinds: button, abs (7-bit), abs14 (MSB + LSB), rel (0x40 = no movement),
 #                rel2 (0x01.. = clockwise, 0x7F.. = counter-clockwise)
 #   out <status> <data1> <state> [key=value ...]     LED or meter driven by a deck state
@@ -24,6 +26,24 @@ jog ticks_per_rev=720
 # Vinyl mode on for both decks (the unit cannot change this itself).
 init 90 17 7F
 init 91 17 7F
+
+# Pad modes: this unit sends different notes per pad mode, so the rules below are selected by note and
+# need no mode=. The pad_mode buttons still drive the mode LEDs and the hub's per-deck mode.
+# Soft takeover is not enabled here: the faders are physical, so they should act as soon as they are
+# touched. To try it, add: defaults pickup=1
+#
+# TODO(midi-numbers): the following are not in the message list this file was written from, so no
+# numbers are guessed. Fill in the notes, then uncomment (deck 1 shown; deck 2 is the same on 91/99/9A):
+#   padfx1 pads    in button 97 ?? padfx deck=1 pad=1 effect=echo beats=1            (pads 1-8, mode=padfx1)
+#   padfx2 pads    in button 97 ?? padfx deck=1 pad=1 effect=roll beats=0.25         (pads 1-8, mode=padfx2)
+#   sampler pads   in button 97 ?? sampler deck=1 slot=1                             (pads 1-8; deck 2: offset=8)
+#   keyboard pads  in button 97 ?? keyboard deck=1 slot=1 semitones=0                (pads 1-8)
+#   key shift pads in button 97 ?? keyshift deck=1 slot=1 semitones=-4               (pads 1-8)
+#   KEY LOCK       in button 90 ?? key_lock deck=1       out 90 ?? key_lock deck=1
+#   SHIFT button   in button 90 ?? modifier name=shift deck=1   (then rules can use when=shift)
+#   CFX knobs / CFX selection   in abs14 B6 ?? ?? filter ...; in button .. color_fx deck=1 dir=1
+#   BEAT FX section (select, time, level, on)   fx_select / fx_time / fx_wet / fx_on unit=master
+#   sampler volume    in abs14 B6 ?? ?? sampler_level
 
 # ---- deck 1 ----------------------------------------------------------------
 in button 90 0B play deck=1
@@ -116,21 +136,21 @@ out 97 05 hotcue deck=1 slot=6
 out 97 06 hotcue deck=1 slot=7
 out 97 07 hotcue deck=1 slot=8
 out 97 20 loaded deck=1
-out 97 60 loaded deck=1
+out 97 60 loop_beats deck=1 beats=0.25
 out 97 21 loaded deck=1
-out 97 61 loaded deck=1
+out 97 61 loop_beats deck=1 beats=0.5
 out 97 22 loaded deck=1
-out 97 62 loaded deck=1
+out 97 62 loop_beats deck=1 beats=1
 out 97 23 loaded deck=1
-out 97 63 loaded deck=1
+out 97 63 loop_beats deck=1 beats=2
 out 97 24 loaded deck=1
-out 97 64 loaded deck=1
+out 97 64 loop_beats deck=1 beats=4
 out 97 25 loaded deck=1
-out 97 65 loaded deck=1
+out 97 65 loop_beats deck=1 beats=8
 out 97 26 loaded deck=1
-out 97 66 loaded deck=1
+out 97 66 loop_beats deck=1 beats=16
 out 97 27 loaded deck=1
-out 97 67 loaded deck=1
+out 97 67 loop_beats deck=1 beats=32
 out B0 02 level deck=1 min=26 max=7F
 
 # ---- deck 2 ----------------------------------------------------------------
@@ -224,21 +244,21 @@ out 99 05 hotcue deck=2 slot=6
 out 99 06 hotcue deck=2 slot=7
 out 99 07 hotcue deck=2 slot=8
 out 99 20 loaded deck=2
-out 99 60 loaded deck=2
+out 99 60 loop_beats deck=2 beats=0.25
 out 99 21 loaded deck=2
-out 99 61 loaded deck=2
+out 99 61 loop_beats deck=2 beats=0.5
 out 99 22 loaded deck=2
-out 99 62 loaded deck=2
+out 99 62 loop_beats deck=2 beats=1
 out 99 23 loaded deck=2
-out 99 63 loaded deck=2
+out 99 63 loop_beats deck=2 beats=2
 out 99 24 loaded deck=2
-out 99 64 loaded deck=2
+out 99 64 loop_beats deck=2 beats=4
 out 99 25 loaded deck=2
-out 99 65 loaded deck=2
+out 99 65 loop_beats deck=2 beats=8
 out 99 26 loaded deck=2
-out 99 66 loaded deck=2
+out 99 66 loop_beats deck=2 beats=16
 out 99 27 loaded deck=2
-out 99 67 loaded deck=2
+out 99 67 loop_beats deck=2 beats=32
 out B1 02 level deck=2 min=26 max=7F
 
 # ---- mixer and browse -----------------------------------------------------------
