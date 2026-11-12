@@ -117,8 +117,12 @@ inline void read_frame(const float* pcm, std::int64_t frames, double pos, float&
 
 // On iOS the shell owns the audio session (category, activation, routing); the engine must
 // leave it alone, or the system's default play-and-record session is forced on the app.
-ma_result init_context(ma_context* ctx) {
+ma_result init_context(ma_context* ctx, bool null_backend = false) {
   ma_context_config config = ma_context_config_init();
+  if (null_backend) {
+    const ma_backend only_null[] = {ma_backend_null};
+    return ma_context_init(only_null, 1, &config, ctx);
+  }
 #if defined(__APPLE__) && TARGET_OS_IPHONE
   config.coreaudio.sessionCategory = ma_ios_session_category_none;
   config.coreaudio.noAudioSessionActivate = MA_TRUE;
@@ -1141,11 +1145,11 @@ struct Engine::Impl {
         d.st_live = false;
       }
       float l = 0, r = 0;
-      if (d.kl_w < 1.0f) read_frame(a.pcm.data(), total, d.pos, l, r);
+      if (d.kl_w < 1.0f) read_frame(a.data(), total, d.pos, l, r);
       if (d.xf_left > 0) {
         if (d.kl_w < 1.0f) {
           float ol, orr;
-          read_frame(a.pcm.data(), total, d.xf_pos, ol, orr);
+          read_frame(a.data(), total, d.xf_pos, ol, orr);
           const float t = static_cast<float>(d.xf_left) / 128.0f;
           l = l * (1.0f - t) + ol * t;
           r = r * (1.0f - t) + orr * t;
@@ -1155,7 +1159,7 @@ struct Engine::Impl {
       }
       if (d.kl_w > 0.0f) {
         float sl, sr_;
-        d.st.next(a.pcm.data(), total, ratio, d.pos, std::fabs(d.speed) * ratio, pitch, sl, sr_);
+        d.st.next(a.data(), total, ratio, d.pos, std::fabs(d.speed) * ratio, pitch, sl, sr_);
         if (d.kl_w < 1.0f) {
           l = l * (1.0f - d.kl_w) + sl * d.kl_w;
           r = r * (1.0f - d.kl_w) + sr_ * d.kl_w;
@@ -1272,12 +1276,12 @@ struct Engine::Impl {
           break;
         }
         float l, r;
-        read_frame(a.pcm.data(), total, s.pos, l, r);
+        read_frame(a.data(), total, s.pos, l, r);
         master[i * 2] += l * s.env * g;
         master[i * 2 + 1] += r * s.env * g;
         if (s.tail_left > 0) {
           float tl, tr;
-          read_frame(a.pcm.data(), total, s.tail_pos, tl, tr);
+          read_frame(a.data(), total, s.tail_pos, tl, tr);
           const float tg = s.tail_gain * static_cast<float>(s.tail_left) / 96.0f * g;
           master[i * 2] += tl * tg;
           master[i * 2 + 1] += tr * tg;
@@ -1513,7 +1517,7 @@ std::vector<std::string> Engine::output_devices() {
 bool Engine::start(const OutputConfig& config, std::string& error) {
   stop();
   Impl& s = *impl_;
-  if (init_context(&s.ctx) != MA_SUCCESS) {
+  if (init_context(&s.ctx, config.null_backend) != MA_SUCCESS) {
     error = "could not initialise the audio system";
     return false;
   }
@@ -1548,7 +1552,7 @@ bool Engine::start(const OutputConfig& config, std::string& error) {
   ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
   cfg.playback.pDeviceID = id;
   cfg.playback.format = ma_format_f32;
-  cfg.playback.channels = native_channels >= 4 ? std::min<ma_uint32>(native_channels, 8) : 2;
+  cfg.playback.channels = native_channels >= 4 && !config.null_backend ? std::min<ma_uint32>(native_channels, 8) : 2;
   cfg.sampleRate = 0;  // use the device's own rate
   cfg.periodSizeInFrames = config.period_frames;
   cfg.performanceProfile = ma_performance_profile_low_latency;

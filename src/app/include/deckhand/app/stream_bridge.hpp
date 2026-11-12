@@ -13,7 +13,7 @@ class StreamBridge {
  public:
   // track_of(deck, row) fills the row of the track loaded on a deck; false if none. Called from
   // the bridge's own thread. Settings are read once from the library ("stream.*", "obs.*").
-  StreamBridge(Engine& engine, const std::string& data_dir, std::function<bool(int, TrackRow&)> track_of);
+  StreamBridge(IEngine& engine, const std::string& data_dir, std::function<bool(int, TrackRow&)> track_of);
   ~StreamBridge();
   std::string describe() const;  // short status for the UI, empty when everything is off
 

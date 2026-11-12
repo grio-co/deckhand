@@ -154,3 +154,6 @@ relink.help = パスが元のフォルダーで始まるすべてのトラック
 relink.apply = 再リンク
 relink.done = {count, plural, other {#曲}}を再リンクしました
 relink.none = そのフォルダーで始まるパスはありません
+
+status.synced = 同期完了: {sent} 件送信、{files} 件受信
+status.sync_failed = 同期に失敗しました: {message}

@@ -19,6 +19,10 @@ full control API.
 - Mixer and effects: trim, three-band EQ, filter and five other colour effects, faders,
   crossfader, master, separate headphone cue bus; three effect slots per channel and on the
   master (14 beat effects); 16-slot sampler.
+- Crash isolation: the audio engine is a separate process that owns the sound device,
+  recorder and controllers. If the UI crashes the music keeps playing, and the UI re-attaches.
+- Library sync between machines through any folder your cloud drive or a USB stick replicates
+  ([docs/SYNC.md](docs/SYNC.md)); set `sync.folder` (no settings screen for it yet).
 - Recording of the master output to 24-bit WAV (the file stays playable if the app is killed).
 - USB export for club players: database, analysis files and audio, from the app, the command
   line or the API. Written from public format documentation and verified by a read-back parser;
@@ -38,7 +42,7 @@ full control API.
 - Panels for settings, sampler, MIDI learn and track details.
 
 ## Goals
-- **Stable.** The audio path never blocks; the engine is designed to run as its own process.
+- **Stable.** The audio path never blocks; the engine runs as its own process.
 - **Skinnable.** Winamp-style themes, from familiar to exotic. A skin is declarative data, never code.
 - **Portable.** Run it from a USB stick.
 - **Compatible.** Export playlists and analysis to CDJ-3000 USB drives.

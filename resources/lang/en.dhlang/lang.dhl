@@ -154,3 +154,6 @@ relink.help = Every track whose path starts with the old folder is moved to the 
 relink.apply = Relink
 relink.done = Relinked {count, plural, one {# track} other {# tracks}}
 relink.none = No track path starts with that folder
+
+status.synced = Synced: {sent} changes sent, {files} received
+status.sync_failed = Sync failed: {message}

@@ -56,10 +56,16 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 - Linux port: CMake support, FFmpeg decoder, ALSA sequencer MIDI, SDL3 + OpenGL shell with
   Pango text, build scripts and a container build ([docs/LINUX.md](docs/LINUX.md)).
 - Controllers: effect units assignable to a deck or the master, master cue, learn choices.
+- The audio engine runs in its own signed helper process on macOS (`deckhand-engine`): it owns
+  the output device, recorder and controllers, keeps playing if the UI crashes or is killed, and
+  a relaunched UI re-attaches to the running decks. In-process mode remains (`engine.process`).
+- Library sync without a server: per-device change logs in any replicated folder or USB stick,
+  merged field by field with convergent playlist ordering ([docs/SYNC.md](docs/SYNC.md)).
 - Build option `DECKHAND_WITH_API` to leave out the API server where OpenSSL is unavailable.
 - Tests for the library, analysis, API, export, effects, scheduling, languages, skins and streaming.
 
 ### Fixed
+- The macOS build script no longer bundles a stale core library after a compile error.
 - iOS: the engine no longer overrides the audio session the shell configures.
 
 ### Changed

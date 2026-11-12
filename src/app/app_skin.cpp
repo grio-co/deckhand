@@ -107,7 +107,7 @@ bool App::import_available() {
 
 // ---- the skin host ------------------------------------------------------------------------------------
 bool App::read_number(const ui::Target& t, double& v) {
-  if (t.type == ui::Target::Type::Control) return read_control(engine_, t.name, v);
+  if (t.type == ui::Target::Type::Control) return read_control(*engine_, t.name, v);
   if (t.type != ui::Target::Type::Info) return false;
   const int d = t.deck;
   if (t.name == "ch_level" && d >= 0 && d < kMaxDecks) {
@@ -186,7 +186,7 @@ bool App::read_text(const ui::Target& t, std::string& out) {
     out = search_;
   } else if (t.type == ui::Target::Type::Action) {
     if (n == "rec") {
-      const RecorderStatus rec = engine_.recorder_status();
+      const RecorderStatus rec = engine_->recorder_status();
       out = rec.recording ? T("app.rec") + " " + clock_text(rec.seconds) : T("app.rec");
     } else if (n == "language") {
       out = i18n_.language();
@@ -211,7 +211,7 @@ bool App::read_flag(const ui::Target& t) {
         t.special == ui::Special::SetValue)
       return false;
     double v = 0;
-    return read_control(engine_, t.name, v) && v != 0;
+    return read_control(*engine_, t.name, v) && v != 0;
   }
   const std::string& n = t.name;
   if (t.type == ui::Target::Type::Info) {
@@ -227,7 +227,7 @@ bool App::read_flag(const ui::Target& t) {
     return false;
   }
   if (t.type == ui::Target::Type::Action) {
-    if (n == "rec") return engine_.recorder_status().recording;
+    if (n == "rec") return engine_->recorder_status().recording;
     if (n == "export") return panel_ == Panel::Export;
     if (n == "settings") return panel_ == Panel::Settings;
     if (n == "sampler") return panel_ == Panel::Sampler;
@@ -247,44 +247,44 @@ void App::press(const ui::Target& t) {
   double cur = 0;
   switch (t.special) {
     case ui::Special::TempoRange: {
-      read_control(engine_, t.name, cur);
+      read_control(*engine_, t.name, cur);
       std::size_t next = 0;
       for (std::size_t i = 0; i < std::size(kRanges); ++i)
         if (std::fabs(kRanges[i] - cur) < 0.005) next = (i + 1) % std::size(kRanges);
-      apply_control(engine_, t.name, true, kRanges[next], error);
+      apply_control(*engine_, t.name, true, kRanges[next], error);
       return;
     }
     case ui::Special::FxSelect: {
-      read_control(engine_, t.name, cur);
+      read_control(*engine_, t.name, cur);
       int next = static_cast<int>(cur);
       do {
         next = (next + 1) % static_cast<int>(EffectKind::Count);
       } while (next != 0 && effect_info(static_cast<EffectKind>(next)) && effect_info(static_cast<EffectKind>(next))->colour);
-      apply_control(engine_, t.name, true, next, error);
+      apply_control(*engine_, t.name, true, next, error);
       return;
     }
     case ui::Special::Step:
-      read_control(engine_, t.name, cur);
-      apply_control(engine_, t.name, true, std::clamp(std::round(cur) + t.step, t.lo, t.hi), error);
+      read_control(*engine_, t.name, cur);
+      apply_control(*engine_, t.name, true, std::clamp(std::round(cur) + t.step, t.lo, t.hi), error);
       return;
-    case ui::Special::SetValue: apply_control(engine_, t.name, true, t.def, error); return;
+    case ui::Special::SetValue: apply_control(*engine_, t.name, true, t.def, error); return;
     case ui::Special::None: break;
   }
-  if (t.momentary) apply_control(engine_, t.name, true, 1, error);
-  else apply_control(engine_, t.name, false, 0, error);  // toggles flip
+  if (t.momentary) apply_control(*engine_, t.name, true, 1, error);
+  else apply_control(*engine_, t.name, false, 0, error);  // toggles flip
 }
 
 void App::release(const ui::Target& t) {
   if (t.type == ui::Target::Type::Control && t.momentary) {
     std::string error;
-    apply_control(engine_, t.name, true, 0, error);
+    apply_control(*engine_, t.name, true, 0, error);
   }
 }
 
 void App::set_number(const ui::Target& t, double v) {
   if (t.type != ui::Target::Type::Control) return;
   std::string error;
-  apply_control(engine_, t.name, true, std::clamp(v, t.lo, t.hi), error);
+  apply_control(*engine_, t.name, true, std::clamp(v, t.lo, t.hi), error);
 }
 
 double App::beat_age_ms(const ui::Target& t) {
@@ -309,7 +309,7 @@ void App::do_action(const ui::Target& t) {
     j.kind = Job::Import;
     post(j);
   } else if (n == "rec") {
-    const RecorderStatus rec = engine_.recorder_status();
+    const RecorderStatus rec = engine_->recorder_status();
     std::string path, error;
     if (!record(!rec.recording, path, error)) status_note_ = T("status.error", {{"message", error}});
   } else if (n == "export") {
@@ -353,7 +353,7 @@ void App::do_action(const ui::Target& t) {
     Command c;
     c.op = Op::SamplerStop;
     c.i = -1;
-    engine_.send(c);
+    engine_->send(c);
   }
 }
 
@@ -529,7 +529,7 @@ void App::draw_overview(int di, const Rect& ov, const DeckView& v, const DeckInf
     c.op = Op::Seek;
     c.deck = static_cast<std::uint8_t>(di);
     c.d = std::clamp((in_.x - ov.x) / ov.w, 0.0f, 1.0f) * v.length;
-    engine_.send(c);
+    engine_->send(c);
   }
   if (!in_.down && drag_deck_ == di) drag_deck_ = -1;
 }
@@ -561,7 +561,7 @@ void App::draw_jog(int di, const Rect& r, const DeckView& v, Color base, const s
     if (jog_top_) {
       c.op = Op::JogTouch;
       c.i = 1;
-      engine_.send(c);
+      engine_->send(c);
     }
   }
   if (jog_deck_ == di && in_.down) {
@@ -573,14 +573,14 @@ void App::draw_jog(int di, const Rect& r, const DeckView& v, Color base, const s
       c.op = Op::JogTurn;
       c.d = da / (2 * kPi);
       c.i = jog_top_ ? 1 : 0;
-      engine_.send(c);
+      engine_->send(c);
     }
   }
   if (jog_deck_ == di && !in_.down) {
     if (jog_top_) {
       c.op = Op::JogTouch;
       c.i = 0;
-      engine_.send(c);
+      engine_->send(c);
     }
     jog_deck_ = -1;
   }
@@ -611,13 +611,13 @@ void App::draw_pads(const ui::Target& t, const skin::ResolvedWidget& w, const Re
     dl_.text(pr.x + pr.w / 2, pr.y + (pr.h - fs * 1.25f) / 2, std::to_string(k + 1), fs, set ? theme_.bg : theme_.dim, Align::Center, 0, 1);
     if (clicked(pr)) {
       std::string error;
-      apply_control(engine_, "deck" + std::to_string(di + 1) + ".hotcue." + std::to_string(k + 1), true, 1, error);
+      apply_control(*engine_, "deck" + std::to_string(di + 1) + ".hotcue." + std::to_string(k + 1), true, 1, error);
       held_ = id_base + 10 + k;
     }
   }
   if (in_.released && held_ / 100 == di + 1 && held_ % 100 >= 10 && held_ % 100 < 20) {
     std::string error;
-    apply_control(engine_, "deck" + std::to_string(di + 1) + ".hotcue." + std::to_string(held_ % 100 - 10 + 1), true, 0, error);
+    apply_control(*engine_, "deck" + std::to_string(di + 1) + ".hotcue." + std::to_string(held_ % 100 - 10 + 1), true, 0, error);
     held_ = 0;
   }
 }

@@ -22,6 +22,7 @@
 #include "deckhand/app/controls.hpp"
 #include "deckhand/app/stream_bridge.hpp"
 #include "deckhand/audio/engine.hpp"
+#include "deckhand/audio/remote_engine.hpp"
 #include "deckhand/gfx/draw.hpp"
 #include "deckhand/i18n/i18n.hpp"
 #include "deckhand/import/import.hpp"
@@ -30,6 +31,7 @@
 #include "deckhand/midi/controller.hpp"
 #include "deckhand/services/track_analysis.hpp"
 #include "deckhand/services/usb_export.hpp"
+#include "hub_api.hpp"
 #include "skin_view.hpp"
 
 namespace deckhand {
@@ -86,7 +88,7 @@ struct DeckInfo {
 };
 
 struct Job {
-  enum Kind { Load, AddFile, Import, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample } kind = Load;
+  enum Kind { Load, Reattach, AddFile, Import, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample, Sync } kind = Load;
   int deck = -1;
   std::int64_t track_id = 0;
   std::string path;
@@ -159,9 +161,9 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   const dh_frame* frame();
 
   // ApiHost (called from API threads)
-  Engine& api_engine() override { return engine_; }
+  IEngine& api_engine() override { return *engine_; }
   bool api_load(int deck, std::int64_t track_id, std::string& error) override {
-    if (engine_.deck(deck).playing) {
+    if (engine_->deck(deck).playing) {
       error = "deck is playing; stop it before loading";
       return false;
     }
@@ -172,7 +174,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
     Job j;
     j.kind = Job::AddFile;
     j.path = path;
-    j.deck = deck >= 0 && !engine_.deck(deck).playing ? deck : -1;
+    j.deck = deck >= 0 && !engine_->deck(deck).playing ? deck : -1;
     post(j);
   }
   bool api_export(const std::string& destination, std::int64_t playlist_id, std::string& error) override {
@@ -210,7 +212,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   }
 
   // ControlSink (called from the controller thread)
-  void command(const Command& c) override { engine_.send(c); }
+  void command(const Command& c) override { engine_->send(c); }
   void browse(int steps) override;
   void browse_press() override;
   void load_selected(int deck) override;
@@ -237,7 +239,10 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void loader_main();
   void control_main();
   void run_job(Library& lib, const Job& j);
-  void load_track(Library& lib, int deck, std::int64_t track_id);
+  void load_track(Library& lib, int deck, std::int64_t track_id, bool attach_only = false);
+  void setup_engine(const std::vector<std::string>& mapping_folders);
+  void start_signal_watch();
+  void stop_signal_watch();
   void start_audio();
   void restart_audio();
   void set_status(const std::string& s) {
@@ -320,9 +325,12 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::string data_dir_, resource_dir_;
   i18n::Catalog i18n_;
   std::unique_ptr<Library> lib_;
-  Engine engine_;
-  std::unique_ptr<ControllerHub> hub_;
+  std::unique_ptr<IEngine> engine_;       // in-process Engine or RemoteEngine (engine.process setting)
+  RemoteEngine* remote_ = nullptr;        // engine_ when it runs in its own process
+  std::unique_ptr<ControllerHub> local_hub_;  // in-process mode only; otherwise the hub lives in the engine process
   std::unique_ptr<MidiIO> midi_;
+  std::unique_ptr<HubApi> hub_;
+  std::thread signal_thread_;
   std::unique_ptr<ApiBridge> api_;
   std::unique_ptr<StreamBridge> stream_;
   gfx::DrawList dl_;

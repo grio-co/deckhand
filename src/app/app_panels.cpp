@@ -102,7 +102,7 @@ void App::open_panel(Panel p) {
   confirm_remove_ = false;
   switch (p) {
     case Panel::Settings: {
-      output_devices_ = Engine::output_devices();
+      output_devices_ = engine_->devices();
       for (const auto& kv : std::vector<std::pair<const char*, const char*>>{{"api.enabled", "1"}, {"api.port", "7373"}, {"stream.files", "0"},
                                                                           {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"obs.host", "127.0.0.1"},
                                                                           {"obs.port", "4455"}, {"obs.text_source", ""}})
@@ -428,7 +428,7 @@ void App::draw_settings(const Rect& m) {
       bx += 58;
     }
     y += line;
-    dl_.text(x + 130, y, T("settings.latency", {{"ms", static_cast<double>(period) / std::max(1.0, engine_.sample_rate() / 1000.0)}}), 11, th.dim);
+    dl_.text(x + 130, y, T("settings.latency", {{"ms", static_cast<double>(period) / std::max(1.0, engine_->sample_rate() / 1000.0)}}), 11, th.dim);
     y += 24;
   }
 
@@ -508,8 +508,8 @@ void App::draw_sampler_grid(const Rect& r, int cols, int rows, const ui::Input& 
     if (in.pressed && c.contains(in.x, in.y) && sv.loaded) {
       std::string error;
       const std::string base = "sampler." + std::to_string(k + 1) + ".";
-      if (stop.contains(in.x, in.y) || in.shift) apply_control(engine_, base + "stop", false, 0, error);
-      else apply_control(engine_, base + "trigger", false, 0, error);
+      if (stop.contains(in.x, in.y) || in.shift) apply_control(*engine_, base + "stop", false, 0, error);
+      else apply_control(*engine_, base + "trigger", false, 0, error);
     }
   }
 }
@@ -523,7 +523,7 @@ void App::draw_sampler(const Rect& m) {
   {  // level slider
     const ui::Target t = ui::map_binding("sampler.level");
     double v = 0;
-    read_control(engine_, t.name, v);
+    read_control(*engine_, t.name, v);
     const Rect tr{m.x + 90, y + 10, m.w - 90 - 150, 6};
     dl_.rrect(tr.x, tr.y, tr.w, tr.h, 3, rgba(10, 11, 14));
     dl_.rrect(tr.x, tr.y, tr.w * static_cast<float>(v), tr.h, 3, th.accent);
@@ -538,7 +538,7 @@ void App::draw_sampler(const Rect& m) {
     Command c;
     c.op = Op::SamplerStop;
     c.i = -1;
-    engine_.send(c);
+    engine_->send(c);
   }
   {  // the hint wraps onto a second line at a word boundary when it does not fit
     const std::string hint = T("sampler.hint");

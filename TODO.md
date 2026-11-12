@@ -30,6 +30,9 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [x] Sample-accurate scheduled commands (clock, deck position, beat) through the API
 - [x] DDJ-FLX4 mapping completed from the published MIDI list (untested on hardware)
 - [x] OpenAPI document
+- [x] Engine in its own process on macOS: audio, recording and controllers survive a UI crash;
+      the UI re-attaches
+- [x] Library sync through any replicated folder or USB stick (no server)
 - [x] Linux port: build, FFmpeg decoder, ALSA MIDI, SDL3 + OpenGL shell (container-tested only)
 - [x] Controllers: effect unit assignment, master cue, learn choices by name
 
@@ -37,7 +40,11 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [ ] Linux: rerun the container build against the skin-driven UI; fall back to no audio device
       cleanly; audio-route change notifications; test on a real machine (audio, MIDI, Wayland)
 - [ ] Windows port (after Linux; built and tested on the Windows PC)
-- [ ] Engine in its own process (survives a UI crash)
+- [ ] Engine process: Windows IPC layer; ship the helper in the Linux install; translate its status
+      messages; restore sampler slot names on re-attach
+- [ ] Sync: settings UI for the folder (today: setting `sync.folder`), passphrase encryption,
+      tombstone clean-up
+- [ ] Bluetooth MIDI pairing window on macOS
 - [ ] Skins: window shapes, images/sprites and rotate animations are parsed but not drawn;
       hidden widgets keep their layout space
 - [ ] Controllers: microphone input (engine has none yet); HID controllers
@@ -46,7 +53,6 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [ ] USB export: check against a reference export, then the CDJ-3000 test; write exportExt.pdb
 - [ ] CI on all platforms; vendored dependencies for portable builds
 - [ ] iOS app (pull request open; touch layout pending)
-- [ ] Cloud sync
 
 ## Known limits of the current build
 - Tracks are decoded fully into memory.

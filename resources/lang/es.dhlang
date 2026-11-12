@@ -154,3 +154,6 @@ relink.help = Toda pista cuya ruta empiece por la carpeta anterior se mueve a la
 relink.apply = Reenlazar
 relink.done = {count, plural, one {# pista reenlazada} other {# pistas reenlazadas}}
 relink.none = Ninguna ruta empieza por esa carpeta
+
+status.synced = Sincronizado: {sent} cambios enviados, {files} recibidos
+status.sync_failed = Error de sincronización: {message}

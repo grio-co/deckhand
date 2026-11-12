@@ -1,7 +1,18 @@
 // DeckHand application core: owns the library, engine and controllers, and runs the UI loop.
 // The UI itself is drawn from a skin (app_skin.cpp, skin_view.cpp); overlays live in app_panels.cpp and the
 // code-drawn fallback in app_legacy.cpp.
+#include "deckhand/sync/sync.hpp"
 #include "app_impl.hpp"
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__unix__) || defined(__APPLE__)
+#define DH_HAVE_ENGINE_PROCESS 1
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 namespace deckhand {
 
@@ -41,32 +52,51 @@ App::App(const dh_platform& platform, const dh_config& config)
   std::vector<std::string> folders;
   if (!resource_dir_.empty()) folders.push_back(resource_dir_ + "/controllers");
   folders.push_back(data_dir_ + "/controllers");
-  hub_ = std::make_unique<ControllerHub>(*this, load_mappings(folders));
-  midi_ = create_midi_io(
-      [this](const std::string& device, const std::uint8_t* data, std::size_t n) { hub_->midi(device, data, n); },
-      [this] {
-        hub_->devices_changed();
-        audio_recheck_ = true;
-      });
-  hub_->set_io(midi_.get());
+  setup_engine(folders);
 
   scan_skins();
   skin_ = std::make_unique<ui::SkinView>(dl_, i18n_);
   skin_->set_touch(touch_);
   if (!use_skin(lib_->setting("ui.skin", "default"), false)) use_skin("default", false);
 
-  start_audio();
+  if (remote_ && remote_->attached_existing() && engine_->running()) {
+    // Re-attached to an engine that kept playing: leave the output alone and adopt its state.
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    audio_label_ = fmt("%s  %d ch  %.1f kHz", engine_->device_name().c_str(), engine_->output_channels(),
+                       engine_->sample_rate() / 1000.0);
+    audio_choice_ = audio_pref_.empty() ? std::string() : "pref:" + audio_pref_;
+  } else {
+    start_audio();
+  }
   loader_ = std::thread([this] { loader_main(); });
   control_ = std::thread([this] { control_main(); });
+  if (remote_ && remote_->attached_existing()) {
+    for (int i = 0; i < kMaxDecks; ++i) {  // rebuild the deck displays (waveforms) from what the engine holds
+      std::int64_t id = 0;
+      std::string path;
+      if (!remote_->deck_info(i, id, path) || id == 0) continue;
+      Job j;
+      j.kind = Job::Reattach;
+      j.deck = i;
+      j.track_id = id;
+      post(j);
+    }
+    set_status("Re-attached to the running audio engine");
+  }
 
   api_ = std::make_unique<ApiBridge>(*this, data_dir_);
-  stream_ = std::make_unique<StreamBridge>(engine_, data_dir_, [this](int deck, TrackRow& row) {
+  stream_ = std::make_unique<StreamBridge>(*engine_, data_dir_, [this](int deck, TrackRow& row) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (!decks_[deck].audio) return false;
     row = decks_[deck].row;
     return true;
   });
 
+  if (!lib_->setting("sync.folder").empty()) {  // bring in other devices' changes first
+    Job j;
+    j.kind = Job::Sync;
+    post(j);
+  }
   if (lib_->track_count() == 0 && import_v6_available() && std::filesystem::exists(source_db())) {
     Job j;
     j.kind = Job::Import;
@@ -81,9 +111,132 @@ App::~App() {
   job_cv_.notify_all();
   if (loader_.joinable()) loader_.join();
   if (control_.joinable()) control_.join();
-  hub_->set_io(nullptr);
+  stop_signal_watch();
+  if (local_hub_) local_hub_->set_io(nullptr);
   midi_.reset();
-  engine_.stop();
+  if (remote_) {
+    // Normal quit stops the engine process too. With engine.keep_alive_on_quit it stays, but only while a deck is
+    // playing; a crash or kill always leaves it running.
+    bool playing = false;
+    for (int i = 0; i < kMaxDecks; ++i) playing = playing || engine_->deck(i).playing;
+    if (lib_->setting("engine.keep_alive_on_quit", "0") == "1" && playing) remote_->detach();
+    else remote_->shutdown_remote(120);
+  } else {
+    engine_->stop();
+  }
+}
+
+// Chooses where the engine runs: its own process (engine.process = separate, the default on desktop macOS) or
+// inside this one. If the helper cannot be started the app falls back to in-process audio rather than none.
+void App::setup_engine(const std::vector<std::string>& mapping_folders) {
+#if defined(DH_HAVE_ENGINE_PROCESS) && !(defined(__APPLE__) && TARGET_OS_IPHONE)
+#if defined(__APPLE__)
+  const char* default_mode = "separate";
+#else
+  const char* default_mode = "inprocess";  // the Linux packaging does not install the helper yet
+#endif
+  const char* forced = std::getenv("DECKHAND_ENGINE_PROCESS");
+  const std::string mode = forced && *forced ? forced : lib_->setting("engine.process", default_mode);
+  if (mode == "separate") {
+    RemoteEngine::Options o;
+    o.data_dir = data_dir_;
+    o.resource_dir = resource_dir_;
+    o.log_level = static_cast<int>(log::level());
+    auto remote = std::make_unique<RemoteEngine>(o);
+    std::string error;
+    if (remote->connect(error)) {
+      remote_ = remote.get();
+      remote->set_status_callback([this](RemoteEngine::Status s, const std::string& message) {
+        switch (s) {
+          case RemoteEngine::Status::Died:
+            set_status("The audio engine stopped; restarting it...");
+            break;
+          case RemoteEngine::Status::Restarted: {
+            {
+              std::lock_guard<std::mutex> lock(state_mutex_);
+              for (DeckInfo& d : decks_) d = DeckInfo{};  // the new engine has empty decks
+            }
+            start_audio();
+            set_status("The audio engine was restarted; your decks are empty, load your tracks again");
+            break;
+          }
+          case RemoteEngine::Status::GaveUp:
+            set_status("The audio engine keeps failing and was not restarted again. Restart DeckHand.");
+            break;
+          case RemoteEngine::Status::LoadRejected: set_status(message); break;
+          default: break;
+        }
+      });
+      remote->set_ui_request_handler([this](const RemoteEngine::UiRequest& r) {
+        switch (r.kind) {
+          case RemoteEngine::UiRequest::Browse: browse(r.value); break;
+          case RemoteEngine::UiRequest::BrowsePress: browse_press(); break;
+          case RemoteEngine::UiRequest::LoadSelected: load_selected(r.value); break;
+        }
+      });
+      hub_ = std::make_unique<RemoteHub>(*remote);
+      engine_ = std::move(remote);
+      start_signal_watch();
+      return;
+    }
+    DH_LOG(Error, "engine process unavailable (%s); using in-process audio", error.c_str());
+    set_status("Could not start the audio engine process (" + error + "); using in-process audio");
+  }
+#endif
+  engine_ = std::make_unique<Engine>();
+  local_hub_ = std::make_unique<ControllerHub>(*this, load_mappings(mapping_folders));
+  midi_ = create_midi_io(
+      [this](const std::string& device, const std::uint8_t* data, std::size_t n) { local_hub_->midi(device, data, n); },
+      [this] {
+        local_hub_->devices_changed();
+        audio_recheck_ = true;
+      });
+  local_hub_->set_io(midi_.get());
+  hub_ = std::make_unique<LocalHub>(*local_hub_);
+}
+
+// A normal quit stops the engine process. SIGTERM / SIGHUP / SIGINT count as normal; a crash or SIGKILL does not.
+#if defined(DH_HAVE_ENGINE_PROCESS)
+namespace {
+int g_signal_pipe[2] = {-1, -1};
+void on_quit_signal(int s) {
+  const char c = static_cast<char>(s);
+  if (g_signal_pipe[1] >= 0) (void)!write(g_signal_pipe[1], &c, 1);
+}
+}  // namespace
+#endif
+
+void App::start_signal_watch() {
+#if defined(DH_HAVE_ENGINE_PROCESS)
+  if (pipe(g_signal_pipe) != 0) return;
+  for (const int fd : g_signal_pipe) fcntl(fd, F_SETFD, FD_CLOEXEC);
+  struct sigaction sa {};
+  sa.sa_handler = on_quit_signal;
+  sigemptyset(&sa.sa_mask);
+  for (const int sig : {SIGTERM, SIGHUP, SIGINT}) sigaction(sig, &sa, nullptr);
+  signal_thread_ = std::thread([this] {
+    char c = 0;
+    if (read(g_signal_pipe[0], &c, 1) != 1 || c == 0) return;
+    DH_LOG(Info, "signal %d: stopping the audio engine and quitting", static_cast<int>(c));
+    if (remote_) remote_->shutdown_remote(120);
+    signal(c, SIG_DFL);
+    raise(c);
+  });
+#endif
+}
+
+void App::stop_signal_watch() {
+#if defined(DH_HAVE_ENGINE_PROCESS)
+  if (!signal_thread_.joinable()) return;
+  const char zero = 0;
+  (void)!write(g_signal_pipe[1], &zero, 1);
+  signal_thread_.join();
+  for (const int sig : {SIGTERM, SIGHUP, SIGINT}) signal(sig, SIG_DFL);
+  for (int& fd : g_signal_pipe) {
+    close(fd);
+    fd = -1;
+  }
+#endif
 }
 
 void App::start_audio() {
@@ -102,7 +255,7 @@ void App::start_audio() {
     return x;
   };
   if (hub_->audio_hint(match, master, phones)) {
-    for (const std::string& name : Engine::output_devices()) {
+    for (const std::string& name : engine_->devices()) {
       if (lower(name).find(match) != std::string::npos) {
         c.device_hint = match;
         c.master_channel = master;
@@ -111,14 +264,15 @@ void App::start_audio() {
     }
   }
   const std::string followed = c.device_hint;  // what following the controller would pick
+  c.follow_controller = pref.empty();
   if (!pref.empty()) c.device_hint = lower(pref);  // an explicit choice wins over the controller
   std::string error;
-  const bool ok = engine_.start(c, error);  // stops a running stream first
+  const bool ok = engine_->start(c, error);  // stops a running stream first
   std::lock_guard<std::mutex> lock(state_mutex_);
   audio_choice_ = pref.empty() ? followed : "pref:" + pref;
   if (ok) {
-    audio_label_ = fmt("%s  %d ch  %.1f kHz", engine_.device_name().c_str(), engine_.output_channels(),
-                       engine_.sample_rate() / 1000.0);
+    audio_label_ = fmt("%s  %d ch  %.1f kHz", engine_->device_name().c_str(), engine_->output_channels(),
+                       engine_->sample_rate() / 1000.0);
   } else {
     audio_label_ = T("app.no_audio");
     status_ = error;
@@ -129,7 +283,7 @@ void App::start_audio() {
 void App::restart_audio() { start_audio(); }
 
 void App::control_main() {
-  double last_audio_check = now_seconds(), last_tick = last_audio_check;
+  double last_audio_check = now_seconds(), last_tick = last_audio_check, last_sync = last_audio_check;
   struct Played {
     std::int64_t track_id = 0;
     double seconds = 0, saved = 0;
@@ -137,8 +291,9 @@ void App::control_main() {
   } played[kMaxDecks];
   while (!quit_) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (remote_) remote_->heartbeat();  // tells the engine process this UI is alive
     EngineEvent e;
-    while (engine_.poll(e)) {
+    while (engine_->poll(e)) {
       if (e.type == EventType::ScheduledFired || e.type == EventType::ScheduledDropped) {
         if (api_) api_->engine_event(e);  // only ever produced by API requests, so api_ exists
         continue;
@@ -149,7 +304,7 @@ void App::control_main() {
       j.slot = e.slot;
       if (e.type == EventType::HotCueSet) {
         j.kind = Job::SaveHotCue;
-        j.ms = e.frame / engine_.deck(e.deck).sample_rate * 1000.0;
+        j.ms = e.frame / engine_->deck(e.deck).sample_rate * 1000.0;
         post(j);
       } else if (e.type == EventType::HotCueCleared) {
         j.kind = Job::ClearHotCue;
@@ -157,7 +312,7 @@ void App::control_main() {
       }
     }
     DeckView views[kMaxDecks];
-    for (int i = 0; i < kMaxDecks; ++i) views[i] = engine_.deck(i);
+    for (int i = 0; i < kMaxDecks; ++i) views[i] = engine_->deck(i);
     const double now = now_seconds();
     // Play history: a track counts once it has been audible for a few seconds.
     for (int i = 0; i < kMaxDecks; ++i) {
@@ -186,20 +341,27 @@ void App::control_main() {
     }
     last_tick = now;
     {
-      const MixerView mixer = engine_.mixer();
+      const MixerView mixer = engine_->mixer();
       SamplerView samplers[kSamplerSlots];
-      for (int i = 0; i < kSamplerSlots; ++i) samplers[i] = engine_.sampler(i);
-      hub_->tick(views, kMaxDecks, &mixer, samplers, kSamplerSlots, now);
+      for (int i = 0; i < kSamplerSlots; ++i) samplers[i] = engine_->sampler(i);
+      if (local_hub_) local_hub_->tick(views, kMaxDecks, &mixer, samplers, kSamplerSlots, now);
     }
-    engine_.collect_garbage();
+    engine_->collect_garbage();
 
     // Follow controllers being plugged in or removed: use their audio interface when present.
-    if (audio_recheck_.exchange(false) || now - last_audio_check > 2.0) {
+    // (with the engine in its own process it follows controllers and reopens lost devices by itself)
+    if (now - last_sync > 300.0) {  // library sync every five minutes when a folder is set
+      last_sync = now;
+      Job j;
+      j.kind = Job::Sync;
+      post(j);
+    }
+    if (!remote_ && (audio_recheck_.exchange(false) || now - last_audio_check > 2.0)) {
       last_audio_check = now;
       std::string match, want;
       int master = 0, phones = 2;
       if (hub_->audio_hint(match, master, phones)) {
-        for (const std::string& name : Engine::output_devices()) {
+        for (const std::string& name : engine_->devices()) {
           std::string low = name;
           std::transform(low.begin(), low.end(), low.begin(), [](unsigned char ch) { return std::tolower(ch); });
           if (low.find(match) != std::string::npos) want = match;
@@ -215,7 +377,7 @@ void App::control_main() {
         std::lock_guard<std::mutex> lock(state_mutex_);
         explicit_pref = !audio_pref_.empty();
       }
-      if ((!explicit_pref && want != have) || !engine_.running()) start_audio();
+      if ((!explicit_pref && want != have) || !engine_->running()) start_audio();
     }
   }
 }
@@ -245,6 +407,7 @@ void App::loader_main() {
 void App::run_job(Library& lib, const Job& j) {
   switch (j.kind) {
     case Job::Load: load_track(lib, j.deck, j.track_id); break;
+    case Job::Reattach: load_track(lib, j.deck, j.track_id, true); break;
     case Job::AddFile: {
       FileTags tags;
       read_file_tags(j.path, tags);
@@ -259,6 +422,23 @@ void App::run_job(Library& lib, const Job& j) {
       rows_dirty_ = true;
       set_status(T("status.added", {{"title", t.title}}));
       if (j.deck >= 0) load_track(lib, j.deck, id);
+      break;
+    }
+    case Job::Sync: {
+      const std::string folder = lib.setting("sync.folder");
+      if (folder.empty()) break;
+      deckhand::sync::SyncConfig cfg;
+      cfg.folder = folder;
+      cfg.device_name = lib.setting("sync.device_name", "DeckHand");
+      deckhand::sync::SyncEngine engine(lib, cfg);
+      const deckhand::sync::SyncResult r = engine.sync_once();
+      for (const std::string& w : r.warnings) DH_LOG(Warn, "sync: %s", w.c_str());
+      if (!r.ok) {
+        set_status(T("status.sync_failed", {{"message", r.error}}));
+      } else if (r.records_written > 0 || r.records_applied > 0) {
+        rows_dirty_ = true;
+        set_status(T("status.synced", {{"sent", r.records_written}, {"files", r.records_applied}}));
+      }
       break;
     }
     case Job::Import: {
@@ -311,7 +491,7 @@ void App::run_job(Library& lib, const Job& j) {
       break;
     }
     case Job::RecFinish:
-      engine_.record_close();  // waits for the writer to finalise the file
+      engine_->record_close();  // waits for the writer to finalise the file
       set_status(T("status.recording_saved", {{"path", j.path}}));
       break;
     case Job::LoadSample: {
@@ -323,7 +503,7 @@ void App::run_job(Library& lib, const Job& j) {
       }
       auto sample = std::make_unique<LoadedSample>();
       sample->audio = audio;
-      engine_.sampler_load(j.slot, std::move(sample));
+      engine_->sampler_load(j.slot, std::move(sample));
       if (j.slot >= 0 && j.slot < kSamplerSlots) {
         std::lock_guard<std::mutex> lock(state_mutex_);
         sampler_names_[j.slot] = std::filesystem::path(j.path).stem().string();
@@ -343,7 +523,7 @@ void App::run_job(Library& lib, const Job& j) {
   }
 }
 
-void App::load_track(Library& lib, int deck, std::int64_t track_id) {
+void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_only) {
   const auto row = lib.track(track_id);
   if (!row || deck < 0 || deck >= kMaxDecks) return;
   {
@@ -364,6 +544,7 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id) {
   auto loaded = std::make_unique<LoadedTrack>();
   loaded->audio = audio;
   loaded->track_id = track_id;
+  loaded->path = row->path;
   loaded->bpm = row->bpm;
   std::vector<BeatSection> grid = lib.beatgrid(track_id);
   std::string key_text = row->key;
@@ -420,13 +601,15 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id) {
     }
     info.overview[c] = p;
   }
-  engine_.load(deck, std::move(loaded));
-  {  // loudness trim from analysis, kept within a sane range
-    Command g;
+  if (attach_only) {  // the engine already holds this track: only rebuild what the UI shows
+    if (engine_->deck(deck).track_id != track_id) return;
+  } else {
+    engine_->load(deck, std::move(loaded));
+    Command g;  // loudness trim from analysis, kept within a sane range
     g.op = Op::AutoGain;
     g.deck = static_cast<std::uint8_t>(deck);
     g.f = static_cast<float>(std::clamp(gain.value_or(0.0), -12.0, 12.0));
-    engine_.send(g);
+    engine_->send(g);
   }
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
@@ -439,14 +622,14 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id) {
 // Starts or stops recording the master output. Safe from any thread.
 bool App::record(bool start, std::string& path, std::string& error) {
   std::lock_guard<std::mutex> lock(record_mutex_);
-  const RecorderStatus st = engine_.recorder_status();
+  const RecorderStatus st = engine_->recorder_status();
   if (start) {
     if (st.recording) {
       error = "already recording";
       path = record_path_;
       return false;
     }
-    if (st.open) engine_.record_close();
+    if (st.open) engine_->record_close();
     const std::string dir = data_dir_ + "/Recordings";
     std::filesystem::create_directories(dir);
     const std::time_t t = std::time(nullptr);
@@ -455,7 +638,7 @@ bool App::record(bool start, std::string& path, std::string& error) {
     char name[64];
     std::strftime(name, sizeof name, "DeckHand %Y-%m-%d %H.%M.%S.wav", &tm);
     record_path_ = dir + "/" + name;
-    if (!engine_.record_open(record_path_, false, error)) return false;
+    if (!engine_->record_open(record_path_, false, error)) return false;
     path = record_path_;
     set_status(T("status.recording", {{"path", record_path_}}));
     return true;
@@ -464,7 +647,8 @@ bool App::record(bool start, std::string& path, std::string& error) {
     error = "not recording";
     return false;
   }
-  engine_.record_stop();
+  engine_->record_stop();
+  if (record_path_.empty()) record_path_ = engine_->recorder_path();  // recording started by a previous UI
   path = record_path_;
   Job j;
   j.kind = Job::RecFinish;
@@ -475,7 +659,7 @@ bool App::record(bool start, std::string& path, std::string& error) {
 
 void App::request_load(int deck, std::int64_t track_id) {
   if (deck < 0 || deck >= kMaxDecks || track_id == 0) return;
-  if (engine_.deck(deck).playing) {  // never replace a track that is playing
+  if (engine_->deck(deck).playing) {  // never replace a track that is playing
     set_status(T("deck.playing_stop_first", {{"deck", deck_letter(deck)}}));
     return;
   }
@@ -603,7 +787,7 @@ void App::key(dh_key key, std::uint32_t mods) {
         if (search_focus_) {
           search_focus_ = false;
         } else if (have) {
-          load_deck = engine_.deck(0).playing ? 1 : 0;
+          load_deck = engine_->deck(0).playing ? 1 : 0;
           load_id = rows_[static_cast<std::size_t>(sel_)].id;
         }
         break;
@@ -679,7 +863,7 @@ void App::open_file(const std::string& path, float x, float y) {
     if (j.deck < 0 && py < (height_px_ / scale_) * 0.5f && (!skin_ || skin_->current().widgets.empty()))
       j.deck = px < (width_px_ / scale_) / 2 ? 0 : 1;
   }
-  if (j.deck >= 0 && engine_.deck(j.deck).playing) j.deck = -1;
+  if (j.deck >= 0 && engine_->deck(j.deck).playing) j.deck = -1;
   post(j);
 }
 
@@ -740,9 +924,9 @@ const dh_frame* App::frame() {
   dl_.rect(0, 0, w, h, theme_.bg);
 
   // One consistent snapshot of the engine and deck state for the whole frame.
-  for (int i = 0; i < kMaxDecks; ++i) views_[i] = engine_.deck(i);
-  mixer_ = engine_.mixer();
-  for (int i = 0; i < kSamplerSlots; ++i) samplers_[i] = engine_.sampler(i);
+  for (int i = 0; i < kMaxDecks; ++i) views_[i] = engine_->deck(i);
+  mixer_ = engine_->mixer();
+  for (int i = 0; i < kSamplerSlots; ++i) samplers_[i] = engine_->sampler(i);
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     for (int i = 0; i < kMaxDecks; ++i) info_[i] = decks_[i];

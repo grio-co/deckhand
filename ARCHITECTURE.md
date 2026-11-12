@@ -25,9 +25,30 @@ No scripting languages in the product. macOS first, then Windows and Linux; iOS 
 - Four decks, per-deck trim / three-band EQ / filter / fader, crossfader, master, and a separate
   headphone (cue) bus on a second stereo pair when the device has one.
 - Tracks are decoded fully into memory. Tempo changes pitch (no key lock yet).
-- **Current shortcut:** the engine runs inside the app process behind the same command/snapshot
-  boundary it will use as a separate process. Splitting it out (so a UI crash cannot stop audio)
-  is planned work, not done.
+
+## Engine process (`src/audio/ipc*`, `remote_engine.*`, `src/enginehost`)
+The headline promise: music keeps playing if the UI crashes or hangs, and a restarted UI re-attaches to the set.
+- `deckhand-engine` (beside the app executable) owns the output device, the real `Engine`, the recorder, the stream
+  tap and the controller hub (MIDI I/O and mapping files). The app talks to it through `IEngine`, implemented by the
+  in-process `Engine` and by `RemoteEngine`. Setting `engine.process` = `separate` (default on desktop macOS) |
+  `inprocess` (iOS, platforms without the IPC layer, or when the helper cannot start; `DECKHAND_ENGINE_PROCESS`
+  overrides). Offline `render()` is in-process only.
+- Per data folder, one engine (instance lock in `/tmp/dh-<uid>/`, names hashed from the folder so portable copies
+  do not collide and macOS name limits hold). The app attaches to a running engine or starts one.
+- Main shared-memory segment, no pointers: multi-producer command ring UI to engine; seqlock snapshots (decks, mixer,
+  sampler, recorder, device, controllers, per-deck track id and path); event ring and stream-tap ring engine to UI.
+- Track audio: the UI's loader decodes and analyses, then copies PCM into one shared-memory block per track. The
+  engine maps it read-only, validates every size, offset, count and number (the UI is untrusted input), unlinks the
+  name at once and keeps the mapping until the track is swapped out. Stale names are collected when an engine or UI
+  starts. Decoder crashes therefore cannot touch the audio.
+- Control socket (Unix domain) for non-real-time requests: output device, recording, sampler loads, scheduling,
+  controller learn, attach/quit. Platform code is isolated in `ipc_posix.cpp`; a Windows port adds the same classes.
+- If the UI dies the engine plays on (a UI heartbeat only decides whether browse requests are forwarded to the UI).
+  A normal quit (window close, SIGTERM) fades out and stops the engine; `engine.keep_alive_on_quit` keeps it while a
+  deck plays. If the engine dies the app restarts it with back-off (decks come back empty) and gives up after repeated
+  quick failures. SIGTERM finalises an open recording.
+- Known limits: a UI that truncates a shared block after handing it over can still fault the engine (shm cannot be
+  sealed on macOS); sampler names and the recorder's UI-side status are not part of the re-attach state.
 
 ## Controllers (`src/midi`, `controllers/*.dhmap`)
 - General first: a controller is a declarative mapping file (no code). Any connected MIDI device

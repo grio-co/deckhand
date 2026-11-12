@@ -190,7 +190,7 @@ struct ApiBridge::Impl {
 
     // Optional trigger: wall clock, a deck position, or a beat of a deck's grid. Executed by the
     // engine on the exact output sample.
-    Engine& engine = host.api_engine();
+    IEngine& engine = host.api_engine();
     bool scheduled_request = false;
     Schedule when;
     std::string when_text;

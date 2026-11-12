@@ -76,7 +76,7 @@ dh_lib(analysis  DEPS core log)
 dh_lib(audio     DEPS core log miniaudio)
 dh_lib(midi      DEPS core log audio)
 dh_lib(broadcast DEPS core log)
-dh_lib(sync      DEPS core log)
+dh_lib(sync      DEPS core log library)
 dh_lib(api       DEPS core log)
 if(APPLE)
   set(OPENSSL_ROOT "/opt/homebrew/opt/openssl@4" CACHE PATH "OpenSSL prefix (TLS for the API server)")
@@ -91,10 +91,10 @@ dh_lib(gfx       DEPS core log)
 dh_lib(services  DEPS core log library audio export analysis)
 # The API server needs OpenSSL; platforms without it (iOS) build with -DDECKHAND_WITH_API=OFF.
 if(DECKHAND_WITH_API)
-  dh_lib(app     DEPS core log library import audio midi gfx services api i18n skin broadcast)
+  dh_lib(app     DEPS core log library import audio midi gfx services api i18n skin broadcast sync)
   target_compile_definitions(dh_app PRIVATE DECKHAND_WITH_API=1)
 else()
-  dh_lib(app     DEPS core log library import audio midi gfx services i18n skin broadcast)
+  dh_lib(app     DEPS core log library import audio midi gfx services i18n skin broadcast sync)
   target_compile_definitions(dh_app PRIVATE DECKHAND_WITH_API=0)
 endif()
 
@@ -114,6 +114,12 @@ elseif(UNIX)
 endif()
 
 # ---- programs -----------------------------------------------------------------
+# The audio engine in its own process: owns the output device, recorder and controller hub so the UI can crash
+# or hang without stopping the music (ARCHITECTURE.md, "Engine process").
+file(GLOB enginehost_srcs CONFIGURE_DEPENDS src/enginehost/*.cpp)
+add_executable(deckhand-engine ${enginehost_srcs})
+target_link_libraries(deckhand-engine dh_midi dh_audio dh_platform dh_log)
+
 add_executable(deckhandctl src/cli/main.cpp)
 target_link_libraries(deckhandctl dh_library dh_import dh_audio dh_services dh_api dh_platform)
 
@@ -122,7 +128,7 @@ foreach(t ${test_srcs})
   get_filename_component(n ${t} NAME_WE)
   add_executable(${n} ${t})
   target_link_libraries(${n} dh_library dh_import dh_export dh_analysis dh_audio dh_midi dh_gfx dh_api dh_skin dh_i18n
-    dh_broadcast dh_platform)
+    dh_broadcast dh_sync dh_platform)
   add_test(NAME ${n} COMMAND ${n} WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endforeach()
 

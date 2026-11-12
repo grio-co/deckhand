@@ -14,7 +14,7 @@
 namespace deckhand {
 
 struct StreamBridge::Impl {
-  Engine& engine;
+  IEngine& engine;
   std::function<bool(int, TrackRow&)> track_of;
   std::unique_ptr<broadcast::NowPlaying> now_playing;
   std::unique_ptr<broadcast::ObsClient> obs;
@@ -23,7 +23,7 @@ struct StreamBridge::Impl {
   std::thread thread;
   std::string description;
 
-  Impl(Engine& e, std::function<bool(int, TrackRow&)> t) : engine(e), track_of(std::move(t)) {}
+  Impl(IEngine& e, std::function<bool(int, TrackRow&)> t) : engine(e), track_of(std::move(t)) {}
 
   void run() {
     while (!quit) {
@@ -58,7 +58,7 @@ struct StreamBridge::Impl {
   }
 };
 
-StreamBridge::StreamBridge(Engine& engine, const std::string& data_dir, std::function<bool(int, TrackRow&)> track_of)
+StreamBridge::StreamBridge(IEngine& engine, const std::string& data_dir, std::function<bool(int, TrackRow&)> track_of)
     : impl_(std::make_unique<Impl>(engine, std::move(track_of))) {
   try {
     Library lib(data_dir + "/library.db");

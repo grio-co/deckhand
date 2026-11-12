@@ -154,3 +154,6 @@ relink.help = Chaque morceau dont le chemin commence par l'ancien dossier est d�
 relink.apply = Relier
 relink.done = {count, plural, one {# morceau relié} other {# morceaux reliés}}
 relink.none = Aucun chemin ne commence par ce dossier
+
+status.synced = Synchronisé : {sent} modifications envoyées, {files} reçues
+status.sync_failed = Échec de la synchronisation : {message}

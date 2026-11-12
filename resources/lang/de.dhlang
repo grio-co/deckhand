@@ -154,3 +154,6 @@ relink.help = Jeder Titel, dessen Pfad mit dem alten Ordner beginnt, wird in den
 relink.apply = Verknüpfen
 relink.done = {count, plural, one {# Titel} other {# Titel}} neu verknüpft
 relink.none = Kein Titelpfad beginnt mit diesem Ordner
+
+status.synced = Synchronisiert: {sent} Änderungen gesendet, {files} empfangen
+status.sync_failed = Synchronisierung fehlgeschlagen: {message}
