@@ -23,6 +23,6 @@ if [ "$mode" = sim ]; then
 else
   xcodebuild -project DeckHand.xcodeproj -scheme DeckHand -configuration Debug -sdk iphoneos \
     -destination 'generic/platform=iOS' -derivedDataPath "$OUT" \
-    CODE_SIGN_IDENTITY="Apple Development: Grioghar Thomas-Baldwin (7QK88B7T66)" ${DEVELOPMENT_TEAM:+DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM} \
-    -allowProvisioningUpdates build | tail -n 5
+    CODE_SIGN_IDENTITY="Apple Development" ${DEVELOPMENT_TEAM:+DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM} \
+    CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates build | tail -n 5
 fi

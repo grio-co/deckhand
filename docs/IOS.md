@@ -7,7 +7,7 @@ draws the whole UI into a draw list; the shell renders it with Metal and supplie
 ## Build and run
 ```bash
 platform/ios/build.sh sim run      # xcodegen -> xcodebuild -> install + launch in a booted/first iPhone simulator
-platform/ios/build.sh device       # signed with "Apple Development: Grioghar Thomas-Baldwin (7QK88B7T66)"
+DEVELOPMENT_TEAM=<team> platform/ios/build.sh device   # automatic signing with the "Apple Development" identity
 ```
 `SIM_DEVICE=<udid>` picks the simulator; `DEVELOPMENT_TEAM=<id>` is needed for device builds (provisioning profile).
 The Xcode project is generated from `platform/ios/project.yml` (needs `brew install xcodegen`); it is not checked in.
@@ -45,3 +45,4 @@ a way to hand the core an audio device config instead of miniaudio opening one i
 - Core layout is desktop-only: in portrait the right side is cut off (safe-area and `touch` are ignored by the core for now). Pointer, text and keyboard paths work.
 - The simulator reports its output at 8 kHz / 2 ch; audible output was not checked (meters and transport only). Real route/4-channel behaviour needs a device and the controller.
 - Not verified: document picker, MIDI/DDJ-FLX4, background audio, device signing, iPad.
+- Device build verified to build and sign with the Apple Development identity (automatic provisioning, `-allowProvisioningUpdates`); not installed or run on a device (the paired iPhone was offline).

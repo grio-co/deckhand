@@ -5,3 +5,4 @@
 - XcodeGen project + `build.sh`; stub core to prove the shell until `capi.h` lands.
 - Merged capi.h; real core linked for sim/device slices via CMake toolchain flags; removed stub and shell MIDI (core owns CoreMIDI); atlas region uploads, key events, text weight.
 - Verified real core in the simulator: UI, import, load, playback. DEBUG-only DECKHAND_OPEN test hook.
+- Device build signs via automatic provisioning with the Apple Development identity (needs DEVELOPMENT_TEAM).

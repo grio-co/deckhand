@@ -26,7 +26,7 @@ targets:
         INFOPLIST_FILE: Info.plist
       configs:
         Debug:
-          CODE_SIGN_IDENTITY[sdk=iphoneos*]: "Apple Development: Grioghar Thomas-Baldwin (7QK88B7T66)"
+          CODE_SIGN_IDENTITY[sdk=iphoneos*]: "Apple Development"
           CODE_SIGN_IDENTITY[sdk=iphonesimulator*]: "-"
     info:
       path: Info.plist
