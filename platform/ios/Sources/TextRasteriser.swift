@@ -4,8 +4,8 @@ import UIKit
 
 /// Platform text callback: UTF-8 string + pixel size -> 8-bit alpha bitmap (CoreText: all scripts, RTL, fallback fonts).
 enum TextRasteriser {
-    static func rasterise(_ s: String, pixelSize: CGFloat, into out: UnsafeMutablePointer<dh_bitmap>) -> Bool {
-        let font = CTFontCreateWithName("SFProText-Regular" as CFString, pixelSize, nil)
+    static func rasterise(_ s: String, pixelSize: CGFloat, bold: Bool, into out: UnsafeMutablePointer<dh_bitmap>) -> Bool {
+        let font = UIFont.systemFont(ofSize: pixelSize, weight: bold ? .semibold : .regular)
         let attrs: [NSAttributedString.Key: Any] = [
             NSAttributedString.Key(kCTFontAttributeName as String): font,
             NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true,

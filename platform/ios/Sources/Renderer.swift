@@ -48,15 +48,20 @@ final class Renderer {
         sampler = d.makeSamplerState(descriptor: sd)!
     }
 
+    /// Region update; creates the texture (at tex_w x tex_h) when the id is new or its size changed.
     private func upload(_ u: dh_tex_upload) {
         let a8 = u.fmt == DH_TEX_A8
-        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: a8 ? .r8Unorm : .rgba8Unorm,
-                                                            width: Int(u.w), height: Int(u.h), mipmapped: false)
-        if a8 { desc.swizzle = MTLTextureSwizzleChannels(red: .one, green: .one, blue: .one, alpha: .red) }
-        guard let t = device.makeTexture(descriptor: desc), let px = u.pixels else { return }
-        t.replace(region: MTLRegionMake2D(0, 0, Int(u.w), Int(u.h)), mipmapLevel: 0, withBytes: px,
-                  bytesPerRow: Int(u.w) * (a8 ? 1 : 4))
-        textures[u.id] = t
+        var tex = textures[u.id]
+        if tex == nil || tex!.width != Int(u.tex_w) || tex!.height != Int(u.tex_h) {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: a8 ? .r8Unorm : .rgba8Unorm,
+                                                                width: Int(u.tex_w), height: Int(u.tex_h), mipmapped: false)
+            if a8 { desc.swizzle = MTLTextureSwizzleChannels(red: .one, green: .one, blue: .one, alpha: .red) }
+            tex = device.makeTexture(descriptor: desc)
+            textures[u.id] = tex
+        }
+        guard let px = u.pixels else { return }
+        tex?.replace(region: MTLRegionMake2D(Int(u.x), Int(u.y), Int(u.w), Int(u.h)), mipmapLevel: 0,
+                     withBytes: px, bytesPerRow: Int(u.stride))
     }
 
     func draw(frame f: dh_frame, in view: MTKView) {

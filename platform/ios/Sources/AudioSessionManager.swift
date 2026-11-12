@@ -1,9 +1,9 @@
 import AVFoundation
 
-/// Playback category, small buffer, interruption + route handling. Reports output channel count and the
-/// pairs for master/cue: 4+ channels -> master 0 (outs 1-2), cue 1 (outs 3-4); otherwise stereo, cue -1.
+/// Playback category, small buffer, 4 output channels when offered, interruption + route handling.
+/// The core picks master/cue pairs itself and reopens its output on each report.
 final class AudioSessionManager {
-    var onRouteChange: ((Int, Int, Int) -> Void)?
+    var onRouteChange: (() -> Void)?
     private let s = AVAudioSession.sharedInstance()
 
     func start() {
@@ -29,8 +29,5 @@ final class AudioSessionManager {
         report()
     }
 
-    private func report() {
-        let ch = max(2, s.outputNumberOfChannels)
-        onRouteChange?(ch, 0, ch >= 4 ? 1 : -1)
-    }
+    private func report() { onRouteChange?() }
 }

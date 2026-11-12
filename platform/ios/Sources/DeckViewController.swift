@@ -3,12 +3,23 @@ import MetalKit
 
 final class DeckView: MTKView, UIKeyInput {
     var onText: ((String) -> Void)?
-    var onBackspace: (() -> Void)?
+    var onKey: ((dh_key) -> Void)?
     var wantsKeyboard = false
     override var canBecomeFirstResponder: Bool { true }
     var hasText: Bool { true }
-    func insertText(_ text: String) { onText?(text) }
-    func deleteBackward() { onBackspace?() }
+    func insertText(_ text: String) { text == "\n" ? onKey?(DH_KEY_ENTER) : onText?(text) }
+    func deleteBackward() { onKey?(DH_KEY_BACKSPACE) }
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        var rest = presses
+        for p in presses {
+            guard let k = p.key else { continue }
+            let map: [UIKeyboardHIDUsage: dh_key] = [.keyboardUpArrow: DH_KEY_UP, .keyboardDownArrow: DH_KEY_DOWN,
+                .keyboardLeftArrow: DH_KEY_LEFT, .keyboardRightArrow: DH_KEY_RIGHT, .keyboardEscape: DH_KEY_ESCAPE,
+                .keyboardTab: DH_KEY_TAB]
+            if let m = map[k.keyCode] { onKey?(m); rest.remove(p) }
+        }
+        super.pressesBegan(rest, with: event)
+    }
     var keyboardType: UIKeyboardType = .default
     var autocorrectionType: UITextAutocorrectionType = .no
 }
@@ -18,7 +29,6 @@ final class DeckViewController: UIViewController, MTKViewDelegate {
     private var renderer: Renderer!
     private var deck: DeckView { view as! DeckView }
     private let audio = AudioSessionManager()
-    private let midi = MIDIManager()
     private let files = FileAccess()
     private var touchIDs: [UITouch: UInt32] = [:]
     private var lastSize = CGSize.zero, lastInsets = UIEdgeInsets.zero
@@ -35,13 +45,13 @@ final class DeckViewController: UIViewController, MTKViewDelegate {
         guard let r = Renderer(view: deck) else { fatalError("Metal unavailable") }
         renderer = r
         deck.delegate = self
-        core = CoreBridge(dataDir: FileAccess.documentsURL.path)
-        deck.onText = { [weak self] in self?.core.text($0) }
-        deck.onBackspace = { [weak self] in self?.core.backspace() }
-        audio.onRouteChange = { [weak self] ch, m, c in self?.core.audioRoute(channels: ch, master: m, cue: c) }
+        // Audio session first: the core opens its output as soon as it is created.
         audio.start()
-        midi.onMessage = { [weak self] bytes in self?.core.midi(bytes) }
-        midi.start()
+        core = CoreBridge(dataDir: FileAccess.documentsURL.path, resourceDir: Bundle.main.resourcePath ?? "")
+        deck.onText = { [weak self] in self?.core.text($0) }
+        deck.onKey = { [weak self] in self?.core.key($0) }
+        audio.onRouteChange = { [weak self] in self?.core.audioRouteChanged() }
+        files.restoreBookmarks()
         files.onFile = { [weak self] url in self?.core.openFile(url.path) }
         files.presenter = self
         NotificationCenter.default.addObserver(forName: .deckOpenFile, object: nil, queue: .main) { [weak self] _ in

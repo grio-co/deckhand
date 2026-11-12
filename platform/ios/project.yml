@@ -10,12 +10,17 @@ targets:
   DeckHand:
     type: application
     platform: iOS
-    sources: [Sources, Stub]
+    sources: [Sources]
+    resources:
+      - { path: ../../controllers, type: folder, buildPhase: resources }
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: co.grio.deckhand
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging-Header.h
-        HEADER_SEARCH_PATHS: [Stub]
+        HEADER_SEARCH_PATHS: [../../src/app/include]
+        OTHER_LDFLAGS: [-ldh_app, -ldh_midi, -ldh_import, -ldh_library, -ldh_audio, -ldh_gfx, -ldh_log, -ldh_platform, -ldh_miniaudio, -lsqlite3, -lc++, -framework, AudioToolbox, -framework, CoreMIDI, -framework, CoreAudio, -framework, CoreFoundation]
+        "LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]": $(SRCROOT)/build/core-sim
+        "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]": $(SRCROOT)/build/core-device
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Info.plist

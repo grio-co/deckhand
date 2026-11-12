@@ -7,6 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mode=${1:-sim}
 xcodegen generate --quiet
+scripts/build-core.sh $([ "$mode" = sim ] && echo sim || echo device)
 OUT="$PWD/build"
 if [ "$mode" = sim ]; then
   xcodebuild -project DeckHand.xcodeproj -scheme DeckHand -configuration Debug -sdk iphonesimulator \
