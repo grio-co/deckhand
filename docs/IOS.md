@@ -21,7 +21,7 @@ The Xcode project is generated from `platform/ios/project.yml` (needs `brew inst
   scale passed to the core, keyboard via `UIKeyInput` shown while the core sets `wants_text_input`.
 - `AudioSessionManager.swift`: `.playback`, 5 ms preferred buffer, interruption resume, route changes; requests 4 output
   channels when the route offers them and reports and calls `dh_app_audio_route` so the core reopens its output.
-- MIDI: the core opens CoreMIDI itself (`platform/apple/midi_apple.cpp`); the shell does nothing. Bluetooth MIDI would need `CABTMIDICentralViewController` (CoreAudioKit) for pairing UI; the plist already has the Bluetooth usage string.
+- MIDI: the core opens CoreMIDI itself (`platform/apple/midi_apple.cpp`); the shell does nothing. Bluetooth: `BluetoothControls.swift` overlays two native buttons (top right): Bluetooth MIDI pairing (`CABTMIDICentralViewController`; paired BLE controllers then appear to the core's CoreMIDI like USB ones) and `AVRoutePickerView` for Bluetooth/AirPlay audio output. The `.playback` session allows A2DP and AirPlay; route changes reopen the core's output. Verified: both buttons render and the pairing sheet opens in the simulator (which has no Bluetooth hardware). Unverified: actual BLE pairing, Bluetooth audio, latency over A2DP.
 - `FileAccess.swift`: document picker (audio + folders) with security-scoped bookmarks persisted and restored; Documents folder
   exposed in Files (`UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace`). Background audio via `UIBackgroundModes: audio`.
 - `CoreBridge.swift` is the only file touching the C API.

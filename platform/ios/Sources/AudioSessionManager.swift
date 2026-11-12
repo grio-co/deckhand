@@ -8,7 +8,7 @@ final class AudioSessionManager {
 
     func start() {
         do {
-            try s.setCategory(.playback, mode: .default, options: [])
+            try s.setCategory(.playback, mode: .default, options: [.allowAirPlay])  // .playback already allows A2DP (Bluetooth headphones/speakers)
             try s.setPreferredIOBufferDuration(0.005)
             try s.setActive(true)
             if s.maximumOutputNumberOfChannels > 2 { try? s.setPreferredOutputNumberOfChannels(min(4, s.maximumOutputNumberOfChannels)) }

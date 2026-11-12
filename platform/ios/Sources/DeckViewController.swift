@@ -60,6 +60,15 @@ final class DeckViewController: UIViewController, MTKViewDelegate {
         #endif
         files.onFile = { [weak self] url in self?.core.openFile(url.path) }
         files.presenter = self
+        let bt = BluetoothControls()
+        bt.presenter = self
+        bt.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(bt)
+        NSLayoutConstraint.activate([
+            bt.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -8),
+            bt.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 4),
+            bt.widthAnchor.constraint(equalToConstant: 86), bt.heightAnchor.constraint(equalToConstant: 32),
+        ])
         NotificationCenter.default.addObserver(forName: .deckOpenFile, object: nil, queue: .main) { [weak self] _ in
             self?.files.presentPicker()
         }

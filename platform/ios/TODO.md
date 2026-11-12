@@ -7,4 +7,5 @@
 - [ ] Real device: signing profile, install, audio route 4-ch with DDJ-FLX4, CoreMIDI
 - [ ] Document picker end to end; restoreBookmarks() call at launch; Files exposure check
 - [ ] iPad layout / multitasking; orientation behaviour; hardware keyboard
-- [ ] App icon (original artwork only); Bluetooth MIDI pairing UI
+- [ ] App icon (original artwork only)
+- [ ] Verify Bluetooth MIDI pairing and Bluetooth audio route on a real device
