@@ -32,12 +32,14 @@ swiftc -O -swift-version 5 \
   -import-objc-header "$ROOT/platform/macos/Shell/Bridging.h" -I "$ROOT/src/app/include" \
   "$ROOT"/platform/macos/Shell/*.swift \
   -o "$APP/Contents/MacOS/DeckHand" \
-  -L "$BUILD" -ldh_app -ldh_midi -ldh_import -ldh_library -ldh_audio -ldh_gfx -ldh_log -ldh_platform -ldh_miniaudio \
-  $(cat "$BUILD/sqlite_link.txt") -lc++ \
+  -L "$BUILD" -ldh_app -ldh_services -ldh_broadcast -ldh_api -ldh_skin -ldh_i18n -ldh_export -ldh_analysis -ldh_midi -ldh_import \
+  -ldh_library -ldh_audio -ldh_gfx -ldh_log -ldh_platform -ldh_miniaudio \
+  $(cat "$BUILD/tls_link.txt") $(cat "$BUILD/sqlite_link.txt") -lc++ \
   -framework AppKit -framework Metal -framework MetalKit -framework QuartzCore -framework CoreText \
   -framework CoreMIDI -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
 
 cp "$ROOT"/controllers/*.dhmap "$APP/Contents/Resources/controllers/"
+cp -R "$ROOT/resources/lang" "$ROOT/resources/skins" "$APP/Contents/Resources/"
 sed -e "s/@BUNDLE_ID@/$BUNDLE_ID/" -e "s/@VERSION@/$VERSION/g" \
     -e "s/@MIN_OS@/$(sw_vers -productVersion | cut -d. -f1).0/" \
     "$ROOT/platform/macos/Info.plist" > "$APP/Contents/Info.plist"

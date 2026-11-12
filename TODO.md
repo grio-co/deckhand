@@ -11,29 +11,43 @@ them in [CHANGELOG.md](CHANGELOG.md).
 ## Done
 - [x] Repository, CMake skeleton, module layout, licence, schema
 - [x] M1 Library storage and read-only importer, `deckhandctl`
-- [x] Audio engine (in-process), decoding, waveforms, tempo detection
+- [x] Audio engine (in-process), decoding, waveforms
 - [x] Generic controller mappings + DDJ-FLX4 mapping (untested on hardware)
 - [x] macOS shell, core-drawn UI, signed app bundle, portable mode
+- [x] Playlist editing, column sorting, tag editing (API), relinking (library), play history
+- [x] Analysis: variable tempo, downbeat, key, loudness / auto-gain
+- [x] Key lock, key shift, quantise, slip, reverse; effect slots, colour effects, sampler (engine)
+- [x] Recording to WAV
+- [x] REST + WebSocket API: tokens, scopes, TLS, scheduled commands, live events
+- [x] Language packs (en, de, fr, es, ja) and runtime switching
+- [x] Skin format: parser, validator, layout solver, default and example skins
+- [x] USB export writer and read-back parser (offline-verified only)
+- [x] Streaming: now-playing files, browser overlay, OBS WebSocket client and rules (mock-tested only)
+- [x] Controllers: pad modes, modifiers, soft takeover, actions for every engine function, learn (library)
+- [x] Effect slot controls on the deck panels
+- [x] UI drawn from skins (default two- and four-deck layouts, example skin), live skin chooser
+- [x] Settings, sampler, MIDI learn and track details panels; key shift, reverse, tempo fader
+- [x] Sample-accurate scheduled commands (clock, deck position, beat) through the API
+- [x] DDJ-FLX4 mapping completed from the published MIDI list (untested on hardware)
+- [x] OpenAPI document
 
 ## Next
+- [ ] Linux port (in progress: build, decoder, MIDI, shell; tested in a container)
+- [ ] Windows port (after Linux; built and tested on the Windows PC)
 - [ ] Engine in its own process (survives a UI crash)
-- [ ] Key lock / time-stretch; quantise; slip mode
-- [ ] Pad FX, sampler, keyboard and key-shift pad modes; beat FX section
-- [ ] Playlist editing; relink missing tracks; tag editing; sort by column
-- [ ] Audio device chooser and latency setting in the UI; four-deck layout
-- [ ] Skin engine and built-in skin (replaces the layout drawn in code)
-- [ ] Language packs (`.dhlang`)
-- [ ] REST + WebSocket API with scheduled commands
-- [ ] Recording, history log
-- [ ] OBS integration
-- [ ] Full analysis: variable tempo, downbeats, key
-- [ ] CDJ USB export (offline-verified), then the CDJ-3000 test with a reference export
-- [ ] Windows and Linux shells; CI on all three; vendored dependencies for portable builds
-- [ ] iOS app (in progress in `platform/ios`)
+- [ ] Skins: window shapes, images/sprites and rotate animations are parsed but not drawn;
+      hidden widgets keep their layout space
+- [ ] Controllers: effect unit channel select, mic and master-cue actions (needed by the FLX4's
+      beat FX channel switch); MIDI learn by control name; HID controllers
+- [ ] Listening test of key lock on real mixes; transient handling if needed
+- [ ] Test against a real OBS
+- [ ] USB export: check against a reference export, then the CDJ-3000 test; write exportExt.pdb
+- [ ] CI on all platforms; vendored dependencies for portable builds
+- [ ] iOS app (pull request open; touch layout pending)
 - [ ] Cloud sync
 
 ## Known limits of the current build
-- Tracks are decoded fully into memory; tempo changes pitch.
-- Tempo detection assumes a steady tempo and does not find the downbeat.
+- Tracks are decoded fully into memory.
+- Analysis can split a steady track at a long breakdown; such splits are merged when the tempo agrees.
 - HID controllers and MIDI learn are not supported yet.
 - Built against the host's Homebrew SQLCipher, so the app runs on this macOS version and newer.

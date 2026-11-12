@@ -1,0 +1,30 @@
+# DeckHand example mapping: a small one-deck-per-side controller whose buttons send the same message
+# with or without a held SHIFT button (no separate status bytes), plus soft takeover.
+# Illustrative numbers only; not a real device and not tested on hardware.
+
+name  "Shift layer example"
+match "Shift Example"
+
+defaults pickup=1 deadzone=0.03
+
+in  button 90 7F modifier name=shift
+out 90 7F modifier name=shift
+
+in button 90 0B play deck=1
+in button 90 0C cue deck=1 when=!shift
+in button 90 0C seek_start deck=1 when=shift              # same note, shift layer
+in button 90 0D loop_toggle deck=1 beats=4 when=!shift
+in button 90 0D reloop deck=1 when=shift
+in button 90 0E sync deck=1 when=!shift
+in button 90 0E tempo_range deck=1 when=shift
+
+# A knob with two jobs: after pressing or releasing shift it waits until it crosses the value the
+# engine has before it takes effect again.
+in abs B0 10 filter deck=1 when=!shift
+in abs B0 10 fx_wet unit=deck deck=1 slot=1 when=shift
+in abs B0 11 trim deck=1
+
+in button 90 20 sampler slot=1                            # shift + pad stops the slot
+in button 90 21 sampler slot=2
+out 90 20 sampler_playing slot=1
+out 90 21 sampler_playing slot=2

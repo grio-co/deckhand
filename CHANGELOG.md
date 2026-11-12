@@ -24,6 +24,37 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 - Tests: library, engine (offline rendering), controller mapping.
 - Design docs: architecture, roadmap, API, skins, internationalisation, logging, controllers.
 
+- Library editing: playlists and folders (create, rename, delete, move, reorder), sort by column,
+  tag edits, path relinking, play history, settings store, schema migrations.
+- Analysis module: beat tracking with variable tempo, downbeat, key and loudness; results are
+  stored on first load and the loudness trim is applied automatically.
+- Engine: key lock and key shift, quantise, slip, reverse, loop move; three effect slots per
+  channel and master with 14 effects, six colour effects, 16-slot sampler; master recording to
+  24-bit WAV; a stream tap for broadcast output; short crossfades at loop wraps and jumps.
+- USB export for club players (database, analysis files, audio) with a read-back parser;
+  `deckhandctl export`; Export USB in the app. Offline-verified only.
+- REST + WebSocket API server with bearer tokens, scopes, TLS, rate limiting, scheduled
+  commands and live deck, mixer and event topics; `deckhandctl token`.
+- One table of named controls shared by the API (and later skins and scripts).
+- Language packs (`.dhlang`) with plural rules; English, German, French, Spanish, Japanese.
+- Skin format (`.dhskin`): parser, validator, layout solver, default and example skins.
+- Streaming: now-playing text files and tracklist, a browser overlay for OBS, an OBS WebSocket
+  client with track-change rules ([docs/STREAMING.md](docs/STREAMING.md)); settings routes in the API.
+- Controllers: pad modes (hot cue, beat loop, beat jump, sampler, keyboard, key shift, pad FX),
+  modifiers and `when=` conditions, soft takeover, dead zones, mapping actions and LED states for
+  every engine function, MIDI learn support, two example mappings.
+- Effect slot controls on each deck panel; REC button; key lock, quantise and slip buttons.
+- The UI is drawn from skins: default skin with two- and four-deck layouts, an example skin,
+  live skin switching; a minimal built-in layout remains as a fallback.
+- Panels: settings (language, skin, audio device and buffer, API, streaming), sampler, MIDI
+  learn, track details (tags, relink, remove); key shift, reverse, tempo range and tempo fader.
+- Scheduled commands execute in the engine on the exact output sample: at a clock time, at a
+  deck position, or on a beat or bar of a deck's grid.
+- DDJ-FLX4 mapping completed from the published MIDI list: all pad modes, shift layer, beat FX,
+  CFX button.
+- OpenAPI 3.1 description of the REST API (`docs/openapi.yaml`).
+- Tests for the library, analysis, API, export, effects, scheduling, languages, skins and streaming.
+
 ### Fixed
 - iOS: the engine no longer overrides the audio session the shell configures.
 

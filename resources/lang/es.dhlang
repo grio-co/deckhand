@@ -1,0 +1,156 @@
+@lang es
+@name Español
+@dir ltr
+@version 1.0
+@fallback en
+
+app.title = DeckHand
+app.start_failed = DeckHand no pudo iniciarse: {message}
+app.no_controller = Sin controlador
+app.no_audio = Sin salida de audio
+app.audio = {device}  {channels} can.  {khz, number, 1} kHz
+app.import_library = Importar biblioteca
+
+status.error = Error: {message}
+status.added = Añadido: {title}
+status.importing = Importando biblioteca...
+status.import_needs_key = La importación necesita el archivo de clave {path}
+status.imported = {added, plural, one {# pista nueva importada} other {# pistas nuevas importadas}}, {updated, plural, one {# pista existente actualizada} other {# pistas existentes actualizadas}}, {playlists, plural, one {# lista} other {# listas}}
+
+deck.name = Plato {deck}
+deck.empty = El plato {deck} está vacío
+deck.loading = Cargando...
+deck.no_track = Ninguna pista cargada
+deck.file_not_found = Archivo no encontrado: {path}
+deck.playing_stop_first = El plato {deck} está sonando; deténgalo antes de cargar
+deck.cue = CUE
+deck.play = PLAY
+deck.pause = PAUSA
+deck.sync = SYNC
+deck.loop = LOOP {beats}
+deck.loop_fraction = LOOP 1/{divisor}
+
+mixer.trim = GAIN
+mixer.eq.high = AGUDOS
+mixer.eq.mid = MEDIOS
+mixer.eq.low = GRAVES
+mixer.filter = FILTRO
+mixer.cue = CUE
+mixer.master = MASTER
+mixer.crossfader = CROSSFADER
+mixer.headphones = AURIC.
+mixer.headphone_mix = MIX
+
+browser.collection = Colección
+browser.search = Buscar
+browser.tracks = {count, plural, one {# pista} other {# pistas}}
+browser.load = Cargar {deck}
+browser.col.title = TÍTULO
+browser.col.artist = ARTISTA
+browser.col.bpm = BPM
+browser.col.key = TONO
+browser.col.time = TIEMPO
+browser.empty = Aún no hay pistas. Suelta archivos de audio aquí o usa Importar biblioteca.
+browser.no_matches = Sin resultados
+
+app.export_usb = Exportar USB
+status.exporting = Exportando {done} / {total}  {title}
+status.export_failed = Error al exportar: {message}
+status.exported = {tracks, plural, one {# pista exportada} other {# pistas exportadas}} y {playlists, plural, one {# lista} other {# listas}} a {path}
+status.exported_missing = {tracks, plural, one {# pista exportada} other {# pistas exportadas}}, {playlists, plural, one {# lista} other {# listas}}; {missing, plural, one {# archivo no pudo leerse} other {# archivos no pudieron leerse}}
+status.added_to = Añadido a {name}
+
+export.all_playlists = todas las listas
+export.title = Exportar {what} a:
+
+playlist.add_list = + Lista
+playlist.add_folder = + Carpeta
+playlist.new_list = Lista nueva
+playlist.new_folder = Carpeta nueva
+playlist.rename = Renombrar
+playlist.delete = Eliminar
+playlist.confirm = ¿Seguro?
+playlist.none = Aún no hay listas
+
+browser.add_to = Añadir a...
+browser.remove = Quitar
+browser.history = Historial
+
+deck.key_lock = KEY
+deck.quantize = QNT
+deck.slip = SLIP
+app.rec = REC
+status.recording = Grabando en {path}
+status.recording_saved = Grabación guardada: {path}
+status.sample_loaded = Sampler {slot}: {title}
+fx.on = ON
+
+# Skins, paneles, ajustes, sampler, MIDI learn, detalles de la pista
+app.settings = Ajustes
+app.sampler = Sampler
+app.learn = MIDI learn
+app.layout_toggle = 2 / 4 platos
+deck.reverse = REV
+deck.key_down = -
+deck.key_up = +
+deck.key_reset = KEY 0
+mixer.sampler = SAMPLER
+browser.edit = Editar...
+status.skin_error = No se pudo cargar el skin "{name}": {message}
+status.skin_changed = Skin: {name}
+playlist.confirm_delete = Pulsa Borrar otra vez para quitar "{name}"
+settings.title = Ajustes
+settings.language = Idioma
+settings.skin = Skin
+settings.audio = Salida de audio
+settings.audio_follow = Seguir al controlador (si no, la salida del sistema)
+settings.buffer = Tamaño del búfer
+settings.latency = Unos {ms, number, 1} ms por búfer
+settings.api = API local
+settings.api_enabled = API activada
+settings.port = Puerto
+settings.next_start = Se aplica en el próximo inicio
+settings.streaming = Streaming
+settings.stream_files = Escribir archivos de texto de "sonando ahora"
+settings.stream_overlay = Servir el overlay del navegador
+settings.obs = Conectar con OBS
+settings.obs_host = Host de OBS
+settings.obs_source = Fuente de texto
+sampler.title = Sampler
+sampler.empty_slot = Suelta un archivo
+sampler.loaded = Sample
+sampler.level = Nivel
+sampler.stop_all = Parar todo
+sampler.hint = Pulsa un hueco para reproducirlo; Mayús+clic o el cuadrado lo detiene. Suelta un archivo de audio encima para cargarlo.
+learn.title = MIDI learn
+learn.search = Filtrar acciones...
+learn.deck = plato {deck}
+learn.slot = hueco {slot}
+learn.pick = Elige la acción y luego usa el control.
+learn.waiting = Ahora mueve o pulsa un control del controlador ({action})
+learn.observing = Sigue moviendo el control...
+learn.captured = Capturado desde {device}
+learn.save = Guardar asignación
+learn.cancel = Cancelar
+learn.done = Ya es suficiente
+learn.saved = Guardado en {path}
+tags.title = Detalles de la pista
+tags.title_field = Título
+tags.artist = Artista
+tags.key = Tonalidad
+tags.rating = Valoración
+tags.file = Archivo
+tags.missing = Archivo no encontrado
+tags.save = Guardar
+tags.relink = Reenlazar carpeta...
+tags.remove = Quitar de la colección
+tags.remove_confirm = ¿Quitar de verdad?
+tags.saved = {title} guardado
+tags.removed = {title} quitado de la colección
+relink.title = Reenlazar archivos que faltan
+relink.old = Carpeta anterior
+relink.new = Carpeta nueva
+relink.help = Toda pista cuya ruta empiece por la carpeta anterior se mueve a la nueva.
+relink.apply = Reenlazar
+relink.done = {count, plural, one {# pista reenlazada} other {# pistas reenlazadas}}
+relink.none = Ninguna ruta empieza por esa carpeta

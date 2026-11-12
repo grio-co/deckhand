@@ -52,11 +52,21 @@ class DrawList {
   void rect(float x, float y, float w, float h, Color c);
   void outline(float x, float y, float w, float h, Color c, float thickness = 1);
   void triangle(float x0, float y0, float x1, float y1, float x2, float y2, Color c);
+  // Additive shape helpers (all in points). Radii are clamped to half the shorter side.
+  void rrect(float x, float y, float w, float h, float radius, Color c);
+  void rrect_outline(float x, float y, float w, float h, float radius, Color c, float thickness = 1);
+  void line(float x0, float y0, float x1, float y1, float thickness, Color c);
+  void circle(float cx, float cy, float r, Color c);
+  // Arc of a ring, angles in radians (0 = +x, clockwise on screen), from a0 to a1.
+  void arc(float cx, float cy, float r, float a0, float a1, float thickness, Color c);
+  // Convex polygon fill (triangle fan from the first point).
+  void polygon(const float* xy, int count, Color c);
   // Draws text with its top-left at (x, y) for Left alignment; within max_width if > 0 (cropped).
   // Returns the drawn width in points.
   float text(float x, float y, const std::string& s, float size, Color c, Align align = Align::Left,
              float max_width = 0, int weight = 0);
   float text_width(const std::string& s, float size, int weight = 0);
+  float text_height(const std::string& s, float size, int weight = 0);
 
   const std::vector<Vertex>& vertices() const { return vertices_; }
   const std::vector<std::uint32_t>& indices() const { return indices_; }

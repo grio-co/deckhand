@@ -1,0 +1,156 @@
+@lang de
+@name Deutsch
+@dir ltr
+@version 1.0
+@fallback en
+
+app.title = DeckHand
+app.start_failed = DeckHand konnte nicht starten: {message}
+app.no_controller = Kein Controller
+app.no_audio = Kein Audioausgang
+app.audio = {device}  {channels} Kanäle  {khz, number, 1} kHz
+app.import_library = Bibliothek importieren
+
+status.error = Fehler: {message}
+status.added = Hinzugefügt: {title}
+status.importing = Bibliothek wird importiert...
+status.import_needs_key = Für den Import wird die Schlüsseldatei {path} benötigt
+status.imported = {added, plural, one {# neuer Titel} other {# neue Titel}} importiert, {updated, plural, one {# vorhandener Titel} other {# vorhandene Titel}} aktualisiert, {playlists, plural, one {# Playlist} other {# Playlists}}
+
+deck.name = Deck {deck}
+deck.empty = Deck {deck} ist leer
+deck.loading = Lädt...
+deck.no_track = Kein Titel geladen
+deck.file_not_found = Datei nicht gefunden: {path}
+deck.playing_stop_first = Deck {deck} spielt; vor dem Laden anhalten
+deck.cue = CUE
+deck.play = PLAY
+deck.pause = PAUSE
+deck.sync = SYNC
+deck.loop = LOOP {beats}
+deck.loop_fraction = LOOP 1/{divisor}
+
+mixer.trim = TRIM
+mixer.eq.high = HÖHEN
+mixer.eq.mid = MITTEN
+mixer.eq.low = BÄSSE
+mixer.filter = FILTER
+mixer.cue = CUE
+mixer.master = MASTER
+mixer.crossfader = CROSSFADER
+mixer.headphones = KOPFHÖRER
+mixer.headphone_mix = MIX
+
+browser.collection = Sammlung
+browser.search = Suchen
+browser.tracks = {count, plural, one {# Titel} other {# Titel}}
+browser.load = {deck} laden
+browser.col.title = TITEL
+browser.col.artist = KÜNSTLER
+browser.col.bpm = BPM
+browser.col.key = TONART
+browser.col.time = DAUER
+browser.empty = Noch keine Titel. Audiodateien hierher ziehen oder Bibliothek importieren.
+browser.no_matches = Keine Treffer
+
+app.export_usb = USB exportieren
+status.exporting = Exportiere {done} / {total}  {title}
+status.export_failed = Export fehlgeschlagen: {message}
+status.exported = {tracks, plural, one {# Titel} other {# Titel}} und {playlists, plural, one {# Playlist} other {# Playlists}} nach {path} exportiert
+status.exported_missing = {tracks, plural, one {# Titel} other {# Titel}}, {playlists, plural, one {# Playlist} other {# Playlists}} exportiert; {missing, plural, one {# Datei} other {# Dateien}} konnten nicht gelesen werden
+status.added_to = Zu {name} hinzugefügt
+
+export.all_playlists = alle Playlists
+export.title = {what} exportieren nach:
+
+playlist.add_list = + Liste
+playlist.add_folder = + Ordner
+playlist.new_list = Neue Playlist
+playlist.new_folder = Neuer Ordner
+playlist.rename = Umbenennen
+playlist.delete = Löschen
+playlist.confirm = Sicher?
+playlist.none = Noch keine Playlists
+
+browser.add_to = Hinzufügen zu...
+browser.remove = Entfernen
+browser.history = Verlauf
+
+deck.key_lock = KEY
+deck.quantize = QNT
+deck.slip = SLIP
+app.rec = REC
+status.recording = Aufnahme nach {path}
+status.recording_saved = Aufnahme gespeichert: {path}
+status.sample_loaded = Sampler {slot}: {title}
+fx.on = ON
+
+# Skins, Panels, Einstellungen, Sampler, MIDI-Learn, Titeldetails
+app.settings = Einstellungen
+app.sampler = Sampler
+app.learn = MIDI-Learn
+app.layout_toggle = 2 / 4 Decks
+deck.reverse = REV
+deck.key_down = -
+deck.key_up = +
+deck.key_reset = KEY 0
+mixer.sampler = SAMPLER
+browser.edit = Bearbeiten...
+status.skin_error = Skin "{name}" konnte nicht geladen werden: {message}
+status.skin_changed = Skin: {name}
+playlist.confirm_delete = Noch einmal auf Löschen klicken, um "{name}" zu entfernen
+settings.title = Einstellungen
+settings.language = Sprache
+settings.skin = Skin
+settings.audio = Audioausgang
+settings.audio_follow = Controller folgen (sonst Systemstandard)
+settings.buffer = Puffergröße
+settings.latency = Etwa {ms, number, 1} ms pro Puffer
+settings.api = Lokale API
+settings.api_enabled = API aktiviert
+settings.port = Port
+settings.next_start = Gilt ab dem nächsten Start
+settings.streaming = Streaming
+settings.stream_files = Textdateien für "Läuft gerade" schreiben
+settings.stream_overlay = Browser-Overlay bereitstellen
+settings.obs = Mit OBS verbinden
+settings.obs_host = OBS-Host
+settings.obs_source = Textquelle
+sampler.title = Sampler
+sampler.empty_slot = Datei ablegen
+sampler.loaded = Sample
+sampler.level = Pegel
+sampler.stop_all = Alle stoppen
+sampler.hint = Klick auf einen Slot spielt ihn ab; Umschalt-Klick oder das Quadrat stoppt. Eine Audiodatei auf einen Slot ziehen, um sie zu laden.
+learn.title = MIDI-Learn
+learn.search = Aktionen filtern...
+learn.deck = Deck {deck}
+learn.slot = Slot {slot}
+learn.pick = Wähle die Aktion und bediene dann den Regler.
+learn.waiting = Jetzt einen Regler oder eine Taste am Controller bedienen ({action})
+learn.observing = Regler weiterbewegen...
+learn.captured = Erkannt von {device}
+learn.save = Zuordnung speichern
+learn.cancel = Abbrechen
+learn.done = Das reicht
+learn.saved = Gespeichert in {path}
+tags.title = Titeldetails
+tags.title_field = Titel
+tags.artist = Interpret
+tags.key = Tonart
+tags.rating = Bewertung
+tags.file = Datei
+tags.missing = Datei nicht gefunden
+tags.save = Speichern
+tags.relink = Ordner neu verknüpfen...
+tags.remove = Aus der Sammlung entfernen
+tags.remove_confirm = Wirklich entfernen?
+tags.saved = {title} gespeichert
+tags.removed = {title} aus der Sammlung entfernt
+relink.title = Fehlende Dateien neu verknüpfen
+relink.old = Alter Ordner
+relink.new = Neuer Ordner
+relink.help = Jeder Titel, dessen Pfad mit dem alten Ordner beginnt, wird in den neuen verschoben.
+relink.apply = Verknüpfen
+relink.done = {count, plural, one {# Titel} other {# Titel}} neu verknüpft
+relink.none = Kein Titelpfad beginnt mit diesem Ordner

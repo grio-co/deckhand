@@ -107,6 +107,102 @@ void DrawList::triangle(float x0, float y0, float x1, float y1, float x2, float 
   commands_.back().index_count += 3;
 }
 
+namespace {
+constexpr float kPi = 3.14159265358979f;
+}
+
+void DrawList::polygon(const float* xy, int n, Color c) {
+  for (int i = 1; i + 1 < n; ++i) triangle(xy[0], xy[1], xy[2 * i], xy[2 * i + 1], xy[2 * i + 2], xy[2 * i + 3], c);
+}
+
+void DrawList::rrect(float x, float y, float w, float h, float radius, Color c) {
+  if (w <= 0 || h <= 0) return;
+  radius = std::min({radius, w / 2, h / 2});
+  if (radius < 0.75f) {
+    rect(x, y, w, h, c);
+    return;
+  }
+  const int seg = std::clamp(static_cast<int>(radius * scale_ / 2) + 3, 4, 16);
+  std::vector<float> pts;
+  pts.reserve(static_cast<std::size_t>(seg + 1) * 8);
+  const float cx[4] = {x + w - radius, x + w - radius, x + radius, x + radius};
+  const float cy[4] = {y + radius, y + h - radius, y + h - radius, y + radius};
+  for (int k = 0; k < 4; ++k) {
+    for (int i = 0; i <= seg; ++i) {
+      const float a = (static_cast<float>(k) * 0.5f + 1.5f) * kPi + static_cast<float>(i) / static_cast<float>(seg) * 0.5f * kPi;
+      pts.push_back(cx[k] + std::cos(a) * radius);
+      pts.push_back(cy[k] + std::sin(a) * radius);
+    }
+  }
+  polygon(pts.data(), static_cast<int>(pts.size() / 2), c);
+}
+
+void DrawList::rrect_outline(float x, float y, float w, float h, float radius, Color c, float t) {
+  if (w <= 0 || h <= 0) return;
+  radius = std::min({radius, w / 2, h / 2});
+  if (radius < 0.75f) {
+    outline(x, y, w, h, c, t);
+    return;
+  }
+  const int seg = std::clamp(static_cast<int>(radius * scale_ / 2) + 3, 4, 16);
+  const float cx[4] = {x + w - radius, x + w - radius, x + radius, x + radius};
+  const float cy[4] = {y + radius, y + h - radius, y + h - radius, y + radius};
+  const float ri = std::max(0.0f, radius - t);
+  std::vector<float> outer, inner;
+  for (int k = 0; k < 4; ++k) {
+    for (int i = 0; i <= seg; ++i) {
+      const float a = (static_cast<float>(k) * 0.5f + 1.5f) * kPi + static_cast<float>(i) / static_cast<float>(seg) * 0.5f * kPi;
+      outer.push_back(cx[k] + std::cos(a) * radius);
+      outer.push_back(cy[k] + std::sin(a) * radius);
+      inner.push_back(cx[k] + std::cos(a) * ri);
+      inner.push_back(cy[k] + std::sin(a) * ri);
+    }
+  }
+  const std::size_t n = outer.size() / 2;
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::size_t j = (i + 1) % n;
+    triangle(outer[2 * i], outer[2 * i + 1], outer[2 * j], outer[2 * j + 1], inner[2 * i], inner[2 * i + 1], c);
+    triangle(inner[2 * i], inner[2 * i + 1], outer[2 * j], outer[2 * j + 1], inner[2 * j], inner[2 * j + 1], c);
+  }
+}
+
+void DrawList::line(float x0, float y0, float x1, float y1, float t, Color c) {
+  const float dx = x1 - x0, dy = y1 - y0, len = std::sqrt(dx * dx + dy * dy);
+  if (len < 1e-4f) return;
+  const float nx = -dy / len * t / 2, ny = dx / len * t / 2;
+  triangle(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, c);
+  triangle(x0 + nx, y0 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, c);
+}
+
+void DrawList::circle(float cx, float cy, float r, Color c) {
+  if (r <= 0) return;
+  const int seg = std::clamp(static_cast<int>(r * scale_ / 2) + 8, 12, 64);
+  for (int i = 0; i < seg; ++i) {
+    const float a0 = 2 * kPi * static_cast<float>(i) / static_cast<float>(seg), a1 = 2 * kPi * static_cast<float>(i + 1) / static_cast<float>(seg);
+    triangle(cx, cy, cx + std::cos(a0) * r, cy + std::sin(a0) * r, cx + std::cos(a1) * r, cy + std::sin(a1) * r, c);
+  }
+}
+
+void DrawList::arc(float cx, float cy, float r, float a0, float a1, float t, Color c) {
+  if (r <= 0 || a0 == a1) return;
+  if (a1 < a0) std::swap(a0, a1);
+  const int seg = std::clamp(static_cast<int>((a1 - a0) / (2 * kPi) * (r * scale_ + 16)) + 2, 2, 96);
+  const float ro = r + t / 2, ri = std::max(0.0f, r - t / 2);
+  float ox = cx + std::cos(a0) * ro, oy = cy + std::sin(a0) * ro, ix = cx + std::cos(a0) * ri, iy = cy + std::sin(a0) * ri;
+  for (int i = 1; i <= seg; ++i) {
+    const float a = a0 + (a1 - a0) * static_cast<float>(i) / static_cast<float>(seg);
+    const float nox = cx + std::cos(a) * ro, noy = cy + std::sin(a) * ro, nix = cx + std::cos(a) * ri, niy = cy + std::sin(a) * ri;
+    triangle(ox, oy, nox, noy, ix, iy, c);
+    triangle(ix, iy, nox, noy, nix, niy, c);
+    ox = nox; oy = noy; ix = nix; iy = niy;
+  }
+}
+
+float DrawList::text_height(const std::string& s, float size, int weight) {
+  const Glyphs* g = lookup(s, size, weight);
+  return g ? g->h / scale_ : size * 1.25f;
+}
+
 const DrawList::Glyphs* DrawList::lookup(const std::string& s, float size, int weight) {
   if (s.empty() || !rasterizer_) return nullptr;
   const int px4 = static_cast<int>(std::lround(size * scale_ * 4));

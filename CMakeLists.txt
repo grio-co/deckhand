@@ -63,9 +63,13 @@ dh_lib(midi      DEPS core log audio)
 dh_lib(broadcast DEPS core log)
 dh_lib(sync      DEPS core log)
 dh_lib(api       DEPS core log)
+set(OPENSSL_ROOT "/opt/homebrew/opt/openssl@4" CACHE PATH "OpenSSL prefix (TLS for the API server)")
+target_include_directories(dh_api SYSTEM PRIVATE ${OPENSSL_ROOT}/include)
+target_link_libraries(dh_api PUBLIC ${OPENSSL_ROOT}/lib/libssl.a ${OPENSSL_ROOT}/lib/libcrypto.a)
 dh_lib(skin      DEPS core log i18n)
 dh_lib(gfx       DEPS core log)
-dh_lib(app       DEPS core log library import audio midi gfx)
+dh_lib(services  DEPS core log library audio export analysis)
+dh_lib(app       DEPS core log library import audio midi gfx services api i18n skin broadcast)
 
 # ---- platform glue (C APIs shared by macOS and iOS) ---------------------------
 if(APPLE)
@@ -77,17 +81,19 @@ endif()
 
 # ---- programs -----------------------------------------------------------------
 add_executable(deckhandctl src/cli/main.cpp)
-target_link_libraries(deckhandctl dh_library dh_import dh_audio dh_platform)
+target_link_libraries(deckhandctl dh_library dh_import dh_audio dh_services dh_api dh_platform)
 
 file(GLOB test_srcs CONFIGURE_DEPENDS tests/test_*.cpp)
 foreach(t ${test_srcs})
   get_filename_component(n ${t} NAME_WE)
   add_executable(${n} ${t})
-  target_link_libraries(${n} dh_library dh_import dh_audio dh_midi dh_gfx dh_platform)
+  target_link_libraries(${n} dh_library dh_import dh_export dh_analysis dh_audio dh_midi dh_gfx dh_api dh_skin dh_i18n
+    dh_broadcast dh_platform)
   add_test(NAME ${n} COMMAND ${n} WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endforeach()
 
 # Link arguments for shells that link the core outside CMake (see scripts/).
+file(WRITE ${CMAKE_BINARY_DIR}/tls_link.txt "${OPENSSL_ROOT}/lib/libssl.a ${OPENSSL_ROOT}/lib/libcrypto.a")
 if(DECKHAND_WITH_SQLCIPHER)
   file(WRITE ${CMAKE_BINARY_DIR}/sqlite_link.txt "${SQLCIPHER_ROOT}/lib/libsqlcipher.a ${OPENSSL_CRYPTO} -lz")
 else()

@@ -1,0 +1,156 @@
+@lang fr
+@name Français
+@dir ltr
+@version 1.0
+@fallback en
+
+app.title = DeckHand
+app.start_failed = Échec du démarrage de DeckHand : {message}
+app.no_controller = Aucun contrôleur
+app.no_audio = Aucune sortie audio
+app.audio = {device}  {channels} can.  {khz, number, 1} kHz
+app.import_library = Importer la bibliothèque
+
+status.error = Erreur : {message}
+status.added = Ajouté : {title}
+status.importing = Importation de la bibliothèque...
+status.import_needs_key = L’importation nécessite le fichier de clé {path}
+status.imported = {added, plural, one {# nouveau morceau importé} other {# nouveaux morceaux importés}}, {updated, plural, one {# morceau existant mis à jour} other {# morceaux existants mis à jour}}, {playlists, plural, one {# playlist} other {# playlists}}
+
+deck.name = Platine {deck}
+deck.empty = La platine {deck} est vide
+deck.loading = Chargement...
+deck.no_track = Aucun morceau chargé
+deck.file_not_found = Fichier introuvable : {path}
+deck.playing_stop_first = La platine {deck} joue ; arrêtez-la avant de charger
+deck.cue = CUE
+deck.play = LECTURE
+deck.pause = PAUSE
+deck.sync = SYNC
+deck.loop = BOUCLE {beats}
+deck.loop_fraction = BOUCLE 1/{divisor}
+
+mixer.trim = GAIN
+mixer.eq.high = AIGUS
+mixer.eq.mid = MÉDIUMS
+mixer.eq.low = GRAVES
+mixer.filter = FILTRE
+mixer.cue = CUE
+mixer.master = MASTER
+mixer.crossfader = CROSSFADER
+mixer.headphones = CASQUE
+mixer.headphone_mix = MIX
+
+browser.collection = Collection
+browser.search = Rechercher
+browser.tracks = {count, plural, one {# morceau} other {# morceaux}}
+browser.load = Charger {deck}
+browser.col.title = TITRE
+browser.col.artist = ARTISTE
+browser.col.bpm = BPM
+browser.col.key = TON
+browser.col.time = DURÉE
+browser.empty = Aucun morceau. Déposez des fichiers audio ici ou importez la bibliothèque.
+browser.no_matches = Aucun résultat
+
+app.export_usb = Exporter USB
+status.exporting = Exportation {done} / {total}  {title}
+status.export_failed = Échec de l’exportation : {message}
+status.exported = {tracks, plural, one {# morceau exporté} other {# morceaux exportés}} et {playlists, plural, one {# playlist} other {# playlists}} vers {path}
+status.exported_missing = {tracks, plural, one {# morceau exporté} other {# morceaux exportés}}, {playlists, plural, one {# playlist} other {# playlists}} ; {missing, plural, one {# fichier illisible} other {# fichiers illisibles}}
+status.added_to = Ajouté à {name}
+
+export.all_playlists = toutes les playlists
+export.title = Exporter {what} vers :
+
+playlist.add_list = + Liste
+playlist.add_folder = + Dossier
+playlist.new_list = Nouvelle playlist
+playlist.new_folder = Nouveau dossier
+playlist.rename = Renommer
+playlist.delete = Supprimer
+playlist.confirm = Sûr ?
+playlist.none = Aucune playlist
+
+browser.add_to = Ajouter à...
+browser.remove = Retirer
+browser.history = Historique
+
+deck.key_lock = KEY
+deck.quantize = QNT
+deck.slip = SLIP
+app.rec = REC
+status.recording = Enregistrement vers {path}
+status.recording_saved = Enregistrement sauvegardé : {path}
+status.sample_loaded = Sampler {slot} : {title}
+fx.on = ON
+
+# Skins, panneaux, réglages, sampler, MIDI learn, détails du morceau
+app.settings = Réglages
+app.sampler = Sampler
+app.learn = MIDI learn
+app.layout_toggle = 2 / 4 platines
+deck.reverse = REV
+deck.key_down = -
+deck.key_up = +
+deck.key_reset = KEY 0
+mixer.sampler = SAMPLER
+browser.edit = Modifier...
+status.skin_error = Le skin "{name}" n'a pas pu être chargé : {message}
+status.skin_changed = Skin : {name}
+playlist.confirm_delete = Cliquez encore sur Supprimer pour retirer "{name}"
+settings.title = Réglages
+settings.language = Langue
+settings.skin = Skin
+settings.audio = Sortie audio
+settings.audio_follow = Suivre le contrôleur (sinon la sortie système)
+settings.buffer = Taille du tampon
+settings.latency = Environ {ms, number, 1} ms par tampon
+settings.api = API locale
+settings.api_enabled = API activée
+settings.port = Port
+settings.next_start = Pris en compte au prochain démarrage
+settings.streaming = Streaming
+settings.stream_files = Écrire les fichiers texte « en cours de lecture »
+settings.stream_overlay = Servir l'overlay navigateur
+settings.obs = Se connecter à OBS
+settings.obs_host = Hôte OBS
+settings.obs_source = Source texte
+sampler.title = Sampler
+sampler.empty_slot = Déposez un fichier
+sampler.loaded = Sample
+sampler.level = Niveau
+sampler.stop_all = Tout arrêter
+sampler.hint = Cliquez sur un emplacement pour le jouer ; Maj-clic ou le carré l'arrête. Déposez un fichier audio dessus pour le charger.
+learn.title = MIDI learn
+learn.search = Filtrer les actions...
+learn.deck = platine {deck}
+learn.slot = emplacement {slot}
+learn.pick = Choisissez l'action, puis actionnez la commande.
+learn.waiting = Bougez ou appuyez maintenant sur une commande du contrôleur ({action})
+learn.observing = Continuez à bouger la commande...
+learn.captured = Capturé depuis {device}
+learn.save = Enregistrer l'assignation
+learn.cancel = Annuler
+learn.done = Ça suffit
+learn.saved = Enregistré dans {path}
+tags.title = Détails du morceau
+tags.title_field = Titre
+tags.artist = Artiste
+tags.key = Tonalité
+tags.rating = Note
+tags.file = Fichier
+tags.missing = Fichier introuvable
+tags.save = Enregistrer
+tags.relink = Relier un dossier...
+tags.remove = Retirer de la collection
+tags.remove_confirm = Vraiment retirer ?
+tags.saved = {title} enregistré
+tags.removed = {title} retiré de la collection
+relink.title = Relier les fichiers manquants
+relink.old = Ancien dossier
+relink.new = Nouveau dossier
+relink.help = Chaque morceau dont le chemin commence par l'ancien dossier est déplacé vers le nouveau.
+relink.apply = Relier
+relink.done = {count, plural, one {# morceau relié} other {# morceaux reliés}}
+relink.none = Aucun chemin ne commence par ce dossier
