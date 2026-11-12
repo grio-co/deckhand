@@ -32,7 +32,7 @@ session instead of device enumeration (routes follow the OS); no separate engine
 DRM-protected streaming tracks cannot be read (apps do not expose them as files). 
 
 ## Status
-The stub core is gone; the real core is linked (`scripts/build-core.sh`: CMake with `-DDECKHAND_WITH_SQLCIPHER=OFF`, `CMAKE_C_FLAGS=-x objective-c` for miniaudio, static libs, no CMake edits). Earlier verification with the stub: rendering, text incl. CJK/Cyrillic/Arabic, touch
+The stub core is gone; the real core is linked (`scripts/build-core.sh`: CMake with `-DDECKHAND_WITH_SQLCIPHER=OFF`, `CMAKE_C_FLAGS=-x objective-c` for miniaudio, static libs, no CMake edits). Verified in the iPhone simulator with the real core: launches, core UI renders, a generated 20 s WAV (copied into the app's Documents; opened via `SIMCTL_CHILD_DECKHAND_OPEN=<path>`, a DEBUG-only hook) is imported, loaded on deck A, plays (position advancing, BPM 120 detected, master meter moving). Earlier verification with the stub: rendering, text incl. CJK/Cyrillic/Arabic, touch
 buttons, drag slider, keyboard text entry; device-slice compile (unsigned). Not verified: real core, audio output, MIDI,
 document picker, signing/install on a physical device, iPad layout, Bluetooth MIDI.
 
@@ -41,5 +41,7 @@ Sent: (1) the contract I stubbed (see `platform/ios/Stub/deckhand_capi_stub.h`) 
 variant / hit-target sizing, (3) safe-area insets in the display call, (4) audio route call (channel count, master/cue pairs) and
 a way to hand the core an audio device config instead of miniaudio opening one itself (CoreAudio on iOS needs the session set first).
 
-## Current blocker
-Simulator launch aborts in core audio init: miniaudio forces the PlayAndRecord session category on iOS (RemoteIO then hangs in the sim). Asked the Mac session to pass `sessionCategory=none, noAudioSessionActivate` to `ma_context_init` when the shell manages audio.
+## Known gaps
+- Core layout is desktop-only: in portrait the right side is cut off (safe-area and `touch` are ignored by the core for now). Pointer, text and keyboard paths work.
+- The simulator reports its output at 8 kHz / 2 ch; audible output was not checked (meters and transport only). Real route/4-channel behaviour needs a device and the controller.
+- Not verified: document picker, MIDI/DDJ-FLX4, background audio, device signing, iPad.

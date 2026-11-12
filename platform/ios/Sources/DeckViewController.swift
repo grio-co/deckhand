@@ -52,6 +52,12 @@ final class DeckViewController: UIViewController, MTKViewDelegate {
         deck.onKey = { [weak self] in self?.core.key($0) }
         audio.onRouteChange = { [weak self] in self?.core.audioRouteChanged() }
         files.restoreBookmarks()
+        #if DEBUG
+        // Test hook: SIMCTL_CHILD_DECKHAND_OPEN=<path> opens that file in the core a moment after launch.
+        if let path = ProcessInfo.processInfo.environment["DECKHAND_OPEN"] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.core.openFile(path) }
+        }
+        #endif
         files.onFile = { [weak self] url in self?.core.openFile(url.path) }
         files.presenter = self
         NotificationCenter.default.addObserver(forName: .deckOpenFile, object: nil, queue: .main) { [weak self] _ in
