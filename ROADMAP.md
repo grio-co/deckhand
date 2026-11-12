@@ -8,7 +8,11 @@ Strategy: macOS first, made robust; then Windows, then Linux. The core stays pla
 each milestone, build and run tests on the user's Windows and Linux machines. CI and the Win/Linux
 shells come after the Mac version is solid.
 
-Groundwork: git init (done), library schema draft docs/SCHEMA.sql (done), test data (todo).
+Status: a first working macOS build exists (library import, engine, generic controllers with a
+DDJ-FLX4 mapping, core-drawn UI). It took two shortcuts, both tracked in TODO.md: the engine runs
+in-process, and the default layout is drawn in code until the skin engine lands. Hardware testing
+with the FLX4 is the next step. Controller support is general (mapping files); the FLX4 is simply
+the first device that can be tested.
 
 1. M1 Import + library: read-only import of a copy of the source DB into DeckHand's SQLite; portable path layer.
 2. M2 UI shell: custom GPU toolkit (gfx), skin engine, built-in default skin, i18n, browser, playlists, search.

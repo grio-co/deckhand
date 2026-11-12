@@ -1,0 +1,254 @@
+# DeckHand controller mapping: DDJ-FLX4
+# Written from the manufacturer's published "List of MIDI messages" (Ver 1.0) for this unit.
+#
+# Format (one directive per line, hex bytes, decks and slots are 1-based):
+#   name / match        mapping name; match = part of the MIDI device name
+#   audio               which audio device to prefer and where its stereo pairs start
+#   jog                 jog wheel resolution
+#   init <bytes>        message sent to the device when it connects
+#   in  <kind> <status> <data1> [<lsb data1>] <action> [key=value ...]
+#         kinds: button, abs (7-bit), abs14 (MSB + LSB), rel (0x40 = no movement),
+#                rel2 (0x01.. = clockwise, 0x7F.. = counter-clockwise)
+#   out <status> <data1> <state> [key=value ...]     LED or meter driven by a deck state
+
+name  "DDJ-FLX4"
+match "DDJ-FLX4"
+
+# Class-compliant audio: master on outputs 1-2, headphones on 3-4.
+audio match=DDJ-FLX4 master=1 phones=3
+
+# Not stated in the manufacturer's list. To calibrate: run DeckHand with debug logging,
+# touch the platter, turn it exactly one revolution, release, and read the tick count.
+jog ticks_per_rev=720
+
+# Vinyl mode on for both decks (the unit cannot change this itself).
+init 90 17 7F
+init 91 17 7F
+
+# ---- deck 1 ----------------------------------------------------------------
+in button 90 0B play deck=1
+in button 90 0C cue deck=1
+in button 90 48 seek_start deck=1          # SHIFT + CUE
+in button 90 58 sync deck=1
+in button 90 60 tempo_range deck=1         # SHIFT + BEAT SYNC
+in button 90 36 jog_touch deck=1
+in button 90 67 jog_touch deck=1           # SHIFT + touch
+in rel    B0 22 jog deck=1 surface=top     # platter, vinyl mode on
+in rel    B0 23 jog deck=1 surface=side    # platter, vinyl mode off
+in rel    B0 29 jog deck=1 surface=side scale=8   # SHIFT + platter: fast search
+in rel    B0 21 jog deck=1 surface=side    # wheel side
+in abs14  B0 00 20 tempo deck=1            # 0 at the "-" end
+in button 90 10 loop_in deck=1
+in button 90 11 loop_out deck=1
+in button 90 4D loop_toggle deck=1 beats=4
+in button 90 50 reloop deck=1              # SHIFT + 4 BEAT/EXIT
+in button 90 51 cue_call deck=1 dir=-1     # halves an active loop
+in button 90 53 cue_call deck=1 dir=1      # doubles an active loop
+in abs14  B0 04 24 trim deck=1
+in abs14  B0 07 27 eq_high deck=1
+in abs14  B0 0B 2B eq_mid deck=1
+in abs14  B0 0F 2F eq_low deck=1
+in abs14  B0 13 33 fader deck=1
+in abs14  B6 17 37 filter deck=1
+in button 90 54 pfl deck=1
+in button 96 46 load deck=1
+in button 97 00 hotcue deck=1 slot=1
+in button 97 01 hotcue deck=1 slot=2
+in button 97 02 hotcue deck=1 slot=3
+in button 97 03 hotcue deck=1 slot=4
+in button 97 04 hotcue deck=1 slot=5
+in button 97 05 hotcue deck=1 slot=6
+in button 97 06 hotcue deck=1 slot=7
+in button 97 07 hotcue deck=1 slot=8
+in button 98 00 hotcue_clear deck=1 slot=1   # SHIFT + pad
+in button 98 01 hotcue_clear deck=1 slot=2   # SHIFT + pad
+in button 98 02 hotcue_clear deck=1 slot=3   # SHIFT + pad
+in button 98 03 hotcue_clear deck=1 slot=4   # SHIFT + pad
+in button 98 04 hotcue_clear deck=1 slot=5   # SHIFT + pad
+in button 98 05 hotcue_clear deck=1 slot=6   # SHIFT + pad
+in button 98 06 hotcue_clear deck=1 slot=7   # SHIFT + pad
+in button 98 07 hotcue_clear deck=1 slot=8   # SHIFT + pad
+in button 97 20 beatjump deck=1 beats=-1
+in button 97 21 beatjump deck=1 beats=1
+in button 97 22 beatjump deck=1 beats=-2
+in button 97 23 beatjump deck=1 beats=2
+in button 97 24 beatjump deck=1 beats=-4
+in button 97 25 beatjump deck=1 beats=4
+in button 97 26 beatjump deck=1 beats=-8
+in button 97 27 beatjump deck=1 beats=8
+in button 97 60 beatloop deck=1 beats=0.25
+in button 97 61 beatloop deck=1 beats=0.5
+in button 97 62 beatloop deck=1 beats=1
+in button 97 63 beatloop deck=1 beats=2
+in button 97 64 beatloop deck=1 beats=4
+in button 97 65 beatloop deck=1 beats=8
+in button 97 66 beatloop deck=1 beats=16
+in button 97 67 beatloop deck=1 beats=32
+in button 90 1B pad_mode deck=1 mode=hotcue
+out 90 1B pad_mode deck=1 mode=hotcue
+in button 90 1E pad_mode deck=1 mode=padfx1
+out 90 1E pad_mode deck=1 mode=padfx1
+in button 90 20 pad_mode deck=1 mode=beatjump
+out 90 20 pad_mode deck=1 mode=beatjump
+in button 90 22 pad_mode deck=1 mode=sampler
+out 90 22 pad_mode deck=1 mode=sampler
+in button 90 69 pad_mode deck=1 mode=keyboard
+out 90 69 pad_mode deck=1 mode=keyboard
+in button 90 6B pad_mode deck=1 mode=padfx2
+out 90 6B pad_mode deck=1 mode=padfx2
+in button 90 6D pad_mode deck=1 mode=beatloop
+out 90 6D pad_mode deck=1 mode=beatloop
+in button 90 6F pad_mode deck=1 mode=keyshift
+out 90 6F pad_mode deck=1 mode=keyshift
+out 90 0B playing deck=1 blink=1
+out 90 0C cue deck=1 blink=1
+out 90 58 sync deck=1
+out 90 54 pfl deck=1
+out 90 10 loop deck=1
+out 90 11 loop deck=1
+out 9F 00 loaded deck=1
+out 97 00 hotcue deck=1 slot=1
+out 97 01 hotcue deck=1 slot=2
+out 97 02 hotcue deck=1 slot=3
+out 97 03 hotcue deck=1 slot=4
+out 97 04 hotcue deck=1 slot=5
+out 97 05 hotcue deck=1 slot=6
+out 97 06 hotcue deck=1 slot=7
+out 97 07 hotcue deck=1 slot=8
+out 97 20 loaded deck=1
+out 97 60 loaded deck=1
+out 97 21 loaded deck=1
+out 97 61 loaded deck=1
+out 97 22 loaded deck=1
+out 97 62 loaded deck=1
+out 97 23 loaded deck=1
+out 97 63 loaded deck=1
+out 97 24 loaded deck=1
+out 97 64 loaded deck=1
+out 97 25 loaded deck=1
+out 97 65 loaded deck=1
+out 97 26 loaded deck=1
+out 97 66 loaded deck=1
+out 97 27 loaded deck=1
+out 97 67 loaded deck=1
+out B0 02 level deck=1 min=26 max=7F
+
+# ---- deck 2 ----------------------------------------------------------------
+in button 91 0B play deck=2
+in button 91 0C cue deck=2
+in button 91 48 seek_start deck=2          # SHIFT + CUE
+in button 91 58 sync deck=2
+in button 91 60 tempo_range deck=2         # SHIFT + BEAT SYNC
+in button 91 36 jog_touch deck=2
+in button 91 67 jog_touch deck=2           # SHIFT + touch
+in rel    B1 22 jog deck=2 surface=top     # platter, vinyl mode on
+in rel    B1 23 jog deck=2 surface=side    # platter, vinyl mode off
+in rel    B1 29 jog deck=2 surface=side scale=8   # SHIFT + platter: fast search
+in rel    B1 21 jog deck=2 surface=side    # wheel side
+in abs14  B1 00 20 tempo deck=2            # 0 at the "-" end
+in button 91 10 loop_in deck=2
+in button 91 11 loop_out deck=2
+in button 91 4D loop_toggle deck=2 beats=4
+in button 91 50 reloop deck=2              # SHIFT + 4 BEAT/EXIT
+in button 91 51 cue_call deck=2 dir=-1     # halves an active loop
+in button 91 53 cue_call deck=2 dir=1      # doubles an active loop
+in abs14  B1 04 24 trim deck=2
+in abs14  B1 07 27 eq_high deck=2
+in abs14  B1 0B 2B eq_mid deck=2
+in abs14  B1 0F 2F eq_low deck=2
+in abs14  B1 13 33 fader deck=2
+in abs14  B6 18 38 filter deck=2
+in button 91 54 pfl deck=2
+in button 96 47 load deck=2
+in button 99 00 hotcue deck=2 slot=1
+in button 99 01 hotcue deck=2 slot=2
+in button 99 02 hotcue deck=2 slot=3
+in button 99 03 hotcue deck=2 slot=4
+in button 99 04 hotcue deck=2 slot=5
+in button 99 05 hotcue deck=2 slot=6
+in button 99 06 hotcue deck=2 slot=7
+in button 99 07 hotcue deck=2 slot=8
+in button 9A 00 hotcue_clear deck=2 slot=1   # SHIFT + pad
+in button 9A 01 hotcue_clear deck=2 slot=2   # SHIFT + pad
+in button 9A 02 hotcue_clear deck=2 slot=3   # SHIFT + pad
+in button 9A 03 hotcue_clear deck=2 slot=4   # SHIFT + pad
+in button 9A 04 hotcue_clear deck=2 slot=5   # SHIFT + pad
+in button 9A 05 hotcue_clear deck=2 slot=6   # SHIFT + pad
+in button 9A 06 hotcue_clear deck=2 slot=7   # SHIFT + pad
+in button 9A 07 hotcue_clear deck=2 slot=8   # SHIFT + pad
+in button 99 20 beatjump deck=2 beats=-1
+in button 99 21 beatjump deck=2 beats=1
+in button 99 22 beatjump deck=2 beats=-2
+in button 99 23 beatjump deck=2 beats=2
+in button 99 24 beatjump deck=2 beats=-4
+in button 99 25 beatjump deck=2 beats=4
+in button 99 26 beatjump deck=2 beats=-8
+in button 99 27 beatjump deck=2 beats=8
+in button 99 60 beatloop deck=2 beats=0.25
+in button 99 61 beatloop deck=2 beats=0.5
+in button 99 62 beatloop deck=2 beats=1
+in button 99 63 beatloop deck=2 beats=2
+in button 99 64 beatloop deck=2 beats=4
+in button 99 65 beatloop deck=2 beats=8
+in button 99 66 beatloop deck=2 beats=16
+in button 99 67 beatloop deck=2 beats=32
+in button 91 1B pad_mode deck=2 mode=hotcue
+out 91 1B pad_mode deck=2 mode=hotcue
+in button 91 1E pad_mode deck=2 mode=padfx1
+out 91 1E pad_mode deck=2 mode=padfx1
+in button 91 20 pad_mode deck=2 mode=beatjump
+out 91 20 pad_mode deck=2 mode=beatjump
+in button 91 22 pad_mode deck=2 mode=sampler
+out 91 22 pad_mode deck=2 mode=sampler
+in button 91 69 pad_mode deck=2 mode=keyboard
+out 91 69 pad_mode deck=2 mode=keyboard
+in button 91 6B pad_mode deck=2 mode=padfx2
+out 91 6B pad_mode deck=2 mode=padfx2
+in button 91 6D pad_mode deck=2 mode=beatloop
+out 91 6D pad_mode deck=2 mode=beatloop
+in button 91 6F pad_mode deck=2 mode=keyshift
+out 91 6F pad_mode deck=2 mode=keyshift
+out 91 0B playing deck=2 blink=1
+out 91 0C cue deck=2 blink=1
+out 91 58 sync deck=2
+out 91 54 pfl deck=2
+out 91 10 loop deck=2
+out 91 11 loop deck=2
+out 9F 01 loaded deck=2
+out 99 00 hotcue deck=2 slot=1
+out 99 01 hotcue deck=2 slot=2
+out 99 02 hotcue deck=2 slot=3
+out 99 03 hotcue deck=2 slot=4
+out 99 04 hotcue deck=2 slot=5
+out 99 05 hotcue deck=2 slot=6
+out 99 06 hotcue deck=2 slot=7
+out 99 07 hotcue deck=2 slot=8
+out 99 20 loaded deck=2
+out 99 60 loaded deck=2
+out 99 21 loaded deck=2
+out 99 61 loaded deck=2
+out 99 22 loaded deck=2
+out 99 62 loaded deck=2
+out 99 23 loaded deck=2
+out 99 63 loaded deck=2
+out 99 24 loaded deck=2
+out 99 64 loaded deck=2
+out 99 25 loaded deck=2
+out 99 65 loaded deck=2
+out 99 26 loaded deck=2
+out 99 66 loaded deck=2
+out 99 27 loaded deck=2
+out 99 67 loaded deck=2
+out B1 02 level deck=2 min=26 max=7F
+
+# ---- mixer and browse -----------------------------------------------------------
+in abs14  B6 1F 3F crossfader                  # 0 at the left
+in abs14  B6 0C 2C head_mix
+# MASTER LEVEL (B6 08 28) and HEADPHONE LEVEL (B6 0D 2D) also send MIDI. They are left
+# unmapped on the assumption that the unit applies them itself; if those knobs do nothing,
+# uncomment the two lines below.
+# in abs14 B6 08 28 master_level
+# in abs14 B6 0D 2D head_level
+in rel2   B6 40 browse
+in rel2   B6 64 browse scale=10                # SHIFT + turn
+in button 96 41 browse_press
