@@ -49,22 +49,25 @@ fader crossfader head_mix head_level master_level pfl browse browse_press load p
 | `sampler_stop` | button | stop slot `slot=N`, or every slot when no slot is given |
 | `sampler_level` | abs | sampler bus level |
 | `master_bpm` | button / abs / rel | `value=X` sets (0 = follow the decks); abs sweeps `lo=`..`hi=` (default 60..180); rel: `scale=` BPM per tick |
+| `fx_assign` | button | `unit=N target=deck1\|deck2\|deck3\|deck4\|master`: unit N now addresses that channel (press only) |
+| `master_cue` | button | headphones monitor the master, see Master cue; `value=1\|0` sets, `hold=1` momentary |
+| `mic_level` | - | reserved: the engine has no microphone input yet; a mapping using it is rejected |
 | `modifier` | button | holds the modifier `name=<name>` (global, or only for `deck=N`) |
 | `keyboard` `keyshift` `padfx` | pad button | see pad modes |
 
-Effect slots: `slot=1..3`, and `unit=deck` (default, the rule's `deck=`) or `unit=master` (the master
-bus). Effect names: `none echo ping_pong spiral reverb flanger phaser low_cut_echo filter_sweep roll
+Effect slots: `slot=1..3`, and `unit=deck` (default, the rule's `deck=`), `unit=master` (the master bus),
+or an effect unit that follows an assignment (see Effect units): `unit=assigned` (= unit 1) or `unit=N`. Effect names: `none echo ping_pong spiral reverb flanger phaser low_cut_echo filter_sweep roll
 transform pitch crusher vinyl_brake backspin`.
 
 ## Arguments
 `deck=N`, `slot=N`, `beats=X`, `dir=-1|1`, `scale=X`, `surface=top|side` (jog), `invert=1`,
 `mode=hotcue|padfx1|beatjump|sampler|keyboard|padfx2|beatloop|keyshift`, `semitones=X` / `value=X`,
-`lo=X hi=X`, `effect=<name>`, `unit=deck|master`, `hold=1`, `offset=N` (sampler slot offset),
+`lo=X hi=X`, `effect=<name>`, `unit=deck|master|assigned|1..4`, `target=deck1..deck4|master` (fx_assign), `hold=1`, `offset=N` (sampler slot offset),
 `pad=N` (pad number, for `padfx` defaults), `name=<modifier>`, `when=<modifier>` or
 `when=!<modifier>`, `pickup=0|1`, `deadzone=X` (0..0.45).
 
 Output states: `playing cue sync pfl loop loop_in hotcue loaded pad_mode level key_lock quantize slip
-reverse fx_on sampler_playing loop_beats key_shift modifier`, with `blink=1`, `on=XX off=XX`, and for
+reverse fx_on sampler_playing loop_beats key_shift modifier fx_assign master_cue color_fx`, with `blink=1`, `on=XX off=XX`, and for
 `level` meters `min=XX max=XX`.
 - `fx_on slot=N [unit=master] [effect=<name>]`: lit while that slot is on (and runs that effect).
 - `sampler_playing slot=N [offset=N]`: lit while the sampler slot plays (needs the sampler views, see
@@ -73,6 +76,26 @@ reverse fx_on sampler_playing loop_beats key_shift modifier`, with `blink=1`, `o
 - `key_shift semitones=X`: lit while the deck's key shift rounds to X; without `semitones=` it is the pad
   number minus 1 (keyboard mode) or minus 5 (keyshift mode).
 - `modifier name=<name>`: lit while the modifier is held.
+- `fx_assign unit=N target=deckX|master`: lit while effect unit N is assigned to it.
+- `master_cue`: lit while master cue is on.
+- `color_fx deck=N [effect=<name>]`: lit while the deck's colour effect is that one (without `effect=`: any
+  but the default filter).
+
+## Effect units
+A hub-level assignment says which channel effect unit N (1..4, all start on master) addresses. A rule
+with `unit=assigned` (unit 1) or `unit=N` on `fx_select fx_on fx_wet fx_param fx_time padfx` (and an `out ... fx_on`)
+acts on whatever that unit is assigned to now. `fx_assign unit=N target=...` changes it; a controller with
+a channel-select switch maps one rule per position (it fires on a press / non-zero value only). On a
+change, every effect that is on is switched off on the old channel first, then the selected effect, wet,
+parameter and time of each slot that has an effect are copied to the new channel (left off). Slots with no
+effect selected are not copied. Assignment is not saved and starts at master.
+`out ... fx_assign unit=N target=deckX` is lit while unit N is on that target.
+
+## Master cue
+`master_cue` (the engine has no dedicated master-cue switch, so this uses head mix, 0 cue .. 1 master):
+the first press remembers the current head mix and sets it to full master; the second press restores
+the remembered value. Turning a `head_mix` control in between ends it (the knob wins, no restore).
+`out ... master_cue` is lit while it is on. The state is the hub's, not the engine's.
 
 ## Pad modes
 `pad_mode` buttons (`mode=` is required) select a mode per deck (default `hotcue`); `out ... pad_mode`
@@ -111,6 +134,8 @@ makes a flat zone of +-X around the centre (for centre-detented knobs); the ends
 14-bit and relative handling are unchanged.
 
 ## MIDI learn (library; no UI yet)
+`learn_choices(decks = 2)` returns `{label, action, group}` entries ("Play" / `play deck=1` / "Deck 1") for a
+picker; pass `action` to `learn_begin`. Labels are English, groups are translated by the app.
 Any connected MIDI device gets an empty mapping when no mapping matches, so learn works on any
 controller (it is not listed by `connected()`).
 - `ControllerHub::learn_begin("filter deck=2")`: the action as written after the control. Returns false
@@ -142,5 +167,5 @@ feeds the master effect state, sampler level, master BPM and sampler slot states
 
 ## Not yet
 - HID controllers, a MIDI learn UI, and a controller-state readback at connect (use `pickup=1` to avoid
-  jumps). The FLX4 mapping lacks the pad FX, sampler, keyboard and key-shift pad notes, KEY LOCK, CFX and
-  beat FX controls: their MIDI numbers are not in the list it was written from (TODO lines in the file).
+  jumps). The FLX4 mapping lacks KEY LOCK and the MIC level (the engine has no mic input); its beat FX channel
+  switch and MASTER CUE note assignments are guesses (docs/TESTING-FLX4.md).

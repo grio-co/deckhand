@@ -30,15 +30,17 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [x] Sample-accurate scheduled commands (clock, deck position, beat) through the API
 - [x] DDJ-FLX4 mapping completed from the published MIDI list (untested on hardware)
 - [x] OpenAPI document
+- [x] Linux port: build, FFmpeg decoder, ALSA MIDI, SDL3 + OpenGL shell (container-tested only)
+- [x] Controllers: effect unit assignment, master cue, learn choices by name
 
 ## Next
-- [ ] Linux port (in progress: build, decoder, MIDI, shell; tested in a container)
+- [ ] Linux: rerun the container build against the skin-driven UI; fall back to no audio device
+      cleanly; audio-route change notifications; test on a real machine (audio, MIDI, Wayland)
 - [ ] Windows port (after Linux; built and tested on the Windows PC)
 - [ ] Engine in its own process (survives a UI crash)
 - [ ] Skins: window shapes, images/sprites and rotate animations are parsed but not drawn;
       hidden widgets keep their layout space
-- [ ] Controllers: effect unit channel select, mic and master-cue actions (needed by the FLX4's
-      beat FX channel switch); MIDI learn by control name; HID controllers
+- [ ] Controllers: microphone input (engine has none yet); HID controllers
 - [ ] Listening test of key lock on real mixes; transient handling if needed
 - [ ] Test against a real OBS
 - [ ] USB export: check against a reference export, then the CDJ-3000 test; write exportExt.pdb

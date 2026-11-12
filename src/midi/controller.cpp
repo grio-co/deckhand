@@ -83,7 +83,8 @@ const Named kActions[] = {
     {"fx_param", int(Action::FxParam)}, {"fx_time", int(Action::FxTime)}, {"sampler", int(Action::Sampler)},
     {"sampler_stop", int(Action::SamplerStop)}, {"sampler_level", int(Action::SamplerLevel)},
     {"master_bpm", int(Action::MasterBpm)}, {"keyboard", int(Action::Keyboard)}, {"keyshift", int(Action::KeyShiftPad)},
-    {"padfx", int(Action::PadFx)}, {"modifier", int(Action::Modifier)},
+    {"padfx", int(Action::PadFx)}, {"modifier", int(Action::Modifier)}, {"fx_assign", int(Action::FxAssign)},
+    {"master_cue", int(Action::MasterCue)},
 };
 const Named kStates[] = {
     {"playing", int(LedState::Playing)}, {"cue", int(LedState::Cue)}, {"sync", int(LedState::Sync)},
@@ -92,7 +93,8 @@ const Named kStates[] = {
     {"level", int(LedState::Level)}, {"key_lock", int(LedState::KeyLock)}, {"quantize", int(LedState::Quantize)},
     {"slip", int(LedState::Slip)}, {"reverse", int(LedState::Reverse)}, {"fx_on", int(LedState::FxOn)},
     {"sampler_playing", int(LedState::SamplerPlaying)}, {"loop_beats", int(LedState::LoopBeats)},
-    {"key_shift", int(LedState::KeyShift)}, {"modifier", int(LedState::Modifier)},
+    {"key_shift", int(LedState::KeyShift)}, {"modifier", int(LedState::Modifier)}, {"fx_assign", int(LedState::FxAssign)},
+    {"master_cue", int(LedState::MasterCue)}, {"color_fx", int(LedState::ColorFx)},
 };
 const Named kModes[] = {{"hotcue", 0}, {"padfx1", 1}, {"beatjump", 2}, {"sampler", 3},
                         {"keyboard", 4}, {"padfx2", 5}, {"beatloop", 6}, {"keyshift", 7}};
@@ -126,10 +128,11 @@ struct Args {
   bool top = false, invert = false, blink = false;
   bool has_deck = false, has_slot = false, has_beats = false, has_dir = false, has_value = false, has_range = false;
   bool hold = false, master_unit = false;
+  int fx_unit = -1;
   float amount = 1, value = 0, lo = 0, hi = 1, deadzone = -1;
   int pickup = -1, pad = -1, offset = 0;
   int on = 0x7F, off = 0, min = -1, max = -1;
-  std::string match, effect, when, name;
+  std::string match, effect, when, name, target;
   int master = -1, phones = -1;
   double ticks_per_rev = -1;
 };
@@ -160,9 +163,13 @@ bool parse_args(const std::vector<std::string>& t, std::size_t from, Args& a, st
     else if (k == "deadzone") a.deadzone = std::max(0.0f, std::min(0.45f, num));
     else if (k == "pickup") a.pickup = v == "1" ? 1 : 0;
     else if (k == "unit") {
-      if (v != "deck" && v != "master") { error = "unit must be deck or master"; return false; }
-      a.master_unit = v == "master";
+      const int n = std::atoi(v.c_str());
+      if (v == "assigned") { a.fx_unit = 0; a.master_unit = false; }
+      else if (n >= 1 && n <= kFxUnits && v == std::to_string(n)) { a.fx_unit = n - 1; a.master_unit = false; }
+      else if (v == "deck" || v == "master") { a.master_unit = v == "master"; a.fx_unit = -1; }
+      else { error = "unit must be deck, master, assigned or 1.." + std::to_string(kFxUnits); return false; }
     }
+    else if (k == "target") a.target = v;
     else if (k == "effect") a.effect = v;
     else if (k == "pad") a.pad = std::atoi(v.c_str()) - 1;
     else if (k == "offset") a.offset = std::atoi(v.c_str());
@@ -195,6 +202,15 @@ bool resolve_effect(const Action action, const std::string& name, int& out) {
   if (name.empty()) return true;
   if (action == Action::ColorFx) return lookup(kColorFx, name, out);
   return lookup(kEffects, name, out);
+}
+
+bool resolve_fx_target(const std::string& name, int& out) {
+  if (name == "master") { out = kFxMaster; return true; }
+  if (name.size() == 5 && name.compare(0, 4, "deck") == 0 && name[4] >= '1' && name[4] <= '4') {
+    out = name[4] - '1';
+    return true;
+  }
+  return false;
 }
 
 const float kTempoRanges[] = {0.06f, 0.10f, 0.16f, 1.0f};
@@ -246,6 +262,10 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
   const std::vector<std::string> t = tokens(line);
   if (t.empty()) return true;
   const std::string& head = t[0];
+  if (head == "in" && t.size() > 4 && (t[4] == "mic_level" || (t.size() > 5 && t[5] == "mic_level"))) {
+    why = "mic_level is reserved: the engine has no microphone input yet";
+    return false;
+  }
   if (head == "name" && t.size() == 2) {
     m.name = t[1];
   } else if (head == "match" && t.size() == 2) {
@@ -313,6 +333,11 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
       r.modifier = intern(m, a.name);
     }
     if (!resolve_effect(r.action, a.effect, r.effect)) { why = "unknown effect '" + a.effect + "'"; return false; }
+    r.fx_unit = a.fx_unit;
+    if (r.action == Action::FxAssign) {
+      if (r.fx_unit < 0) { why = "fx_assign needs unit=1.." + std::to_string(kFxUnits); return false; }
+      if (!resolve_fx_target(a.target, r.fx_target)) { why = "fx_assign needs target=deck1..deck4|master"; return false; }
+    }
     switch (r.action) {
       case Action::HotCue: case Action::HotCueClear:
         if (r.slot >= kHotCues) { why = "hot cue slot out of range"; return false; }
@@ -349,6 +374,7 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
     r.value = a.value;
     r.has_value = a.has_value;
     r.master_unit = a.master_unit;
+    r.fx_unit = a.fx_unit;
     r.offset = a.offset;
     r.on = static_cast<std::uint8_t>(a.max >= 0 ? a.max : a.on);
     r.off = static_cast<std::uint8_t>(a.min >= 0 ? a.min : a.off);
@@ -357,7 +383,14 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
       if (a.name.empty()) { why = "modifier state needs name=<name>"; return false; }
       r.modifier = intern(m, a.name);
     }
-    if (!resolve_effect(Action::FxOn, a.effect, r.effect)) { why = "unknown effect '" + a.effect + "'"; return false; }
+    if (!resolve_effect(r.state == LedState::ColorFx ? Action::ColorFx : Action::FxOn, a.effect, r.effect)) {
+      why = "unknown effect '" + a.effect + "'";
+      return false;
+    }
+    if (r.state == LedState::FxAssign) {
+      if (r.fx_unit < 0) { why = "fx_assign state needs unit=1.." + std::to_string(kFxUnits); return false; }
+      if (!resolve_fx_target(a.target, r.fx_target)) { why = "fx_assign state needs target=deck1..deck4|master"; return false; }
+    }
     if (r.state == LedState::FxOn && r.slot >= kFxSlots) { why = "effect slot out of range"; return false; }
     if (r.state == LedState::SamplerPlaying && r.slot + r.offset >= kSamplerSlots) { why = "sampler slot plus offset out of range"; return false; }
     if (r.state == LedState::HotCue && r.slot >= kHotCues) { why = "hot cue slot out of range"; return false; }
@@ -386,7 +419,7 @@ void line_keys(const std::string& line, std::string& control, std::string& actio
   for (std::size_t i = first; i < t.size(); ++i) {
     const std::string key = t[i].substr(0, t[i].find('='));
     const bool target = i == first || key == "deck" || key == "slot" || key == "unit" || key == "mode" ||
-                        key == "when" || key == "pad" || key == "offset" || key == "effect" || key == "name";
+                        key == "when" || key == "target" || key == "pad" || key == "offset" || key == "effect" || key == "name";
     if (target) action += (action.empty() ? "" : " ") + t[i];
     if (t[i].rfind("when=", 0) == 0 || t[i].rfind("mode=", 0) == 0) control += " " + t[i];
   }
@@ -669,8 +702,43 @@ void ControllerHub::handle(Active& a, std::uint8_t status, std::uint8_t d1, std:
   }
 }
 
-FxSlotView& ControllerHub::fx_slot(bool master, int deck, int slot) {
-  return master ? cache_.mixer.fx[slot] : cache_.deck[deck].fx[slot];
+FxSlotView& ControllerHub::fx_slot(int target, int slot) {
+  return target == kFxMaster ? cache_.mixer.fx[slot] : cache_.deck[target].fx[slot];
+}
+
+int ControllerHub::fx_target(const InRule& r) const {
+  if (r.fx_unit >= 0) return fx_assigned_[r.fx_unit];
+  return r.master_unit ? kFxMaster : r.deck;
+}
+
+void ControllerHub::fx_assign(int unit, int target) {
+  const int old = fx_assigned_[unit];
+  if (old == target) return;
+  Command c;
+  for (int slot = 0; slot < kFxSlots; ++slot) {
+    FxSlotView& from = fx_slot(old, slot);
+    FxSlotView& to = fx_slot(target, slot);
+    c.i = slot;
+    if (from.on) {  // never leave the effect running on the channel it was taken away from
+      c.deck = static_cast<std::uint8_t>(old);
+      c.op = Op::FxEnable;
+      c.f = 0.0f;
+      sink_.command(c);
+      from.on = false;
+    }
+    if (from.kind == EffectKind::None) continue;  // nothing selected on this slot: leave the target's own
+    to.kind = from.kind;
+    to.wet = from.wet;
+    to.beats = from.beats;
+    to.param = from.param;
+    c.deck = static_cast<std::uint8_t>(target);
+    c.op = Op::FxSelect; c.d = static_cast<double>(to.kind); sink_.command(c);
+    c.d = 0;
+    c.op = Op::FxWet; c.f = to.wet; sink_.command(c);
+    c.op = Op::FxParam; c.f = to.param; sink_.command(c);
+    c.op = Op::FxTime; c.f = to.beats; sink_.command(c);
+  }
+  fx_assigned_[unit] = target;
 }
 
 void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pressed) {
@@ -696,8 +764,8 @@ void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pre
       send(op);
     }
   };
-  const bool fx_master = r.master_unit;
-  const std::uint8_t fx_deck = static_cast<std::uint8_t>(fx_master ? kFxMaster : r.deck);
+  const int fx_tgt = fx_target(r);
+  const std::uint8_t fx_deck = static_cast<std::uint8_t>(fx_tgt);
   const int sampler_slot = r.slot + r.offset;
   switch (r.action) {
     case Action::Play: press(Op::PlayToggle); break;
@@ -758,6 +826,21 @@ void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pre
         if (a.map->in[i].when == r.modifier) a.engaged[i] = 0, a.last_v[i] = -1.0f;
       break;
     }
+    case Action::FxAssign:
+      if (pressed) fx_assign(r.fx_unit, r.fx_target);
+      break;
+    case Action::MasterCue: {
+      if (!r.hold && !pressed) break;
+      const bool want = r.hold ? pressed : (r.has_value ? r.value > 0 : !master_cue_);
+      if (want == master_cue_) break;
+      if (want) master_cue_saved_ = cache_.mixer.head_mix;
+      master_cue_ = want;
+      cache_.mixer.head_mix = want ? 1.0f : master_cue_saved_;
+      c.deck = 0;
+      c.f = cache_.mixer.head_mix;
+      send(Op::HeadMix);
+      break;
+    }
     case Action::KeyLock: flag(Op::KeyLock, dv.key_lock); break;
     case Action::Quantize: flag(Op::Quantize, dv.quantize); break;
     case Action::Slip: flag(Op::Slip, dv.slip); break;
@@ -777,7 +860,7 @@ void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pre
       break;
     case Action::FxSelect:
       if (pressed) {
-        FxSlotView& fx = fx_slot(fx_master, r.deck, r.slot);
+        FxSlotView& fx = fx_slot(fx_tgt, r.slot);
         const int kind = r.effect >= 0 ? r.effect : next_effect(static_cast<int>(fx.kind), r.amount < 0 ? -1 : 1);
         fx.kind = static_cast<EffectKind>(kind);
         c.deck = fx_deck;
@@ -787,7 +870,7 @@ void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pre
       }
       break;
     case Action::FxOn: {
-      FxSlotView& fx = fx_slot(fx_master, r.deck, r.slot);
+      FxSlotView& fx = fx_slot(fx_tgt, r.slot);
       bool on = fx.on;
       if (!r.hold && !pressed) break;
       if (r.hold) on = pressed;
@@ -801,7 +884,7 @@ void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pre
     }
     case Action::FxTime:
       if (pressed) {
-        FxSlotView& fx = fx_slot(fx_master, r.deck, r.slot);
+        FxSlotView& fx = fx_slot(fx_tgt, r.slot);
         fx.beats = r.has_beats ? r.amount : step_beats(fx.beats, r.amount < 0 ? -1 : 1);
         c.deck = fx_deck;
         c.i = r.slot;
@@ -810,7 +893,7 @@ void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pre
       }
       break;
     case Action::PadFx: {
-      FxSlotView& fx = fx_slot(fx_master, r.deck, r.slot);
+      FxSlotView& fx = fx_slot(fx_tgt, r.slot);
       c.deck = fx_deck;
       c.i = r.slot;
       if (pressed) {
@@ -926,12 +1009,12 @@ bool ControllerHub::engine_value(const InRule& r, float& e) const {
     case Action::MasterLevel: if (!hm) return false; e = m.master_level; break;
     case Action::SamplerLevel: if (!hm) return false; e = m.sampler_level; break;
     case Action::FxWet:
-      if (r.master_unit ? !hm : !hd) return false;
-      e = (r.master_unit ? m.fx[r.slot] : d.fx[r.slot]).wet;
+      if (fx_target(r) == kFxMaster ? !hm : !cache_.have_deck[fx_target(r)]) return false;
+      e = (fx_target(r) == kFxMaster ? m.fx[r.slot] : cache_.deck[fx_target(r)].fx[r.slot]).wet;
       break;
     case Action::FxParam:
-      if (r.master_unit ? !hm : !hd) return false;
-      e = (r.master_unit ? m.fx[r.slot] : d.fx[r.slot]).param;
+      if (fx_target(r) == kFxMaster ? !hm : !cache_.have_deck[fx_target(r)]) return false;
+      e = (fx_target(r) == kFxMaster ? m.fx[r.slot] : cache_.deck[fx_target(r)].fx[r.slot]).param;
       break;
     case Action::AutoGain: if (!hd) return false; if (!span(d.auto_gain_db)) return false; break;
     case Action::KeyShift: if (!hd) return false; if (!span(d.key_shift)) return false; break;
@@ -976,7 +1059,7 @@ void ControllerHub::value(Active& a, std::size_t idx, const InRule& r, float v) 
     case Action::Filter: c.op = Op::Filter; break;
     case Action::Fader: c.op = Op::Fader; break;
     case Action::Crossfader: c.op = Op::Crossfader; break;
-    case Action::HeadMix: c.op = Op::HeadMix; break;
+    case Action::HeadMix: c.op = Op::HeadMix; master_cue_ = false; break;  // the knob takes over from master cue
     case Action::HeadLevel: c.op = Op::HeadLevel; break;
     case Action::MasterLevel: c.op = Op::MasterLevel; break;
     case Action::SamplerLevel: c.op = Op::SamplerLevel; break;
@@ -985,7 +1068,7 @@ void ControllerHub::value(Active& a, std::size_t idx, const InRule& r, float v) 
     case Action::MasterBpm: c.op = Op::MasterBpm; c.deck = 0; c.f = ranged(60.0f, 180.0f); cache_.mixer.master_bpm = c.f; break;
     case Action::FxWet: case Action::FxParam:
       c.op = r.action == Action::FxWet ? Op::FxWet : Op::FxParam;
-      c.deck = static_cast<std::uint8_t>(r.master_unit ? kFxMaster : r.deck);
+      c.deck = static_cast<std::uint8_t>(fx_target(r));
       c.i = r.slot;
       break;
     default: return;
@@ -998,7 +1081,8 @@ void ControllerHub::delta(Active& a, const InRule& r, int steps) {
   const int sign = steps > 0 ? 1 : -1;
   Command c;
   c.deck = static_cast<std::uint8_t>(r.deck);
-  const std::uint8_t fx_deck = static_cast<std::uint8_t>(r.master_unit ? kFxMaster : r.deck);
+  const int fx_tgt = fx_target(r);
+  const std::uint8_t fx_deck = static_cast<std::uint8_t>(fx_tgt);
   switch (r.action) {
     case Action::Browse: sink_.browse(static_cast<int>(std::lround(steps * r.amount))); break;
     case Action::Jog:
@@ -1009,7 +1093,7 @@ void ControllerHub::delta(Active& a, const InRule& r, int steps) {
       sink_.command(c);
       break;
     case Action::FxSelect: {
-      FxSlotView& fx = fx_slot(r.master_unit, r.deck, r.slot);
+      FxSlotView& fx = fx_slot(fx_tgt, r.slot);
       fx.kind = static_cast<EffectKind>(next_effect(static_cast<int>(fx.kind), sign));
       c.op = Op::FxSelect;
       c.deck = fx_deck;
@@ -1019,7 +1103,7 @@ void ControllerHub::delta(Active& a, const InRule& r, int steps) {
       break;
     }
     case Action::FxTime: {
-      FxSlotView& fx = fx_slot(r.master_unit, r.deck, r.slot);
+      FxSlotView& fx = fx_slot(fx_tgt, r.slot);
       fx.beats = step_beats(fx.beats, sign);
       c.op = Op::FxTime;
       c.deck = fx_deck;
@@ -1029,7 +1113,7 @@ void ControllerHub::delta(Active& a, const InRule& r, int steps) {
       break;
     }
     case Action::FxWet: case Action::FxParam: {  // 1 % per tick, times scale=
-      FxSlotView& fx = fx_slot(r.master_unit, r.deck, r.slot);
+      FxSlotView& fx = fx_slot(fx_tgt, r.slot);
       float& v = r.action == Action::FxWet ? fx.wet : fx.param;
       v = std::max(0.0f, std::min(1.0f, v + steps * r.amount * 0.01f));
       c.op = r.action == Action::FxWet ? Op::FxWet : Op::FxParam;
@@ -1087,7 +1171,7 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
   for (Active& a : active_) {
     want.clear();
     for (const OutRule& r : a.map->out) {
-      const bool deckless = r.master_unit || r.state == LedState::Modifier || r.state == LedState::SamplerPlaying;
+      const bool deckless = r.master_unit || r.fx_unit >= 0 || r.state == LedState::MasterCue || r.state == LedState::Modifier || r.state == LedState::SamplerPlaying;
       if (r.deck >= deck_count && !deckless) continue;
       const DeckView& d = r.deck < deck_count ? decks[r.deck] : blank;
       const std::uint16_t addr = static_cast<std::uint16_t>(r.status << 8 | r.data1);
@@ -1116,7 +1200,9 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
           case LedState::Slip: on = d.slip; break;
           case LedState::Reverse: on = d.reverse; break;
           case LedState::FxOn: {
-            const FxSlotView* fx = r.master_unit ? (mixer ? &mixer->fx[r.slot] : nullptr) : &d.fx[r.slot];
+            const int tgt = r.fx_unit >= 0 ? fx_assigned_[r.fx_unit] : (r.master_unit ? kFxMaster : r.deck);
+            const FxSlotView* fx = tgt == kFxMaster ? (mixer ? &mixer->fx[r.slot] : nullptr)
+                                   : (tgt < deck_count ? &decks[tgt].fx[r.slot] : nullptr);
             on = fx && fx->on && (r.effect < 0 || static_cast<int>(fx->kind) == r.effect);
             break;
           }
@@ -1135,6 +1221,9 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
             on = std::lround(d.key_shift) == std::lround(target);
             break;
           }
+          case LedState::FxAssign: on = fx_assigned_[r.fx_unit] == r.fx_target; break;
+          case LedState::MasterCue: on = master_cue_; break;
+          case LedState::ColorFx: on = r.effect >= 0 ? d.color_fx == r.effect : d.color_fx != static_cast<int>(ColorFx::Filter); break;
           case LedState::Modifier: on = r.modifier >= 0 && (a.held[r.modifier][0] || a.held[r.modifier][1 + r.deck]); break;
           default: break;
         }
@@ -1177,6 +1266,78 @@ bool ControllerHub::learn_begin(const std::string& action) {
   l.action_text = action;
   l.state = LearnState::Waiting;
   return true;
+}
+
+// ---- MIDI learn choices ---------------------------------------------------------------
+std::vector<LearnChoice> learn_choices(int decks) {
+  std::vector<LearnChoice> v;
+  const auto add = [&](const std::string& group, const std::string& label, const std::string& action) {
+    v.push_back({label, action, group});
+  };
+  const auto num = [](double x) {
+    std::string t = std::to_string(x);
+    t.erase(t.find_last_not_of('0') + 1);
+    if (!t.empty() && t.back() == '.') t.pop_back();
+    return t;
+  };
+  decks = std::max(1, std::min(kMaxDecks, decks));
+  static const char* kPadModes[] = {"hotcue", "padfx1", "beatjump", "sampler", "keyboard", "padfx2", "beatloop", "keyshift"};
+  static const char* kPadNames[] = {"Hot cue", "Pad FX 1", "Beat jump", "Sampler", "Keyboard", "Pad FX 2", "Beat loop", "Key shift"};
+  static const double kLoops[] = {0.25, 0.5, 1, 2, 4, 8, 16, 32};
+  static const double kJumps[] = {1, 2, 4, 8, 16};
+  for (int d = 1; d <= decks; ++d) {
+    const std::string g = "Deck " + std::to_string(d), dk = " deck=" + std::to_string(d);
+    const struct { const char* label; const char* act; } simple[] = {
+        {"Play", "play"}, {"Cue", "cue"}, {"Sync", "sync"}, {"Tempo range", "tempo_range"},
+        {"Jump to start", "seek_start"}, {"Jog touch", "jog_touch"}, {"Tempo fader", "tempo"},
+        {"Loop in", "loop_in"}, {"Loop out", "loop_out"}, {"Loop on/off", "loop_toggle"}, {"Reloop", "reloop"},
+        {"Loop exit", "loop_exit"}, {"Loop halve", "loop_halve"}, {"Loop double", "loop_double"},
+        {"Next cue point", "cue_call dir=1"}, {"Previous cue point", "cue_call dir=-1"},
+        {"Delete hot cue 1", "hotcue_clear slot=1"},
+        {"Trim", "trim"}, {"EQ high", "eq_high"}, {"EQ mid", "eq_mid"}, {"EQ low", "eq_low"},
+        {"Colour FX knob", "filter"}, {"Channel fader", "fader"}, {"Headphone cue", "pfl"},
+        {"Key lock", "key_lock"}, {"Quantize", "quantize"}, {"Slip", "slip"}, {"Reverse", "reverse"},
+        {"Key shift", "key_shift"}, {"Auto gain", "auto_gain"}, {"Colour FX type", "color_fx"},
+        {"Load selected track", "load"},
+    };
+    for (const auto& s : simple) add(g, s.label, std::string(s.act) + dk);
+    add(g, "Jog wheel (top)", "jog surface=top" + dk);
+    add(g, "Jog wheel (side)", "jog surface=side" + dk);
+    for (int i = 1; i <= kHotCues; ++i) add(g, "Hot cue " + std::to_string(i), "hotcue slot=" + std::to_string(i) + dk);
+    for (double b : kLoops) add(g, "Beat loop " + num(b), "beatloop beats=" + num(b) + dk);
+    for (double b : kJumps) {
+      add(g, "Beat jump back " + num(b), "beatjump beats=-" + num(b) + dk);
+      add(g, "Beat jump forward " + num(b), "beatjump beats=" + num(b) + dk);
+    }
+    for (int m = 0; m < 8; ++m) add(g, std::string("Pad mode: ") + kPadNames[m], std::string("pad_mode mode=") + kPadModes[m] + dk);
+  }
+  const struct { const char* label; const char* act; } mixer[] = {
+      {"Crossfader", "crossfader"}, {"Headphone mix", "head_mix"}, {"Headphone level", "head_level"},
+      {"Master level", "master_level"}, {"Master cue", "master_cue"}, {"Browse (encoder)", "browse"},
+      {"Browse press", "browse_press"}, {"Sampler level", "sampler_level"}, {"Master BPM", "master_bpm"},
+      {"Shift (modifier)", "modifier name=shift"},
+  };
+  for (const auto& s : mixer) add("Mixer", s.label, s.act);
+  for (int u = 1; u <= 2; ++u) {
+    const std::string g = "Effect unit " + std::to_string(u), us = " unit=" + std::to_string(u) + " slot=1";
+    add(g, "Select effect (next)", "fx_select dir=1" + us);
+    add(g, "Select effect (previous)", "fx_select dir=-1" + us);
+    add(g, "Select effect (encoder)", "fx_select" + us);
+    add(g, "On/off", "fx_on" + us);
+    add(g, "Wet/dry", "fx_wet" + us);
+    add(g, "Parameter", "fx_param" + us);
+    add(g, "Time (shorter)", "fx_time dir=-1" + us);
+    add(g, "Time (longer)", "fx_time dir=1" + us);
+    for (int d = 1; d <= decks; ++d)
+      add(g, "Assign to deck " + std::to_string(d), "fx_assign unit=" + std::to_string(u) + " target=deck" + std::to_string(d));
+    add(g, "Assign to master", "fx_assign unit=" + std::to_string(u) + " target=master");
+  }
+  add("Master effect", "Select effect (next)", "fx_select dir=1 unit=master slot=1");
+  add("Master effect", "On/off", "fx_on unit=master slot=1");
+  add("Master effect", "Wet/dry", "fx_wet unit=master slot=1");
+  for (int s = 1; s <= 16; ++s) add("Sampler", "Sampler pad " + std::to_string(s), "sampler slot=" + std::to_string(s));
+  add("Sampler", "Stop all samples", "sampler_stop");
+  return v;
 }
 
 void ControllerHub::learn_cancel() {

@@ -42,11 +42,12 @@ init 91 17 7F
 #   KEY LOCK / master tempo   no such control or message exists on this unit's list.
 #   Sampler volume            no such control exists on this unit.
 #   Smart Fader (96 01, SHIFT 96 09, LED out 96 01)   no matching action in the format.
-#   MIC LEVEL (B6 05/25, 14-bit)   sends MIDI, but the format has no mic action.
-#   MASTER CUE (96 63, SHIFT 96 78)   sends MIDI, no master-cue action in the format.
+#   MIC LEVEL (B6 05/25, 14-bit)   sends MIDI, but the engine has no microphone input yet, so there is
+#       nothing to drive (the format reserves a mic_level action and rejects it). Intended line once the
+#       engine has a mic path:   in abs14 B6 05 25 mic_level
+#   MASTER CUE SHIFT variant (96 78): not mapped. (MASTER CUE itself, 96 63, is mapped below.)
 #   Android MONO/STEREO switch (96 6D, 7F = mono)   hardware setting, no action.
-#   BEAT FX channel select (CH1/CH2/CH1&CH2 switch: notes 94 10, 94 11, 95 10, 95 11 carry the position)
-#       the format cannot route the beat effect to a channel; only the master bus (unit=master) exists.
+#   BEAT FX channel select: mapped below with fx_assign (which note is which position is a guess).
 #   SHIFT variants of PLAY (0E), CH CUE (68), pad notes in non-hotcue modes (98/9A), BEAT FX
 #       SHIFT+beat arrows (94 66 / 94 6B) and SHIFT+FX ON (94 43 / 95 43): not mapped.
 
@@ -464,25 +465,29 @@ in rel2   B6 40 browse
 in rel2   B6 64 browse scale=10                # SHIFT + turn
 in button 96 41 browse_press
 
-# ---- beat FX section (one set, on the master bus, effect slot 1) ----
+# ---- MASTER CUE (96 63): headphones monitor the master; press again to restore the head mix ----
+# The LED is assumed to be the same note (to confirm on hardware).
+in button 96 63 master_cue
+out 96 63 master_cue
+
+# ---- beat FX section (one unit; effect slot 1; routed to a channel with the CH select switch) ----
+# CH select switch: which note is which position is NOT stated in the list we have. Guess: 94 10 = CH1,
+# 94 11 = CH2, 95 10 / 95 11 = CH1&CH2 (both -> master, the only channel that covers both decks).
+# To confirm on hardware (docs/TESTING-FLX4.md). Only presses (non-zero data) assign.
+in button 94 10 fx_assign unit=1 target=deck1
+in button 94 11 fx_assign unit=1 target=deck2
+in button 95 10 fx_assign unit=1 target=master
+in button 95 11 fx_assign unit=1 target=master
 # FX SELECT / SHIFT+FX SELECT: next / previous effect. BEAT arrows: shorter / longer time.
 # LEVEL/DEPTH is 14-bit. The list gives status B4 for it while its channel column says 6 (B5 would be
 # expected); the status column is used here, see docs/TESTING-FLX4.md.
-# FX ON/OFF sends 94 47 for CH1 and CH1&CH2, 95 47 for CH2, so both toggle the master slot.
+# FX ON/OFF sends 94 47 for CH1 and CH1&CH2, 95 47 for CH2, so both toggle the assigned unit.
 # LED for FX ON/OFF: a footnote says it blinks on NOTE ON and lights on NOTE OFF, but the message table
-# lists no output message for it, so no out rule yet.
-in button 94 63 fx_select unit=master slot=1 dir=1
-in button 94 64 fx_select unit=master slot=1 dir=-1   # SHIFT + FX SELECT
-in button 94 4A fx_time unit=master slot=1 dir=-1
-in button 94 4B fx_time unit=master slot=1 dir=1
-in abs14  B4 02 22 fx_wet unit=master slot=1
-in button 94 47 fx_on unit=master slot=1
-in button 95 47 fx_on unit=master slot=1
-
-# ---- SMART CFX button (96 00, SHIFT 96 08): steps the colour effect the CFX knobs drive, both decks ----
-# (the list names only the button; this meaning is a choice. No LED state exists for it, so its
-# output message 96 00 is not driven.)
-in button 96 00 color_fx deck=1 dir=1
-in button 96 00 color_fx deck=2 dir=1
-in button 96 08 color_fx deck=1 dir=-1
-in button 96 08 color_fx deck=2 dir=-1
+# lists no output message for it, so no out rule for the button itself.
+in button 94 63 fx_select unit=assigned slot=1 dir=1
+in button 94 64 fx_select unit=assigned slot=1 dir=-1   # SHIFT + FX SELECT
+in button 94 4A fx_time unit=assigned slot=1 dir=-1
+in button 94 4B fx_time unit=assigned slot=1 dir=1
+in abs14  B4 02 22 fx_wet unit=assigned slot=1
+in button 94 47 fx_on unit=assigned slot=1
+in button 95 47 fx_on unit=assigned slot=1

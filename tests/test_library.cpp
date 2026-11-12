@@ -8,7 +8,7 @@
 using namespace deckhand;
 
 int main() {
-  const std::string path = "/tmp/deckhand_test_library.db";
+  const std::string path = "/tmp/deckhand_test_library_edit.db";
   std::remove(path.c_str());
   std::remove((path + "-wal").c_str());
   std::remove((path + "-shm").c_str());

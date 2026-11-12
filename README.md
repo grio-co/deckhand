@@ -29,6 +29,8 @@ full control API.
   ([docs/STREAMING.md](docs/STREAMING.md)); tested against a mock, not yet a real OBS.
 - Languages: English, German, French, Spanish and Japanese packs; switch from the top bar.
 - Controllers: declarative mapping files, any matching MIDI device; DDJ-FLX4 mapping included.
+- Linux: builds and passes its tests in an Ubuntu container and renders under a virtual
+  display ([docs/LINUX.md](docs/LINUX.md)); not yet run on a real Linux machine.
 - Portable mode: put a file named `portable` beside the app and all data stays next to it.
 
 - Skins: the whole UI is drawn from declarative skin files ([docs/SKINS.md](docs/SKINS.md));
@@ -62,5 +64,7 @@ The script needs a code-signing identity: set `DECKHAND_SIGN_IDENTITY` or put it
 
 ## Licence
 MIT. See [LICENSE](LICENSE). Bundled third-party code: miniaudio (public domain / MIT-0).
+The Linux build links dynamically to FFmpeg, Pango/Cairo (LGPL) and SDL3 (zlib); see
+[docs/LINUX.md](docs/LINUX.md).
 DeckHand is an independent project, not affiliated with or endorsed by any DJ hardware or
 software vendor. Product names are used only to state compatibility.
