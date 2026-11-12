@@ -142,10 +142,10 @@ App::~App() {
 // inside this one. If the helper cannot be started the app falls back to in-process audio rather than none.
 void App::setup_engine(const std::vector<std::string>& mapping_folders) {
 #if defined(DH_HAVE_ENGINE_PROCESS) && !(defined(__APPLE__) && TARGET_OS_IPHONE)
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__linux__)
   const char* default_mode = "separate";
 #else
-  const char* default_mode = "inprocess";  // the Linux packaging does not install the helper yet
+  const char* default_mode = "inprocess";  // until the helper is proven on this platform
 #endif
   const char* forced = std::getenv("DECKHAND_ENGINE_PROCESS");
   const std::string mode = forced && *forced ? forced : lib_->setting("engine.process", default_mode);
@@ -296,9 +296,12 @@ void App::start_audio() {
                        engine_->sample_rate() / 1000.0);
   } else {
     audio_label_ = T("app.no_audio");
-    status_ = error;
-    DH_LOG(Error, "%s", error.c_str());
+    if (error != last_audio_error_) {  // retried every two seconds: report a failure once
+      status_ = error;
+      DH_LOG(Error, "%s", error.c_str());
+    }
   }
+  last_audio_error_ = ok ? std::string() : error;
 }
 
 void App::restart_audio() { start_audio(); }

@@ -28,10 +28,11 @@ if [ "$REBUILD" = 1 ] || ! docker image inspect $IMAGE >/dev/null 2>&1; then
   docker rm -f $CONTAINER >/dev/null 2>&1 || true
 fi
 if ! docker container inspect $CONTAINER >/dev/null 2>&1; then
-  # /dev/snd gives the MIDI test a real ALSA sequencer when the Docker host has one; optional.
+  # --shm-size: the engine process keeps decoded tracks in /dev/shm (about 21 MB per minute of audio); Docker's
+  # default of 64 MB is too small for the engine IPC test. /dev/snd gives the MIDI test a real ALSA sequencer when the Docker host has one; optional.
   docker rm -f $CONTAINER >/dev/null 2>&1 || true
-  docker run -d --name $CONTAINER --device /dev/snd $IMAGE sleep infinity >/dev/null 2>&1 ||
-    docker run -d --name $CONTAINER $IMAGE sleep infinity >/dev/null
+  docker run -d --name $CONTAINER --init --shm-size=1g --device /dev/snd $IMAGE sleep infinity >/dev/null 2>&1 ||
+    docker run -d --name $CONTAINER --init --shm-size=1g $IMAGE sleep infinity >/dev/null
 fi
 docker start $CONTAINER >/dev/null
 
@@ -46,6 +47,8 @@ docker exec -e BUILD_DIR=/work/build $CONTAINER sh -c 'cd /work/src && scripts/b
 if [ "$SMOKE" = 1 ]; then
   docker exec $CONTAINER sh -c 'rm -rf /work/out && /work/src/scripts/linux/smoke.sh /work/build /work/out'
   mkdir -p "$OUT"
+  docker exec $CONTAINER sh -c '/work/src/scripts/linux/engine-check.sh /work/build /work/out'
+  docker exec $CONTAINER sh -c '/work/src/scripts/linux/package.sh /work/build /work/out'
   docker cp $CONTAINER:/work/out/. "$OUT/"
   echo "artefacts in $OUT"
 fi

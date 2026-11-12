@@ -372,7 +372,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::mutex audio_mutex_;  // serialises engine start/stop (UI thread and control thread)
   std::mutex state_mutex_;  // guards the members below, shared with the worker threads
   DeckInfo decks_[kMaxDecks];
-  std::string status_, audio_label_, audio_choice_, audio_pref_;
+  std::string status_, audio_label_, audio_choice_, audio_pref_, last_audio_error_;
   std::uint32_t audio_period_ = 256;
   bool importing_ = false, exporting_ = false;
   std::atomic<bool> rows_dirty_{true};

@@ -4,6 +4,7 @@
 
 #if defined(__unix__) || defined(__APPLE__)
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -20,6 +21,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 
 #if defined(__APPLE__)
@@ -57,7 +59,21 @@ std::uint32_t current_pid() { return static_cast<std::uint32_t>(getpid()); }
 
 bool process_alive(std::uint32_t pid) {
   if (pid == 0) return false;
-  return kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
+  if (kill(static_cast<pid_t>(pid), 0) != 0 && errno != EPERM) return false;
+#if defined(__linux__)
+  // A killed process whose parent never reaps it (a container whose PID 1 is not an init) stays a zombie
+  // and still answers kill(pid, 0). Treat it as gone.
+  char path[64];
+  std::snprintf(path, sizeof path, "/proc/%u/stat", pid);
+  if (std::FILE* f = std::fopen(path, "r")) {
+    char buf[512] = {};
+    const std::size_t n = std::fread(buf, 1, sizeof buf - 1, f);
+    std::fclose(f);
+    const char* close_paren = n ? std::strrchr(buf, ')') : nullptr;
+    if (close_paren && close_paren[1] == ' ' && (close_paren[2] == 'Z' || close_paren[2] == 'X')) return false;
+  }
+#endif
+  return true;
 }
 
 bool reap_child(std::uint32_t pid) {
@@ -116,6 +132,16 @@ bool Shm::create(const std::string& name, std::size_t size, Shm& out, std::strin
     shm_unlink(name.c_str());
     return false;
   }
+#if defined(__linux__)
+  // /dev/shm is a size-limited tmpfs (64 MB by default in containers): a sparse segment that cannot be backed
+  // kills the writer with SIGBUS on first touch. Reserve the pages now so a full tmpfs is a clean error.
+  if (const int rc = posix_fallocate(fd, 0, static_cast<off_t>(size)); rc != 0) {
+    error = std::string("no room in /dev/shm: ") + std::strerror(rc);
+    ::close(fd);
+    shm_unlink(name.c_str());
+    return false;
+  }
+#endif
   void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   ::close(fd);
   if (p == MAP_FAILED) {
@@ -329,7 +355,19 @@ bool session_names(const std::string& data_dir, SessionNames& out, std::string& 
   std::snprintf(hex, sizeof hex, "%08x", static_cast<unsigned>((h >> 32) ^ (h & 0xFFFFFFFFu)));
 
   const char* over = std::getenv("DECKHAND_IPC_DIR");  // tests and unusual setups
-  out.dir = over && *over ? over : "/tmp/dh-" + std::to_string(static_cast<unsigned long>(getuid()));
+  if (over && *over) {
+    out.dir = over;
+  } else {
+    out.dir = "/tmp/dh-" + std::to_string(static_cast<unsigned long>(getuid()));
+#if defined(__linux__)
+    // Linux: the per-user runtime folder (tmpfs, cleaned at logout) when the session has one.
+    const char* xdg = std::getenv("XDG_RUNTIME_DIR");
+    struct stat xs {};
+    if (xdg && *xdg == '/' && std::strlen(xdg) < 60 && stat(xdg, &xs) == 0 && S_ISDIR(xs.st_mode) && xs.st_uid == getuid() &&
+        access(xdg, W_OK) == 0)
+      out.dir = std::string(xdg) + "/deckhand";
+#endif
+  }
   mkdir(out.dir.c_str(), 0700);
   struct stat st {};
   if (lstat(out.dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid()) {
@@ -355,6 +393,19 @@ bool spawn_detached(const std::string& exe, const std::vector<std::string>& args
   posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
   posix_spawn_file_actions_addopen(&fa, 1, log_file.empty() ? "/dev/null" : log_file.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
   posix_spawn_file_actions_adddup2(&fa, 1, 2);
+#if defined(__linux__)
+  // Linux has no POSIX_SPAWN_CLOEXEC_DEFAULT: close every inherited descriptor above stderr by hand so the
+  // helper does not hold the UI's pipes, sockets or display connection open.
+  if (DIR* d = opendir("/proc/self/fd")) {
+    std::vector<int> fds;
+    while (const dirent* e = readdir(d)) {
+      const int fd = std::atoi(e->d_name);
+      if (fd > 2 && fd != dirfd(d)) fds.push_back(fd);
+    }
+    closedir(d);
+    for (const int fd : fds) posix_spawn_file_actions_addclose(&fa, fd);
+  }
+#endif
   posix_spawnattr_t attr;
   posix_spawnattr_init(&attr);
   short flags = 0;

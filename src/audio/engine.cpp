@@ -131,6 +131,37 @@ ma_result init_context(ma_context* ctx, bool null_backend = false) {
   return ma_context_init(nullptr, 0, &config, ctx);
 }
 
+void probe_callback(ma_device*, void*, const void*, ma_uint32) {}
+
+// True if the output the engine would pick for `hint` can be opened right now (opened and closed, never started).
+bool real_output_opens(const std::string& hint_in) {
+  ma_context ctx;
+  if (init_context(&ctx) != MA_SUCCESS) return false;
+  ma_device_info* infos = nullptr;
+  ma_uint32 count = 0;
+  ma_context_get_devices(&ctx, &infos, &count, nullptr, nullptr);
+  const ma_device_id* id = nullptr;
+  std::string hint = hint_in;
+  std::transform(hint.begin(), hint.end(), hint.begin(), [](unsigned char c) { return std::tolower(c); });
+  if (!hint.empty()) {
+    for (ma_uint32 i = 0; i < count && !id; ++i) {
+      std::string n = infos[i].name;
+      std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return std::tolower(c); });
+      if (n.find(hint) != std::string::npos) id = &infos[i].id;
+    }
+  }
+  ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
+  cfg.playback.pDeviceID = id;
+  cfg.playback.format = ma_format_f32;
+  cfg.playback.channels = 2;
+  cfg.dataCallback = &probe_callback;
+  ma_device dev;
+  const bool ok = ma_device_init(&ctx, &cfg, &dev) == MA_SUCCESS;
+  if (ok) ma_device_uninit(&dev);
+  ma_context_uninit(&ctx);
+  return ok;
+}
+
 std::string lower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
   return s;
@@ -244,6 +275,7 @@ struct Engine::Impl {
   ma_device dev{};
   bool dev_ok = false;
   std::string dev_name;
+  bool fallback = false;  // running on miniaudio's null device because no real output could be opened
 
   std::uint32_t sr = 44100;
   int channels = 2;
@@ -1514,9 +1546,11 @@ std::vector<std::string> Engine::output_devices() {
   return names;
 }
 
-bool Engine::start(const OutputConfig& config, std::string& error) {
-  stop();
+bool Engine::start(const OutputConfig& requested, std::string& error) {
   Impl& s = *impl_;
+  // Opens the device `config` names (stops a running stream first).
+  const auto open = [&](const OutputConfig& config, std::string& error) -> bool {
+  stop();
   if (init_context(&s.ctx, config.null_backend) != MA_SUCCESS) {
     error = "could not initialise the audio system";
     return false;
@@ -1585,6 +1619,33 @@ bool Engine::start(const OutputConfig& config, std::string& error) {
          s.sr, s.dev.playback.internalPeriodSizeInFrames, s.phones_ch >= 0 ? "on" : "off (stereo device)",
          s.dev.playback.converter.isPassthrough ? "yes" : "no (converted)");
   return true;
+  };
+
+  if (requested.null_backend) {
+    s.fallback = false;
+    return open(requested, error);
+  }
+  // Already on the null device: leave it running (no restart, no gap) unless a real output opens now.
+  if (s.fallback && !real_output_opens(requested.device_hint)) {
+    error = "No audio output";
+    return false;
+  }
+  s.fallback = false;
+  if (open(requested, error)) return true;
+  // No usable output (no sound card, or the sound server is gone): keep the engine, UI and API alive on the
+  // null backend and report the failure; the caller's periodic device check retries the real device.
+  const std::string reason = error;
+  OutputConfig quiet = requested;
+  quiet.null_backend = true;
+  quiet.device_hint.clear();
+  std::string ignored;
+  if (open(quiet, ignored)) {
+    s.fallback = true;
+    s.dev_name = "No audio output";
+    DH_LOG(Warn, "audio: %s; running on the null output until a device appears", reason.c_str());
+  }
+  error = "No audio output";
+  return false;
 }
 
 void Engine::stop() {
@@ -1593,9 +1654,10 @@ void Engine::stop() {
   if (s.ctx_ok) ma_context_uninit(&s.ctx);
   s.dev_ok = s.ctx_ok = false;
   s.timing_on = false;
+  s.fallback = false;
 }
 
-bool Engine::running() const { return impl_->dev_ok; }
+bool Engine::running() const { return impl_->dev_ok && !impl_->fallback; }  // false on the null fallback: callers retry
 std::string Engine::device_name() const { return impl_->dev_name; }
 int Engine::output_channels() const { return impl_->channels; }
 std::uint32_t Engine::sample_rate() const { return impl_->sr; }

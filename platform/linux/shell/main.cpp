@@ -9,6 +9,13 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <fstream>
+#include <mutex>
+#include <sstream>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +24,7 @@
 #include <vector>
 
 #include "deckhand/app/capi.h"
+#include "deckhand/audio/engine.hpp"
 #include "renderer.hpp"
 #include "text.hpp"
 
@@ -123,6 +131,52 @@ int map_key(SDL_Keycode k) {
     default: return 0;
   }
 }
+
+// Watches for audio devices coming and going (a controller's interface plugged in, the default sink changed) and
+// raises a flag the main loop turns into dh_app_audio_route. The signature is the ALSA card list plus the output
+// device names the audio backends report; it is compared every two seconds, off the UI thread.
+class AudioWatch {
+ public:
+  AudioWatch() : thread_([this] { run(); }) {}
+  ~AudioWatch() {
+    {
+      std::lock_guard<std::mutex> lock(m_);
+      stop_ = true;
+    }
+    cv_.notify_all();
+    thread_.join();
+  }
+  bool changed() { return changed_.exchange(false); }
+
+ private:
+  static std::string signature() {
+    std::ostringstream out;
+    std::ifstream cards("/proc/asound/cards");
+    out << cards.rdbuf() << '|';
+    for (const std::string& n : deckhand::Engine::output_devices()) out << n << '\n';
+    return out.str();
+  }
+  void run() {
+    std::string last = signature();
+    std::unique_lock<std::mutex> lock(m_);
+    while (!stop_) {
+      cv_.wait_for(lock, std::chrono::seconds(2), [this] { return stop_; });
+      if (stop_) break;
+      lock.unlock();
+      std::string now = signature();
+      lock.lock();
+      if (now != last) {
+        last = std::move(now);
+        changed_ = true;
+      }
+    }
+  }
+  std::mutex m_;
+  std::condition_variable cv_;
+  bool stop_ = false;
+  std::atomic<bool> changed_{false};
+  std::thread thread_;
+};
 
 struct Display {
   int w_px = 0, h_px = 0;
@@ -238,6 +292,14 @@ int main(int argc, char** argv) {
   for (const auto& f : opt.files) dh_app_open_file(core, f.c_str(), -1.0f, -1.0f);
 
   auto px = [&](float v) { return v * disp.density; };
+  // Keep the core's idea of the held modifiers current: before every pointer or key event and when focus goes.
+  std::uint32_t held_mods = 0;
+  auto sync_mods = [&](std::uint32_t mods) {
+    if (mods == held_mods) return;
+    held_mods = mods;
+    dh_app_modifiers(core, mods);
+  };
+  AudioWatch audio_watch;
   Uint64 last = SDL_GetPerformanceCounter();
   const double freq = static_cast<double>(SDL_GetPerformanceFrequency());
   int frames = 0;
@@ -249,14 +311,20 @@ int main(int argc, char** argv) {
       switch (e.type) {
         case SDL_EVENT_QUIT:
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED: running = false; break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST: sync_mods(0); break;
+        case SDL_EVENT_KEY_UP: sync_mods(modifiers(e.key.mod)); break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
+          sync_mods(modifiers(SDL_GetModState()));
           if (e.button.button == SDL_BUTTON_LEFT)
             dh_app_pointer(core, DH_PTR_DOWN, 0, px(e.button.x), px(e.button.y), e.button.clicks);
           break;
         case SDL_EVENT_MOUSE_BUTTON_UP:
+          sync_mods(modifiers(SDL_GetModState()));
           if (e.button.button == SDL_BUTTON_LEFT) dh_app_pointer(core, DH_PTR_UP, 0, px(e.button.x), px(e.button.y), 0);
           break;
-        case SDL_EVENT_MOUSE_MOTION: dh_app_pointer(core, DH_PTR_MOVE, 0, px(e.motion.x), px(e.motion.y), 0); break;
+        case SDL_EVENT_MOUSE_MOTION:
+          sync_mods(modifiers(SDL_GetModState()));
+          dh_app_pointer(core, DH_PTR_MOVE, 0, px(e.motion.x), px(e.motion.y), 0); break;
         case SDL_EVENT_MOUSE_WHEEL: {
           // Wheel notches are whole numbers; touchpads report fractions of one. Match the macOS 12 px per notch.
           const float unit = 12.0f * disp.scale;
@@ -264,6 +332,7 @@ int main(int argc, char** argv) {
           break;
         }
         case SDL_EVENT_KEY_DOWN: {
+          sync_mods(modifiers(e.key.mod));
           const int key = map_key(e.key.key);
           if (key) dh_app_key(core, static_cast<dh_key>(key), modifiers(e.key.mod));
           break;
@@ -283,6 +352,7 @@ int main(int argc, char** argv) {
       continue;
     }
 
+    if (audio_watch.changed()) dh_app_audio_route(core);
     set_display();
     const Uint64 now = SDL_GetPerformanceCounter();
     const double dt = static_cast<double>(now - last) / freq;
