@@ -11,6 +11,10 @@
 #include "deckhand/log/log.hpp"
 #include "miniaudio.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 namespace deckhand {
 namespace {
 
@@ -101,6 +105,18 @@ inline void read_frame(const float* pcm, std::int64_t frames, double pos, float&
   }
   l = out[0];
   r = out[1];
+}
+
+// On iOS the shell owns the audio session (category, activation, routing); the engine must
+// leave it alone, or the system's default play-and-record session is forced on the app.
+ma_result init_context(ma_context* ctx) {
+  ma_context_config config = ma_context_config_init();
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+  config.coreaudio.sessionCategory = ma_ios_session_category_none;
+  config.coreaudio.noAudioSessionActivate = MA_TRUE;
+  config.coreaudio.noAudioSessionDeactivate = MA_TRUE;
+#endif
+  return ma_context_init(nullptr, 0, &config, ctx);
 }
 
 std::string lower(std::string s) {
@@ -714,7 +730,7 @@ Engine::~Engine() {
 std::vector<std::string> Engine::output_devices() {
   std::vector<std::string> names;
   ma_context ctx;
-  if (ma_context_init(nullptr, 0, nullptr, &ctx) != MA_SUCCESS) return names;
+  if (init_context(&ctx) != MA_SUCCESS) return names;
   ma_device_info* infos = nullptr;
   ma_uint32 count = 0;
   if (ma_context_get_devices(&ctx, &infos, &count, nullptr, nullptr) == MA_SUCCESS) {
@@ -727,7 +743,7 @@ std::vector<std::string> Engine::output_devices() {
 bool Engine::start(const OutputConfig& config, std::string& error) {
   stop();
   Impl& s = *impl_;
-  if (ma_context_init(nullptr, 0, nullptr, &s.ctx) != MA_SUCCESS) {
+  if (init_context(&s.ctx) != MA_SUCCESS) {
     error = "could not initialise the audio system";
     return false;
   }

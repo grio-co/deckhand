@@ -24,5 +24,8 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 - Tests: library, engine (offline rendering), controller mapping.
 - Design docs: architecture, roadmap, API, skins, internationalisation, logging, controllers.
 
+### Fixed
+- iOS: the engine no longer overrides the audio session the shell configures.
+
 ### Changed
 - Core language is C++20 with thin platform shells (was a single-language plan).
