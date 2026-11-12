@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstdio>
 
+#include "deckhand/gfx/png.hpp"
+#include "deckhand/log/log.hpp"
+
 namespace deckhand::ui {
 
 namespace {
@@ -291,13 +294,68 @@ bool SkinView::load(const std::string& path, std::string& error) {
     error = r.describe();
     return false;
   }
+  release_images();
   skin_ = r.skin;
   theme_ = Theme::from_skin(*skin_);
   layout_ = skin::Layout{};
   slots_.clear();
   window_.clear();
   active_ = hot_ = -1;
+  if (!skin_->root_dir.empty()) {  // a skin directory: decode its atlas images; they upload with the next frame
+    for (const skin::Atlas& a : skin_->atlases) {
+      gfx::Image img;
+      std::string why;
+      if (!gfx::load_png_file(skin_->root_dir + "/" + a.src, img, why)) {
+        DH_LOG(Warn, "skin atlas '%s': %s", a.name.c_str(), why.c_str());
+        continue;
+      }
+      Tex t;
+      t.w = img.width;
+      t.h = img.height;
+      t.id = dl_.add_image(img.width, img.height, std::move(img.rgba));
+      if (t.id) textures_[a.name] = t;
+    }
+  }
   return true;
+}
+
+void SkinView::release_images() {
+  for (const auto& kv : textures_) dl_.remove_image(kv.second.id);
+  textures_.clear();
+}
+
+// Draws "atlas:region" into r: stretched, or as a nine-slice when the region declares slice insets (corners keep
+// their pixel size, edges and centre stretch). Rotation (radians, about the centre) stretches the whole region.
+void SkinView::draw_sprite(const std::string& sprite, const skin::Rect& r, float opacity, float radians) {
+  const std::size_t colon = sprite.find(':');
+  if (!skin_ || colon == std::string::npos || r.w <= 0 || r.h <= 0) return;
+  const auto tex = textures_.find(sprite.substr(0, colon));
+  const skin::Atlas* atlas = skin_->find_atlas(sprite.substr(0, colon));
+  if (tex == textures_.end() || !atlas) return;
+  const skin::Region* reg = nullptr;
+  for (const skin::Region& g : atlas->regions)
+    if (g.name == sprite.substr(colon + 1)) reg = &g;
+  if (!reg) return;
+  const float tw = static_cast<float>(tex->second.w), th = static_cast<float>(tex->second.h);
+  const gfx::Color tint = gfx::rgba(255, 255, 255, static_cast<int>(std::lround(255.0f * std::clamp(opacity, 0.0f, 1.0f))));
+  const std::uint32_t id = tex->second.id;
+  const skin::Rect& s = reg->src;
+  if (!reg->nine_slice || radians != 0) {
+    dl_.image(id, r.x, r.y, r.w, r.h, s.x / tw, s.y / th, s.right() / tw, s.bottom() / th, tint, radians);
+    return;
+  }
+  const float l = reg->slice[0], t = reg->slice[1], rr = reg->slice[2], b = reg->slice[3];
+  const float kx = std::min(1.0f, r.w / std::max(1.0f, l + rr)), ky = std::min(1.0f, r.h / std::max(1.0f, t + b));
+  const float dx[4] = {r.x, r.x + l * kx, r.right() - rr * kx, r.right()};
+  const float dy[4] = {r.y, r.y + t * ky, r.bottom() - b * ky, r.bottom()};
+  const float sx[4] = {s.x, s.x + l, s.right() - rr, s.right()};
+  const float sy[4] = {s.y, s.y + t, s.bottom() - b, s.bottom()};
+  for (int j = 0; j < 3; ++j)
+    for (int i = 0; i < 3; ++i) {
+      const float w = dx[i + 1] - dx[i], h = dy[j + 1] - dy[j];
+      if (w <= 0 || h <= 0 || sx[i + 1] <= sx[i] || sy[j + 1] <= sy[j]) continue;
+      dl_.image(id, dx[i], dy[j], w, h, sx[i] / tw, sy[j] / th, sx[i + 1] / tw, sy[j + 1] / th, tint, 0);
+    }
 }
 
 void SkinView::layout(const std::string& window, float w, float h, float il, float it, float ir, float ib) {
@@ -305,9 +363,9 @@ void SkinView::layout(const std::string& window, float w, float h, float il, flo
   if (window == window_ && w == lw_ && h == lh_ && il == insets_[0] && it == insets_[1] && ir == insets_[2] && ib == insets_[3] &&
       !layout_.widgets.empty())
     return;
-  std::size_t index = 0;
+  window_index_ = 0;
   for (std::size_t i = 0; i < skin_->windows.size(); ++i)
-    if (skin_->windows[i].id == window) index = i;
+    if (skin_->windows[i].id == window) window_index_ = i;
   window_ = window;
   lw_ = w;
   lh_ = h;
@@ -315,15 +373,23 @@ void SkinView::layout(const std::string& window, float w, float h, float il, flo
   insets_[1] = it;
   insets_[2] = ir;
   insets_[3] = ib;
-  const skin::Window& win = skin_->windows[index];
+  const skin::Window& win = skin_->windows[window_index_];
   min_w_ = win.min_w;
   min_h_ = win.min_h;
-  const float iw = std::max(64.0f, w - il - ir), ih = std::max(64.0f, h - it - ib);
-  layout_ = skin::solve_layout(*skin_, index, iw, ih, 1.0f);
+  node_hidden_.assign(skin_->nodes.size(), 0);
+  relayout(true);
+}
+
+// Solves the layout again with the current hidden set. The widget list has one entry per node in a fixed order,
+// so per-widget state (slots_, active_, hot_) stays valid unless `reset_slots`.
+void SkinView::relayout(bool reset_slots) {
+  const float iw = std::max(64.0f, lw_ - insets_[0] - insets_[2]), ih = std::max(64.0f, lh_ - insets_[1] - insets_[3]);
+  layout_ = skin::solve_layout(*skin_, window_index_, iw, ih, 1.0f, &node_hidden_);
   for (skin::ResolvedWidget& rw : layout_.widgets) {
-    rw.rect.x += il;
-    rw.rect.y += it;
+    rw.rect.x += insets_[0];
+    rw.rect.y += insets_[1];
   }
+  if (!reset_slots) return;
   slots_.assign(layout_.widgets.size(), Slot{});
   for (std::size_t i = 0; i < slots_.size(); ++i) {
     const skin::ResolvedWidget& rw = layout_.widgets[i];
@@ -536,7 +602,7 @@ void SkinView::draw_widget(int i, SkinHost& host, const Input& in, double now_s,
   const bool pressed = active_ == i && in.down;
   const bool hover = !pressed && (active_ < 0 ? hot_ == i : active_ == i);
   bool on = false;
-  if (w.kind == skin::Kind::Button && t) on = host.read_flag(t);
+  if ((w.kind == skin::Kind::Button || w.kind == skin::Kind::Image) && t) on = host.read_flag(t);  // an image can follow a toggle
   skin::State state = skin::State::Normal;
   if (pressed) state = skin::State::Pressed;
   else if (on) state = skin::State::On;
@@ -606,7 +672,6 @@ void SkinView::draw_widget(int i, SkinHost& host, const Input& in, double now_s,
   r.x += off_x;
   r.y += off_y;
   st.opacity *= alpha;
-  (void)rotate;
 
   // ---- background, border, glow
   const bool draws_box = w.drawable && w.kind != skin::Kind::Spacer;
@@ -618,6 +683,7 @@ void SkinView::draw_widget(int i, SkinHost& host, const Input& in, double now_s,
       }
     }
     if (st.bg & 0xFF) dl_.rrect(r.x, r.y, r.w, r.h, st.radius, to_gfx(st.bg, st.opacity));
+    if (!st.sprite.empty()) draw_sprite(st.sprite, r, st.opacity, rotate * kPi / 180.0f);
     if ((st.border & 0xFF) && st.border_w > 0) dl_.rrect_outline(r.x, r.y, r.w, r.h, st.radius, to_gfx(st.border, st.opacity), st.border_w);
   }
 
@@ -678,6 +744,15 @@ void SkinView::frame(SkinHost& host, const Input& in, double now_s) {
     bool hide = w.parent >= 0 && hidden_[static_cast<std::size_t>(w.parent)];
     if (!hide && slots_[i].show) hide = host.read_flag(slots_[i].show) == slots_[i].show_negate;
     hidden_[i] = hide ? 1 : 0;
+  }
+  {  // a hidden widget gives its space back in rows, columns and grids: solve again when the set changed
+    std::vector<char> mask(skin_->nodes.size(), 0);
+    for (std::size_t i = 0; i < layout_.widgets.size(); ++i)
+      if (hidden_[i]) mask[static_cast<std::size_t>(layout_.widgets[i].node)] = 1;
+    if (mask != node_hidden_) {
+      node_hidden_ = std::move(mask);
+      relayout(false);
+    }
   }
 
   // Pointer: press picks the widget; a release ends the drag.

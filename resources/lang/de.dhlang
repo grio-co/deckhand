@@ -157,3 +157,36 @@ relink.none = Kein Titelpfad beginnt mit diesem Ordner
 
 status.synced = Synchronisiert: {sent} Änderungen gesendet, {files} empfangen
 status.sync_failed = Synchronisierung fehlgeschlagen: {message}
+
+engine.attached = Wieder mit der laufenden Audio-Engine verbunden
+engine.died = Die Audio-Engine wurde beendet; sie wird neu gestartet...
+engine.restarted = Die Audio-Engine wurde neu gestartet; deine Decks sind leer, lade deine Titel erneut
+engine.gave_up = Die Audio-Engine fällt immer wieder aus und wurde nicht erneut gestartet. Starte DeckHand neu.
+engine.fallback = Der Audio-Engine-Prozess konnte nicht gestartet werden ({error}); Audio läuft im Programm
+engine.refused_sample = Die Audio-Engine hat das Sample abgelehnt: {reason}
+engine.refused_track = Die Audio-Engine hat einen Titel abgelehnt
+learn.group_deck = Deck {n}
+learn.group_fx = Effekteinheit {n}
+learn.group_mixer = Mixer
+learn.group_master_fx = Master-Effekt
+learn.group_sampler = Sampler
+settings.controllers = Controller
+settings.bluetooth_midi = Bluetooth-MIDI...
+settings.bluetooth_hint = Koppele hier einen Bluetooth-MIDI-Controller; danach erscheint er wie jeder andere Controller.
+settings.sync = Bibliotheksabgleich
+settings.sync_folder = Ordner
+settings.sync_folder_hint = Gemeinsamer Sync-Ordner
+settings.choose = Wählen...
+settings.sync_choose_title = Sync-Ordner wählen
+settings.sync_device = Gerätename
+settings.sync_now = Jetzt abgleichen
+settings.sync_no_folder = Wähle einen Ordner, um den Abgleich einzuschalten.
+settings.sync_running = Abgleich läuft...
+settings.sync_error = Letzter Abgleich fehlgeschlagen: {message}
+settings.sync_last = Letzter Abgleich {time}: {sent} gesendet, {received} empfangen
+settings.sync_last_time = Letzter Abgleich {time}
+settings.sync_never = Noch nicht abgeglichen
+settings.sync_devices = {count, plural, =0 {Keine anderen Geräte gesehen} one {# anderes Gerät gesehen} other {# andere Geräte gesehen}}
+export.other = Anderer Ordner...
+export.choose_title = Exportordner wählen
+relink.choose_title = Neuen Ordner wählen

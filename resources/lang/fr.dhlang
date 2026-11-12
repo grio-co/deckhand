@@ -157,3 +157,36 @@ relink.none = Aucun chemin ne commence par ce dossier
 
 status.synced = Synchronisé : {sent} modifications envoyées, {files} reçues
 status.sync_failed = Échec de la synchronisation : {message}
+
+engine.attached = Reconnecté au moteur audio en cours d'exécution
+engine.died = Le moteur audio s'est arrêté ; redémarrage...
+engine.restarted = Le moteur audio a redémarré ; vos platines sont vides, rechargez vos morceaux
+engine.gave_up = Le moteur audio plante sans cesse et n'a pas été relancé. Redémarrez DeckHand.
+engine.fallback = Impossible de démarrer le processus du moteur audio ({error}) ; audio dans l'application
+engine.refused_sample = Le moteur audio a refusé l'échantillon : {reason}
+engine.refused_track = Le moteur audio a refusé un morceau
+learn.group_deck = Platine {n}
+learn.group_fx = Unité d'effets {n}
+learn.group_mixer = Mixeur
+learn.group_master_fx = Effet master
+learn.group_sampler = Sampler
+settings.controllers = Contrôleurs
+settings.bluetooth_midi = MIDI Bluetooth...
+settings.bluetooth_hint = Associez ici un contrôleur MIDI Bluetooth ; il apparaît ensuite comme les autres contrôleurs.
+settings.sync = Synchronisation de la bibliothèque
+settings.sync_folder = Dossier
+settings.sync_folder_hint = Dossier de synchronisation partagé
+settings.choose = Choisir...
+settings.sync_choose_title = Choisir le dossier de synchronisation
+settings.sync_device = Nom de l'appareil
+settings.sync_now = Synchroniser
+settings.sync_no_folder = Choisissez un dossier pour activer la synchronisation.
+settings.sync_running = Synchronisation...
+settings.sync_error = Échec de la dernière synchronisation : {message}
+settings.sync_last = Dernière synchronisation {time} : {sent} envoyées, {received} reçues
+settings.sync_last_time = Dernière synchronisation {time}
+settings.sync_never = Pas encore synchronisé
+settings.sync_devices = {count, plural, =0 {Aucun autre appareil détecté} one {# autre appareil détecté} other {# autres appareils détectés}}
+export.other = Autre dossier...
+export.choose_title = Choisir le dossier d'export
+relink.choose_title = Choisir le nouveau dossier

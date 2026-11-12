@@ -75,18 +75,50 @@ void App::close_panel() {
   focus_ = nullptr;
 }
 
+bool App::choose_folder(const std::string& title, std::string& out) {
+  if (!platform_.choose_folder) return false;
+  std::vector<char> buf(4096, 0);
+  const bool ok = platform_.choose_folder(platform_.user, title.c_str(), buf.data(), static_cast<std::uint32_t>(buf.size()));
+  raw_.down = ov_.down = false;  // a modal dialog swallows the pointer release
+  raw_.pressed = ov_.pressed = false;
+  if (!ok || buf[0] == 0) return false;
+  buf.back() = 0;
+  out = buf.data();
+  return true;
+}
+
 void App::begin_export_menu() {
   export_targets_.clear();
-  std::error_code ec;
+  export_other_ = platform_.choose_folder != nullptr;
+  bool listed = false;
+  if (platform_.list_export_targets) {  // the shell knows its platform's removable drives
+    std::vector<char> buf(16384, 0);
+    if (platform_.list_export_targets(platform_.user, buf.data(), static_cast<std::uint32_t>(buf.size()))) {
+      listed = true;
+      buf.back() = 0;
+      std::string all = buf.data();
+      std::size_t at = 0;
+      while (at <= all.size()) {
+        std::size_t nl = all.find('\n', at);
+        if (nl == std::string::npos) nl = all.size();
+        const std::string line = trim(all.substr(at, nl - at));
+        if (!line.empty()) export_targets_.push_back(line);
+        at = nl + 1;
+      }
+    }
+  }
+  if (!listed) {
+    std::error_code ec;
 #if defined(__APPLE__)
-  const char* mounts[] = {"/Volumes"};
+    const char* mounts[] = {"/Volumes"};
 #else
-  const char* mounts[] = {"/media", "/run/media", "/mnt"};
+    const char* mounts[] = {"/media", "/run/media", "/mnt"};
 #endif
-  for (const char* m : mounts) {
-    for (std::filesystem::directory_iterator it(m, ec), end; !ec && it != end; it.increment(ec)) {
-      if (it->is_symlink(ec) || !it->is_directory(ec)) continue;  // the boot volume appears as a link
-      export_targets_.push_back(it->path().string());
+    for (const char* m : mounts) {
+      for (std::filesystem::directory_iterator it(m, ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->is_symlink(ec) || !it->is_directory(ec)) continue;  // the boot volume appears as a link
+        export_targets_.push_back(it->path().string());
+      }
     }
   }
   if (const char* home = std::getenv("HOME")) export_targets_.push_back(std::string(home) + "/Music/DeckHand USB Export");
@@ -105,8 +137,12 @@ void App::open_panel(Panel p) {
       output_devices_ = engine_->devices();
       for (const auto& kv : std::vector<std::pair<const char*, const char*>>{{"api.enabled", "1"}, {"api.port", "7373"}, {"stream.files", "0"},
                                                                           {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"obs.host", "127.0.0.1"},
-                                                                          {"obs.port", "4455"}, {"obs.text_source", ""}})
+                                                                          {"obs.port", "4455"}, {"obs.text_source", ""}, {"sync.folder", ""}})
         sv_[kv.first] = lib_->setting(kv.first, kv.second);
+      sv_["sync.device_name"] = lib_->setting("sync.device_name", host_name());
+      f_sync_folder_.text = sv_["sync.folder"];
+      f_sync_name_.text = sv_["sync.device_name"];
+      post_kind(Job::SyncInfo);  // devices and last sync, read on the loader thread
       f_port_.text = sv_["api.port"];
       f_obs_host_.text = sv_["obs.host"];
       f_obs_port_.text = sv_["obs.port"];
@@ -122,31 +158,19 @@ void App::open_panel(Panel p) {
       learn_saved_ = false;
       f_search_learn_.text.clear();
       hub_->learn_cancel();
-      const char* per_deck[] = {"play", "cue", "sync", "jog", "jog_touch", "tempo", "tempo_range", "loop_in", "loop_out", "loop_toggle", "reloop",
-                                "loop_exit", "loop_halve", "loop_double", "cue_call", "trim", "eq_high", "eq_mid", "eq_low", "filter", "fader",
-                                "pfl", "load", "key_lock", "key_shift", "quantize", "slip", "reverse", "seek_start", "pad_mode"};
-      const char* per_slot[] = {"hotcue", "hotcue_clear", "sampler"};
-      const char* global[] = {"crossfader", "head_mix", "head_level", "master_level", "sampler_level", "master_bpm", "browse", "browse_press", "sampler_stop"};
-      const auto pretty = [](std::string a) {
-        std::replace(a.begin(), a.end(), '_', ' ');
-        return a;
+      learn_label_.clear();
+      const auto group_name = [&](const std::string& g) {
+        const auto number = [&](const char* prefix) { return std::atoi(g.c_str() + std::strlen(prefix)); };
+        if (g.compare(0, 5, "Deck ") == 0) return T("learn.group_deck", {{"n", number("Deck ")}});
+        if (g.compare(0, 12, "Effect unit ") == 0) return T("learn.group_fx", {{"n", number("Effect unit ")}});
+        if (g == "Mixer") return T("learn.group_mixer");
+        if (g == "Master effect") return T("learn.group_master_fx");
+        if (g == "Sampler") return T("learn.group_sampler");
+        return g;
       };
-      for (const char* a : global) learn_list_.push_back({pretty(a), a});
-      for (int d = 1; d <= 4; ++d) {
-        for (const char* a : per_deck) {
-          std::string action = std::string(a) + " deck=" + std::to_string(d);
-          if (std::string(a) == "pad_mode") action += " mode=hotcue";
-          learn_list_.push_back({pretty(a) + "  \xC2\xB7  " + T("learn.deck", {{"deck", d}}), action});
-        }
-        for (const char* a : per_slot) {
-          const int n = std::string(a) == "sampler" ? 16 : kHotCues;
-          if (std::string(a) == "sampler" && d > 1) continue;  // sampler slots are not per deck
-          for (int s = 1; s <= n; ++s) {
-            const std::string deck_part = std::string(a) == "sampler" ? "" : " deck=" + std::to_string(d);
-            learn_list_.push_back({pretty(a) + "  \xC2\xB7  " + (deck_part.empty() ? "" : T("learn.deck", {{"deck", d}}) + "  \xC2\xB7  ") + T("learn.slot", {{"slot", s}}),
-                                   std::string(a) + deck_part + " slot=" + std::to_string(s)});
-          }
-        }
+      for (const LearnChoice& c : learn_choices(kUiDecks)) {
+        const std::string group = group_name(c.group);
+        learn_list_.push_back({group + " \xE2\x80\xBA " + c.label, c.action, group});
       }
       break;
     }
@@ -202,6 +226,10 @@ void App::commit_settings() {
   numeric("obs.port", f_obs_port_);
   text("obs.host", f_obs_host_, false);
   text("obs.text_source", f_obs_source_, true);
+  const std::string old_folder = sv_["sync.folder"];
+  text("sync.folder", f_sync_folder_, true);
+  text("sync.device_name", f_sync_name_, false);
+  if (sv_["sync.folder"] != old_folder) post_kind(Job::SyncInfo);
 }
 
 void App::draw_overlays() {
@@ -225,7 +253,7 @@ void App::draw_overlays() {
     case Panel::Learn: m = {0, 0, std::min(680.0f, w - 24), std::min(540.0f, h - 24)}; title = T("learn.title"); break;
     case Panel::Tags: m = {0, 0, std::min(520.0f, w - 24), std::min(400.0f, h - 24)}; title = T("tags.title"); break;
     case Panel::Relink: m = {0, 0, std::min(560.0f, w - 24), std::min(250.0f, h - 24)}; title = T("relink.title"); break;
-    case Panel::Export: m = {0, 0, std::min(440.0f, w - 16), 38 + 26 * static_cast<float>(export_targets_.size())}; title = T("export.title", {{"what", export_what_()}}); break;
+    case Panel::Export: m = {0, 0, std::min(440.0f, w - 16), 38 + 26 * static_cast<float>(export_targets_.size() + (export_other_ ? 1 : 0))}; title = T("export.title", {{"what", export_what_()}}); break;
     default: break;
   }
   if (panel_ == Panel::AddTo) {
@@ -293,6 +321,22 @@ void App::draw_export_menu(const Rect& m) {
       post(j);
       close_panel();
       return;
+    }
+  }
+  if (export_other_) {  // pick any folder
+    const Rect row{m.x + 6, m.y + 38 + 26 * static_cast<float>(export_targets_.size()), m.w - 12, 24};
+    if (row.contains(ov_.x, ov_.y)) dl_.rrect(row.x, row.y, row.w, row.h, 4, with_alpha(theme_.accent, 90));
+    dl_.text(row.x + 8, row.y + 5, T("export.other"), 12, theme_.accent, Align::Left, row.w - 16, 1);
+    if (ov_.pressed && row.contains(ov_.x, ov_.y)) {
+      std::string dest;
+      if (choose_folder(T("export.choose_title"), dest)) {
+        Job j;
+        j.kind = Job::Export;
+        j.path = dest;
+        j.track_id = list;
+        post(j);
+      }
+      close_panel();
     }
   }
 }
@@ -432,6 +476,9 @@ void App::draw_settings(const Rect& m) {
     y += 24;
   }
 
+  draw_controller_section(x, y, rw);
+  draw_sync_section(x, y, rw);
+
   ui_heading(x, y, T("settings.api"));
   y += 18;
   {
@@ -475,6 +522,76 @@ void App::draw_settings(const Rect& m) {
   }
   dl_.pop_clip();
   panel_content_h_ = y + panel_scroll_ - body.y + 8;
+}
+
+void App::draw_controller_section(float x, float& y, float rw) {
+  const ui::Theme& th = theme_;
+  ui_heading(x, y, T("settings.controllers"));
+  y += 18;
+  std::string names;
+  for (const std::string& c : hub_->connected()) names += (names.empty() ? "" : ", ") + c;
+  const bool bt = platform_.show_bluetooth_midi != nullptr;  // NULL = this platform has no pairing UI: no button
+  const float bw = 170, room = rw - (bt ? bw + 10 : 0);
+  dl_.text(x, y + 5, skin_->fit(names.empty() ? T("app.no_controller") : names, 12, 0, room), 12, names.empty() ? th.dim : th.text, Align::Left, room);
+  if (bt && ui_button({x + rw - bw, y, bw, 24}, T("settings.bluetooth_midi"), false)) platform_.show_bluetooth_midi(platform_.user);
+  y += 28;
+  if (bt) {
+    dl_.text(x, y - 2, skin_->fit(T("settings.bluetooth_hint"), 11, 0, rw), 11, th.dim, Align::Left, rw);
+    y += 22;
+  }
+}
+
+void App::draw_sync_section(float x, float& y, float rw) {
+  const ui::Theme& th = theme_;
+  const float line = 28, lw = 100;
+  ui_heading(x, y, T("settings.sync"));
+  y += 18;
+  const bool can_choose = platform_.choose_folder != nullptr;
+  const float bw = 110;
+  dl_.text(x, y + 5, T("settings.sync_folder"), 12, th.dim, Align::Left, lw - 6);
+  ui_field({x + lw, y, rw - lw - (can_choose ? bw + 6 : 0), 24}, f_sync_folder_, T("settings.sync_folder_hint"));
+  if (can_choose && ui_button({x + rw - bw, y, bw, 24}, T("settings.choose"), false)) {
+    std::string path;
+    if (choose_folder(T("settings.sync_choose_title"), path)) {
+      f_sync_folder_.text = path;
+      commit_settings();
+    }
+  }
+  y += line;
+  dl_.text(x, y + 5, T("settings.sync_device"), 12, th.dim, Align::Left, lw - 6);
+  ui_field({x + lw, y, std::min(rw - lw, 300.0f), 24}, f_sync_name_, host_name());
+  y += line;
+
+  SyncSummary s;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    s = sync_;
+  }
+  const bool have_folder = !sv_["sync.folder"].empty();
+  if (ui_button({x, y, 120, 26}, T("settings.sync_now"), s.running, th.accent) && have_folder && !s.running) {
+    commit_settings();
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      sync_.running = true;
+    }
+    post_kind(Job::Sync);
+  }
+  std::string text;
+  Color color = th.dim;
+  if (!have_folder) text = T("settings.sync_no_folder");
+  else if (s.running) text = T("settings.sync_running"), color = th.text;
+  else if (!s.error.empty() && !s.last_ok) text = T("settings.sync_error", {{"message", s.error}}), color = th.warn;
+  else if (s.last_ms > 0 && s.sent >= 0) text = T("settings.sync_last", {{"time", date_text(s.last_ms)}, {"sent", s.sent}, {"received", s.received}}), color = th.text;
+  else if (s.last_ms > 0) text = T("settings.sync_last_time", {{"time", date_text(s.last_ms)}}), color = th.text;
+  else text = T("settings.sync_never");
+  const float tx = x + 130;
+  dl_.text(tx, y + 7, skin_->fit(text, 12, 0, rw - 130), 12, color, Align::Left, rw - 130);
+  y += line;
+  if (have_folder) {
+    dl_.text(x, y, skin_->fit(T("settings.sync_devices", {{"count", s.other_devices}}), 11, 0, rw), 11, th.dim, Align::Left, rw);
+    y += 22;
+  }
+  y += 8;
 }
 
 // ---- sampler -----------------------------------------------------------------------------------------------------------
@@ -557,6 +674,9 @@ void App::draw_sampler(const Rect& m) {
 // ---- MIDI learn ------------------------------------------------------------------------------------------------------------
 void App::learn_pick(const std::string& action) {
   learn_action_ = action;
+  learn_label_.clear();
+  for (const LearnEntry& e : learn_list_)
+    if (e.action == action) learn_label_ = e.label;
   learn_line_.clear();
   learn_saved_ = false;
   learn_note_.clear();
@@ -573,22 +693,39 @@ void App::draw_learn(const Rect& m) {
   const std::string q = lower(trim(f_search_learn_.text));
   const Rect list{x, m.y + 78, rw, m.h - 78 - 128};
   dl_.rrect(list.x, list.y, list.w, list.h, 4, rgba(10, 11, 14));
-  std::vector<const LearnEntry*> shown;
-  for (const LearnEntry& e : learn_list_)
-    if (q.empty() || lower(e.label).find(q) != std::string::npos || lower(e.action).find(q) != std::string::npos) shown.push_back(&e);
-  const float row_h = 22, content = static_cast<float>(shown.size()) * row_h;
+  // Rows: a header whenever the group changes, then the actions of the group that match the filter.
+  struct Row {
+    const LearnEntry* entry;  // null = group header
+    const std::string* group;
+  };
+  std::vector<Row> rows;
+  const std::string* last_group = nullptr;
+  for (const LearnEntry& e : learn_list_) {
+    if (!q.empty() && lower(e.label).find(q) == std::string::npos && lower(e.action).find(q) == std::string::npos) continue;
+    if (!last_group || *last_group != e.group) {
+      rows.push_back({nullptr, &e.group});
+      last_group = &e.group;
+    }
+    rows.push_back({&e, &e.group});
+  }
+  const float row_h = 22, content = static_cast<float>(rows.size()) * row_h;
   if (list.contains(ov_.x, ov_.y)) panel_scroll_ -= ov_.scroll;
   panel_scroll_ = std::clamp(panel_scroll_, 0.0f, std::max(0.0f, content - list.h + 4));
   dl_.push_clip(list.x, list.y, list.w, list.h);
-  for (std::size_t i = 0; i < shown.size(); ++i) {
+  for (std::size_t i = 0; i < rows.size(); ++i) {
     const Rect row{list.x + 2, list.y + 2 + static_cast<float>(i) * row_h - panel_scroll_, list.w - 4, row_h};
     if (row.bottom() < list.y || row.y > list.bottom()) continue;
-    const bool sel = shown[i]->action == learn_action_;
+    if (!rows[i].entry) {
+      dl_.rect(row.x, row.y, row.w, row.h, with_alpha(th.accent, 38));
+      dl_.text(row.x + 8, row.y + 5, skin_->fit(*rows[i].group, 11, 1, row.w - 16), 11, th.accent, Align::Left, row.w - 16, 1);
+      continue;
+    }
+    const LearnEntry& e = *rows[i].entry;
+    const bool sel = e.action == learn_action_;
     if (sel) dl_.rrect(row.x, row.y, row.w, row.h, 3, with_alpha(th.accent, 120));
     else if (row.contains(ov_.x, ov_.y) && list.contains(ov_.x, ov_.y)) dl_.rrect(row.x, row.y, row.w, row.h, 3, with_alpha(th.text, 20));
-    dl_.text(row.x + 8, row.y + 4, skin_->fit(shown[i]->label, 12, 0, row.w * 0.62f), 12, th.text, Align::Left, row.w * 0.62f);
-    dl_.text(row.right() - 8, row.y + 5, skin_->fit(shown[i]->action, 11, 0, row.w * 0.34f), 11, th.dim, Align::Right, row.w * 0.34f);
-    if (ov_.pressed && row.contains(ov_.x, ov_.y) && list.contains(ov_.x, ov_.y)) learn_pick(shown[i]->action);
+    dl_.text(row.x + 18, row.y + 4, skin_->fit(e.label, 12, 0, row.w - 28), 12, th.text, Align::Left, row.w - 28);
+    if (ov_.pressed && row.contains(ov_.x, ov_.y) && list.contains(ov_.x, ov_.y)) learn_pick(e.action);
   }
   dl_.pop_clip();
 
@@ -601,7 +738,7 @@ void App::draw_learn(const Rect& m) {
   if (learn_action_.empty()) {
     status = T("learn.pick");
   } else if (st == LearnState::Waiting) {
-    status = T("learn.waiting", {{"action", learn_action_}});
+    status = T("learn.waiting", {{"action", learn_label_.empty() ? learn_action_ : learn_label_}});
     status_color = th.text;
   } else if (st == LearnState::Observing) {
     status = T("learn.observing");
@@ -708,7 +845,13 @@ void App::draw_relink(const Rect& m) {
   ui_field({fx, y, fw, 26}, f_relink_old_, "");
   y += 34;
   dl_.text(x, y + 5, T("relink.new"), 12, th.dim, Align::Left, lw - 6);
-  ui_field({fx, y, fw, 26}, f_relink_, "/Volumes/...");
+  const bool can_choose = platform_.choose_folder != nullptr;
+  const float cw = 110;
+  ui_field({fx, y, fw - (can_choose ? cw + 6 : 0), 26}, f_relink_, "/Volumes/...");
+  if (can_choose && ui_button({fx + fw - cw, y, cw, 26}, T("settings.choose"), false)) {
+    std::string path;
+    if (choose_folder(T("relink.choose_title"), path)) f_relink_.text = path;
+  }
   y += 38;
   dl_.text(x, y, skin_->fit(T("relink.help"), 11, 0, m.w - 40), 11, th.dim, Align::Left, m.w - 40);
   y += 26;

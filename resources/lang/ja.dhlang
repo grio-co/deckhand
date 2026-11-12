@@ -157,3 +157,36 @@ relink.none = そのフォルダーで始まるパスはありません
 
 status.synced = 同期完了: {sent} 件送信、{files} 件受信
 status.sync_failed = 同期に失敗しました: {message}
+
+engine.attached = 実行中のオーディオエンジンに再接続しました
+engine.died = オーディオエンジンが停止しました。再起動しています...
+engine.restarted = オーディオエンジンを再起動しました。デッキは空です。トラックを読み込み直してください
+engine.gave_up = オーディオエンジンが繰り返し停止したため、再起動しませんでした。DeckHand を再起動してください。
+engine.fallback = オーディオエンジンのプロセスを起動できませんでした（{error}）。アプリ内でオーディオを処理します
+engine.refused_sample = オーディオエンジンがサンプルを拒否しました: {reason}
+engine.refused_track = オーディオエンジンがトラックを拒否しました
+learn.group_deck = デッキ {n}
+learn.group_fx = エフェクトユニット {n}
+learn.group_mixer = ミキサー
+learn.group_master_fx = マスターエフェクト
+learn.group_sampler = サンプラー
+settings.controllers = コントローラー
+settings.bluetooth_midi = Bluetooth MIDI...
+settings.bluetooth_hint = ここで Bluetooth MIDI コントローラーをペアリングすると、他のコントローラーと同じように表示されます。
+settings.sync = ライブラリ同期
+settings.sync_folder = フォルダー
+settings.sync_folder_hint = 共有する同期フォルダー
+settings.choose = 選択...
+settings.sync_choose_title = 同期フォルダーを選択
+settings.sync_device = デバイス名
+settings.sync_now = 今すぐ同期
+settings.sync_no_folder = フォルダーを選ぶと同期が有効になります。
+settings.sync_running = 同期中...
+settings.sync_error = 前回の同期に失敗しました: {message}
+settings.sync_last = 前回の同期 {time}: {sent} 件送信、{received} 件受信
+settings.sync_last_time = 前回の同期 {time}
+settings.sync_never = まだ同期していません
+settings.sync_devices = {count, plural, =0 {他のデバイスは見つかっていません} other {他のデバイスが # 台見つかりました}}
+export.other = 別のフォルダー...
+export.choose_title = 書き出し先フォルダーを選択
+relink.choose_title = 新しいフォルダーを選択

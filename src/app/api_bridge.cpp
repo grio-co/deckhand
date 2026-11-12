@@ -290,10 +290,8 @@ struct ApiBridge::Impl {
       std::int64_t track_id = 0;
       bool playing = false;
     } seen[kMaxDecks];
-    int n = 0;
     while (!quit) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));  // state at 10 Hz
-      ++n;
       for (int i = 0; i < kMaxDecks; ++i) {
         const DeckView v = host.api_engine().deck(i);
         const std::int64_t id = v.loaded ? v.track_id : 0;

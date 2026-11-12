@@ -402,6 +402,16 @@ void App::draw_skin_ui() {
   // Release bookkeeping for held controls started outside the skin widgets.
   skin_->frame(*this, in_, now_);
   if (in_.released && drag_deck_ >= 0 && !in_.down) drag_deck_ = -1;
+  if (jog_deck_ >= 0 && !in_.down) {  // the platter vanished mid-touch (hidden, skin switched, overlay opened): let go
+    if (jog_top_) {
+      Command c;
+      c.op = Op::JogTouch;
+      c.deck = static_cast<std::uint8_t>(jog_deck_);
+      c.i = 0;
+      engine_->send(c);
+    }
+    jog_deck_ = -1;
+  }
 }
 
 void App::draw_custom(const skin::ResolvedWidget& w, const ui::Target& t, const skin::Style& st, const Rect& r) {

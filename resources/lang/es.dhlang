@@ -157,3 +157,36 @@ relink.none = Ninguna ruta empieza por esa carpeta
 
 status.synced = Sincronizado: {sent} cambios enviados, {files} recibidos
 status.sync_failed = Error de sincronización: {message}
+
+engine.attached = Reconectado al motor de audio en ejecución
+engine.died = El motor de audio se detuvo; reiniciándolo...
+engine.restarted = El motor de audio se reinició; tus platos están vacíos, vuelve a cargar tus pistas
+engine.gave_up = El motor de audio falla una y otra vez y no se reinició de nuevo. Reinicia DeckHand.
+engine.fallback = No se pudo iniciar el proceso del motor de audio ({error}); el audio se ejecuta en la aplicación
+engine.refused_sample = El motor de audio rechazó la muestra: {reason}
+engine.refused_track = El motor de audio rechazó una pista
+learn.group_deck = Plato {n}
+learn.group_fx = Unidad de efectos {n}
+learn.group_mixer = Mezclador
+learn.group_master_fx = Efecto master
+learn.group_sampler = Sampler
+settings.controllers = Controladores
+settings.bluetooth_midi = MIDI Bluetooth...
+settings.bluetooth_hint = Empareja aquí un controlador MIDI Bluetooth; después aparece como cualquier otro controlador.
+settings.sync = Sincronización de la biblioteca
+settings.sync_folder = Carpeta
+settings.sync_folder_hint = Carpeta de sincronización compartida
+settings.choose = Elegir...
+settings.sync_choose_title = Elegir la carpeta de sincronización
+settings.sync_device = Nombre del dispositivo
+settings.sync_now = Sincronizar ahora
+settings.sync_no_folder = Elige una carpeta para activar la sincronización.
+settings.sync_running = Sincronizando...
+settings.sync_error = Falló la última sincronización: {message}
+settings.sync_last = Última sincronización {time}: {sent} enviados, {received} recibidos
+settings.sync_last_time = Última sincronización {time}
+settings.sync_never = Aún sin sincronizar
+settings.sync_devices = {count, plural, =0 {No se ve ningún otro dispositivo} one {# otro dispositivo visto} other {# otros dispositivos vistos}}
+export.other = Otra carpeta...
+export.choose_title = Elegir la carpeta de exportación
+relink.choose_title = Elegir la carpeta nueva

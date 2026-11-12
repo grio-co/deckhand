@@ -18,7 +18,8 @@ namespace deckhand {
 
 // =================================================================================
 App::App(const dh_platform& platform, const dh_config& config)
-    : data_dir_(config.data_dir ? config.data_dir : "."),
+    : platform_(platform),
+      data_dir_(config.data_dir ? config.data_dir : "."),
       resource_dir_(config.resource_dir ? config.resource_dir : ""),
       dl_([platform](const std::string& s, float px, int weight, gfx::Bitmap& out) {
         if (!platform.rasterise_text) return false;
@@ -81,7 +82,18 @@ App::App(const dh_platform& platform, const dh_config& config)
       j.track_id = id;
       post(j);
     }
-    set_status("Re-attached to the running audio engine");
+    set_status(T("engine.attached"));
+  }
+  if (remote_ && remote_->attached_existing() && engine_->running()) {
+    Job j;  // the engine kept its samples: only bring the slot names back
+    j.kind = Job::RestoreSamples;
+    j.slot = 0;
+    post(j);
+  } else {
+    Job j;  // a fresh engine has empty slots: load the samples the user had
+    j.kind = Job::RestoreSamples;
+    j.slot = 1;
+    post(j);
   }
 
   api_ = std::make_unique<ApiBridge>(*this, data_dir_);
@@ -149,7 +161,7 @@ void App::setup_engine(const std::vector<std::string>& mapping_folders) {
       remote->set_status_callback([this](RemoteEngine::Status s, const std::string& message) {
         switch (s) {
           case RemoteEngine::Status::Died:
-            set_status("The audio engine stopped; restarting it...");
+            set_status(T("engine.died"));
             break;
           case RemoteEngine::Status::Restarted: {
             {
@@ -157,13 +169,22 @@ void App::setup_engine(const std::vector<std::string>& mapping_folders) {
               for (DeckInfo& d : decks_) d = DeckInfo{};  // the new engine has empty decks
             }
             start_audio();
-            set_status("The audio engine was restarted; your decks are empty, load your tracks again");
+            Job j;  // the new engine has empty sampler slots too
+            j.kind = Job::RestoreSamples;
+            j.slot = 1;
+            post(j);
+            set_status(T("engine.restarted"));
             break;
           }
           case RemoteEngine::Status::GaveUp:
-            set_status("The audio engine keeps failing and was not restarted again. Restart DeckHand.");
+            set_status(T("engine.gave_up"));
             break;
-          case RemoteEngine::Status::LoadRejected: set_status(message); break;
+          case RemoteEngine::Status::LoadRejected: {
+            const std::string prefix = "the engine refused the sample: ";
+            if (message.compare(0, prefix.size(), prefix) == 0) set_status(T("engine.refused_sample", {{"reason", message.substr(prefix.size())}}));
+            else set_status(T("engine.refused_track"));
+            break;
+          }
           default: break;
         }
       });
@@ -180,7 +201,7 @@ void App::setup_engine(const std::vector<std::string>& mapping_folders) {
       return;
     }
     DH_LOG(Error, "engine process unavailable (%s); using in-process audio", error.c_str());
-    set_status("Could not start the audio engine process (" + error + "); using in-process audio");
+    set_status(T("engine.fallback", {{"error", error}}));
   }
 #endif
   engine_ = std::make_unique<Engine>();
@@ -424,23 +445,9 @@ void App::run_job(Library& lib, const Job& j) {
       if (j.deck >= 0) load_track(lib, j.deck, id);
       break;
     }
-    case Job::Sync: {
-      const std::string folder = lib.setting("sync.folder");
-      if (folder.empty()) break;
-      deckhand::sync::SyncConfig cfg;
-      cfg.folder = folder;
-      cfg.device_name = lib.setting("sync.device_name", "DeckHand");
-      deckhand::sync::SyncEngine engine(lib, cfg);
-      const deckhand::sync::SyncResult r = engine.sync_once();
-      for (const std::string& w : r.warnings) DH_LOG(Warn, "sync: %s", w.c_str());
-      if (!r.ok) {
-        set_status(T("status.sync_failed", {{"message", r.error}}));
-      } else if (r.records_written > 0 || r.records_applied > 0) {
-        rows_dirty_ = true;
-        set_status(T("status.synced", {{"sent", r.records_written}, {"files", r.records_applied}}));
-      }
-      break;
-    }
+    case Job::Sync: sync_job(lib, true); break;
+    case Job::SyncInfo: sync_job(lib, false); break;
+    case Job::RestoreSamples: restore_sampler(lib, j.slot != 0); break;
     case Job::Import: {
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -505,8 +512,11 @@ void App::run_job(Library& lib, const Job& j) {
       sample->audio = audio;
       engine_->sampler_load(j.slot, std::move(sample));
       if (j.slot >= 0 && j.slot < kSamplerSlots) {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        sampler_names_[j.slot] = std::filesystem::path(j.path).stem().string();
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          sampler_names_[j.slot] = std::filesystem::path(j.path).stem().string();
+        }
+        lib.set_setting("sampler.slot." + std::to_string(j.slot + 1), j.path);  // restored at the next start
       }
       set_status(T("status.sample_loaded", {{"slot", j.slot + 1}, {"title", std::filesystem::path(j.path).stem().string()}}));
       break;
@@ -520,6 +530,102 @@ void App::run_job(Library& lib, const Job& j) {
     case Job::HistoryUpdate:
       if (history_row_[j.deck]) lib.set_history_played(history_row_[j.deck], static_cast<std::int64_t>(j.ms));
       break;
+  }
+}
+
+// The name other devices see this one by: the host name without a ".local" suffix.
+std::string App::host_name() {
+  char buf[256] = {};
+#if defined(DH_HAVE_ENGINE_PROCESS)
+  if (gethostname(buf, sizeof buf - 1) != 0) buf[0] = 0;
+#else
+  if (const char* c = std::getenv("COMPUTERNAME")) std::snprintf(buf, sizeof buf, "%s", c);
+#endif
+  std::string n = buf;
+  const std::size_t dot = n.find('.');
+  if (dot != std::string::npos && dot > 0) n.resize(dot);
+  return n.empty() ? "DeckHand" : n;
+}
+
+// Loader thread. run = false only reads the folder's status (devices, last sync) without syncing.
+void App::sync_job(Library& lib, bool run) {
+  const std::string folder = lib.setting("sync.folder");
+  if (folder.empty()) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    sync_ = SyncSummary{};
+    return;
+  }
+  deckhand::sync::SyncConfig cfg;
+  cfg.folder = folder;
+  cfg.device_name = lib.setting("sync.device_name", host_name());
+  if (cfg.device_name.empty()) cfg.device_name = host_name();
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    sync_.running = run;
+  }
+  deckhand::sync::SyncEngine engine(lib, cfg);
+  deckhand::sync::SyncResult r;
+  if (run) {
+    r = engine.sync_once();
+    for (const std::string& w : r.warnings) DH_LOG(Warn, "sync: %s", w.c_str());
+  }
+  const deckhand::sync::Status st = engine.status();
+  const std::vector<deckhand::sync::DeviceInfo> devices = engine.devices();
+  int others = 0;
+  for (const auto& d : devices) others += d.is_self ? 0 : 1;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    sync_.running = false;
+    sync_.known = true;
+    sync_.last_ms = st.last_sync_ms;
+    sync_.other_devices = others;
+    if (run) {
+      sync_.last_ok = r.ok;
+      sync_.error = r.ok ? std::string() : r.error;
+      if (r.ok) {
+        sync_.sent = r.records_written;
+        sync_.received = r.records_applied;
+      }
+    } else if (!st.last_error.empty() && sync_.last_ms == 0) {
+      sync_.last_ok = false;
+      sync_.error = st.last_error;
+    }
+  }
+  if (!run) return;
+  if (!r.ok) {
+    set_status(T("status.sync_failed", {{"message", r.error}}));
+  } else if (r.records_written > 0 || r.records_applied > 0) {
+    rows_dirty_ = true;
+    set_status(T("status.synced", {{"sent", r.records_written}, {"files", r.records_applied}}));
+  }
+}
+
+// Sampler slots remember their file in library settings (sampler.slot.N). `reload` = the engine's slots are
+// empty (fresh engine): decode and load them; otherwise only the names are restored (re-attached engine).
+void App::restore_sampler(Library& lib, bool reload) {
+  for (int i = 0; i < kSamplerSlots && !quit_; ++i) {
+    const std::string path = lib.setting("sampler.slot." + std::to_string(i + 1));
+    if (path.empty()) continue;
+    const std::string name = std::filesystem::path(path).stem().string();
+    if (!reload) {
+      if (engine_->sampler(i).loaded) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        sampler_names_[i] = name;
+      }
+      continue;
+    }
+    if (engine_->sampler(i).loaded || !std::filesystem::exists(path)) continue;
+    std::string error;
+    const std::shared_ptr<TrackAudio> audio = decode_file(path, error);
+    if (!audio) {
+      DH_LOG(Warn, "sampler slot %d: %s", i + 1, error.c_str());
+      continue;
+    }
+    auto sample = std::make_unique<LoadedSample>();
+    sample->audio = audio;
+    engine_->sampler_load(i, std::move(sample));
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    sampler_names_[i] = name;
   }
 }
 
@@ -954,7 +1060,7 @@ const dh_frame* App::frame() {
   for (const gfx::DrawCmd& c : dl_.commands()) {
     if (c.index_count == 0) continue;
     dh_draw_cmd o{};
-    o.texture_id = 1;
+    o.texture_id = c.texture;
     std::copy(std::begin(c.clip), std::end(c.clip), std::begin(o.clip));
     o.idx_offset = c.index_offset;
     o.idx_count = c.index_count;
@@ -967,6 +1073,18 @@ const dh_frame* App::frame() {
   frame_.idx_count = static_cast<std::uint32_t>(dl_.indices().size());
   frame_.cmds = cmds_out_.data();
   frame_.cmd_count = static_cast<std::uint32_t>(cmds_out_.size());
+  uploads_out_.clear();
+  releases_out_ = dl_.take_image_releases();
+  for (const gfx::DrawList::ImageUpload& im : dl_.take_image_uploads()) {  // skin images: whole RGBA textures
+    dh_tex_upload u{};
+    u.id = im.id;
+    u.tex_w = u.w = static_cast<std::uint32_t>(im.width);
+    u.tex_h = u.h = static_cast<std::uint32_t>(im.height);
+    u.fmt = DH_TEX_RGBA8;
+    u.stride = u.tex_w * 4;
+    u.pixels = im.pixels;
+    uploads_out_.push_back(u);
+  }
   int y0 = 0, y1 = 0;
   if (dl_.atlas_dirty(y0, y1)) {
     upload_.id = 1;
@@ -979,10 +1097,13 @@ const dh_frame* App::frame() {
     upload_.h = static_cast<std::uint32_t>(y1 - y0);
     upload_.stride = gfx::DrawList::kAtlasWidth;
     upload_.pixels = dl_.atlas() + static_cast<std::size_t>(y0) * gfx::DrawList::kAtlasWidth;
-    frame_.uploads = &upload_;
-    frame_.upload_count = 1;
+    uploads_out_.push_back(upload_);
     dl_.clear_atlas_dirty();
   }
+  frame_.uploads = uploads_out_.empty() ? nullptr : uploads_out_.data();
+  frame_.upload_count = static_cast<std::uint32_t>(uploads_out_.size());
+  frame_.releases = releases_out_.empty() ? nullptr : releases_out_.data();
+  frame_.release_count = static_cast<std::uint32_t>(releases_out_.size());
   frame_.clear_rgba[0] = static_cast<float>(theme_.bg & 0xFF) / 255.0f;
   frame_.clear_rgba[1] = static_cast<float>((theme_.bg >> 8) & 0xFF) / 255.0f;
   frame_.clear_rgba[2] = static_cast<float>((theme_.bg >> 16) & 0xFF) / 255.0f;

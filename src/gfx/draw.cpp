@@ -48,11 +48,13 @@ void DrawList::begin(float width_px, float height_px, float scale) {
   c.clip[2] = width_px;
   c.clip[3] = height_px;
   clip_stack_.push_back(c);
+  cur_texture_ = 1;
   new_command();
 }
 
 void DrawList::new_command() {
   DrawCmd c = clip_stack_.back();
+  c.texture = cur_texture_;
   c.index_offset = static_cast<std::uint32_t>(indices_.size());
   c.index_count = 0;
   if (!commands_.empty() && commands_.back().index_count == 0) commands_.back() = c;
@@ -73,6 +75,69 @@ void DrawList::push_clip(float x, float y, float w, float h) {
 void DrawList::pop_clip() {
   if (clip_stack_.size() > 1) clip_stack_.pop_back();
   new_command();
+}
+
+void DrawList::use_texture(std::uint32_t id) {
+  if (cur_texture_ == id) return;
+  cur_texture_ = id;
+  new_command();
+}
+
+std::uint32_t DrawList::add_image(int width, int height, std::vector<std::uint8_t> rgba) {
+  if (width <= 0 || height <= 0 || rgba.size() != static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4) return 0;
+  const std::uint32_t id = next_image_++;
+  Stored& st = images_[id];
+  st.width = width;
+  st.height = height;
+  st.rgba = std::move(rgba);
+  st.pending = true;
+  return id;
+}
+
+void DrawList::remove_image(std::uint32_t id) {
+  if (images_.erase(id)) released_.push_back(id);
+}
+
+std::vector<DrawList::ImageUpload> DrawList::take_image_uploads() {
+  std::vector<ImageUpload> out;
+  for (auto& kv : images_) {
+    if (!kv.second.pending) continue;
+    kv.second.pending = false;
+    out.push_back({kv.first, kv.second.width, kv.second.height, kv.second.rgba.data()});
+  }
+  return out;
+}
+
+std::vector<std::uint32_t> DrawList::take_image_releases() {
+  std::vector<std::uint32_t> out;
+  out.swap(released_);
+  return out;
+}
+
+void DrawList::image(std::uint32_t id, float x, float y, float w, float h, float u0, float v0, float u1, float v1, Color tint,
+                     float radians) {
+  if (w <= 0 || h <= 0 || !images_.count(id)) return;
+  use_texture(id);
+  const float cx = (x + w / 2) * scale_, cy = (y + h / 2) * scale_;
+  float px[4] = {x * scale_, (x + w) * scale_, (x + w) * scale_, x * scale_};
+  float py[4] = {y * scale_, y * scale_, (y + h) * scale_, (y + h) * scale_};
+  if (radians == 0) {
+    for (float& v : px) v = std::round(v);
+    for (float& v : py) v = std::round(v);
+  } else {
+    const float cs = std::cos(radians), sn = std::sin(radians);
+    for (int i = 0; i < 4; ++i) {
+      const float dx = px[i] - cx, dy = py[i] - cy;
+      px[i] = cx + dx * cs - dy * sn;
+      py[i] = cy + dx * sn + dy * cs;
+    }
+  }
+  const float us[4] = {u0, u1, u1, u0}, vs[4] = {v0, v0, v1, v1};
+  const std::uint32_t base = static_cast<std::uint32_t>(vertices_.size());
+  for (int i = 0; i < 4; ++i) vertices_.push_back({px[i], py[i], us[i], vs[i], tint});
+  for (std::uint32_t i : {0u, 1u, 2u, 0u, 2u, 3u}) indices_.push_back(base + i);
+  commands_.back().index_count += 6;
+  use_texture(1);
 }
 
 void DrawList::quad(float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, Color c) {

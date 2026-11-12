@@ -5,7 +5,8 @@ import MetalKit
 final class Renderer {
   private let device: MTLDevice
   private let queue: MTLCommandQueue
-  private let pipeline: MTLRenderPipelineState
+  private let pipeline: MTLRenderPipelineState      // A8 textures (glyphs): vertex colour, alpha from the texel
+  private let imagePipeline: MTLRenderPipelineState  // RGBA8 textures (skin images): vertex colour times the texel
   private let sampler: MTLSamplerState
   private var textures: [UInt32: MTLTexture] = [:]
 
@@ -24,6 +25,9 @@ final class Renderer {
   }
   fragment float4 fs(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]]) {
     return float4(in.color.rgb, in.color.a * tex.sample(s, in.uv).r);
+  }
+  fragment float4 fs_image(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]]) {
+    return in.color * tex.sample(s, in.uv);
   }
   """
 
@@ -45,32 +49,34 @@ final class Renderer {
     vertex.attributes[2].offset = 16
     vertex.layouts[0].stride = MemoryLayout<dh_vertex>.stride
 
-    let descriptor = MTLRenderPipelineDescriptor()
-    descriptor.vertexFunction = library.makeFunction(name: "vs")
-    descriptor.fragmentFunction = library.makeFunction(name: "fs")
-    descriptor.vertexDescriptor = vertex
-    let color = descriptor.colorAttachments[0]!
-    color.pixelFormat = pixelFormat
-    color.isBlendingEnabled = true
-    color.sourceRGBBlendFactor = .sourceAlpha
-    color.destinationRGBBlendFactor = .oneMinusSourceAlpha
-    color.sourceAlphaBlendFactor = .one
-    color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-
     let samplerDescriptor = MTLSamplerDescriptor()
     samplerDescriptor.minFilter = .linear
     samplerDescriptor.magFilter = .linear
-    let pipeline: MTLRenderPipelineState
-    do {
-      pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
-    } catch {
-      NSLog("DeckHand: pipeline creation failed: %@", String(describing: error))
-      return nil
+    func makePipeline(_ fragment: String) -> MTLRenderPipelineState? {
+      let descriptor = MTLRenderPipelineDescriptor()
+      descriptor.vertexFunction = library.makeFunction(name: "vs")
+      descriptor.fragmentFunction = library.makeFunction(name: fragment)
+      descriptor.vertexDescriptor = vertex
+      let color = descriptor.colorAttachments[0]!
+      color.pixelFormat = pixelFormat
+      color.isBlendingEnabled = true
+      color.sourceRGBBlendFactor = .sourceAlpha
+      color.destinationRGBBlendFactor = .oneMinusSourceAlpha
+      color.sourceAlphaBlendFactor = .one
+      color.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+      do {
+        return try device.makeRenderPipelineState(descriptor: descriptor)
+      } catch {
+        NSLog("DeckHand: pipeline creation failed: %@", String(describing: error))
+        return nil
+      }
     }
+    guard let pipeline = makePipeline("fs"), let imagePipeline = makePipeline("fs_image") else { return nil }
     guard let sampler = device.makeSamplerState(descriptor: samplerDescriptor) else { return nil }
     self.device = device
     self.queue = queue
     self.pipeline = pipeline
+    self.imagePipeline = imagePipeline
     self.sampler = sampler
   }
 
@@ -105,11 +111,11 @@ final class Renderer {
        let vertices = device.makeBuffer(bytes: f.vtx, length: Int(f.vtx_count) * MemoryLayout<dh_vertex>.stride,
                                         options: .storageModeShared),
        let indices = device.makeBuffer(bytes: f.idx, length: Int(f.idx_count) * 4, options: .storageModeShared) {
-      encoder.setRenderPipelineState(pipeline)
       encoder.setVertexBuffer(vertices, offset: 0, index: 0)
       var viewport = SIMD2<Float>(Float(width), Float(height))
       encoder.setVertexBytes(&viewport, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
       encoder.setFragmentSamplerState(sampler, index: 0)
+      var current: MTLRenderPipelineState?
       for i in 0..<Int(f.cmd_count) {
         let c = f.cmds[i]
         guard let texture = textures[c.texture_id], c.idx_count > 0 else { continue }
@@ -117,6 +123,11 @@ final class Renderer {
         let x1 = min(width, Int(c.clip.2)), y1 = min(height, Int(c.clip.3))
         if x1 <= x0 || y1 <= y0 { continue }
         encoder.setScissorRect(MTLScissorRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0))
+        let wanted = texture.pixelFormat == .rgba8Unorm ? imagePipeline : pipeline
+        if current !== wanted {
+          encoder.setRenderPipelineState(wanted)
+          current = wanted
+        }
         encoder.setFragmentTexture(texture, index: 0)
         encoder.drawIndexedPrimitives(type: .triangle, indexCount: Int(c.idx_count), indexType: .uint32,
                                       indexBuffer: indices, indexBufferOffset: Int(c.idx_offset) * 4,

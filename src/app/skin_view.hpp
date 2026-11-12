@@ -4,6 +4,8 @@
 // (waveforms, jog, pads, track browser, playlist tree, text fields) are handed to the SkinHost.
 // Everything here runs on the UI thread. Coordinates are logical points (the layout is solved at scale 1
 // for the window size in points; the DrawList applies the backing scale).
+#include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -70,6 +72,9 @@ class SkinHost {
 class SkinView {
  public:
   SkinView(gfx::DrawList& dl, const i18n::Catalog& catalog) : dl_(dl), catalog_(catalog) {}
+  ~SkinView() { release_images(); }
+  SkinView(const SkinView&) = delete;
+  SkinView& operator=(const SkinView&) = delete;
 
   // Loads a skin file or directory. Returns false with the messages in `error` when it does not parse.
   bool load(const std::string& path, std::string& error);
@@ -102,6 +107,9 @@ class SkinView {
     bool shown_valid = false;
     double started[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
   };
+  void relayout(bool reset_slots);
+  void release_images();
+  void draw_sprite(const std::string& sprite, const skin::Rect& r, float opacity, float radians);
   int pick(float x, float y) const;
   skin::Rect hit_rect(const skin::ResolvedWidget& w) const;
   void draw_widget(int i, SkinHost& host, const Input& in, double now_s, double dt_ms, bool hidden);
@@ -117,7 +125,14 @@ class SkinView {
   Theme theme_ = Theme::defaults();
   skin::Layout layout_;
   std::vector<Slot> slots_;
-  std::vector<char> hidden_;
+  std::vector<char> hidden_;       // per widget: its own show= is false, or an ancestor's is
+  std::vector<char> node_hidden_;  // per skin node, as last handed to the layout solver
+  struct Tex {
+    std::uint32_t id = 0;
+    int w = 0, h = 0;
+  };
+  std::map<std::string, Tex> textures_;  // atlas name -> uploaded image (skin directories only)
+  std::size_t window_index_ = 0;
   std::string window_;
   float lw_ = 0, lh_ = 0, insets_[4] = {0, 0, 0, 0}, min_w_ = 0, min_h_ = 0;
   bool touch_ = false;

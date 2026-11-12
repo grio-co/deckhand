@@ -45,7 +45,9 @@ final class DeckHandView: MTKView, MTKViewDelegate {
     let level = levels[ProcessInfo.processInfo.environment["DECKHAND_LOG"] ?? "info"] ?? 2
     let resources = Bundle.main.resourcePath ?? ""
 
-    var platform = dh_platform(user: nil, rasterise_text: rasteriseText)
+    // list_export_targets stays NULL: the core's own scan of /Volumes is right on macOS.
+    var platform = dh_platform(user: nil, rasterise_text: rasteriseText, show_bluetooth_midi: Platform.showBluetooth,
+                               choose_folder: Platform.chooseFolder, list_export_targets: nil)
     core = dataDir.withCString { data in
       resources.withCString { res in
         var config = dh_config(data_dir: data, resource_dir: res, log_level: Int32(level), touch: false,
@@ -74,7 +76,12 @@ final class DeckHandView: MTKView, MTKViewDelegate {
   // MARK: drawing
   func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
+  private var inFrame = false  // a modal panel opened by the core (folder picker) can re-enter draw
+
   func draw(in view: MTKView) {
+    guard !inFrame else { return }
+    inFrame = true
+    defer { inFrame = false }
     guard let core, let renderer, let drawable = currentDrawable, let pass = currentRenderPassDescriptor else { return }
     let size = drawableSize
     dh_app_set_display(core, Float(size.width), Float(size.height), scale, 0, 0, 0, 0)

@@ -157,3 +157,36 @@ relink.none = No track path starts with that folder
 
 status.synced = Synced: {sent} changes sent, {files} received
 status.sync_failed = Sync failed: {message}
+
+engine.attached = Re-attached to the running audio engine
+engine.died = The audio engine stopped; restarting it...
+engine.restarted = The audio engine was restarted; your decks are empty, load your tracks again
+engine.gave_up = The audio engine keeps failing and was not restarted again. Restart DeckHand.
+engine.fallback = Could not start the audio engine process ({error}); using in-process audio
+engine.refused_sample = The audio engine refused the sample: {reason}
+engine.refused_track = The audio engine refused a track
+learn.group_deck = Deck {n}
+learn.group_fx = Effect unit {n}
+learn.group_mixer = Mixer
+learn.group_master_fx = Master effect
+learn.group_sampler = Sampler
+settings.controllers = Controllers
+settings.bluetooth_midi = Bluetooth MIDI...
+settings.bluetooth_hint = Pair a Bluetooth MIDI controller here; it then shows up like any other controller.
+settings.sync = Library sync
+settings.sync_folder = Folder
+settings.sync_folder_hint = Shared sync folder
+settings.choose = Choose...
+settings.sync_choose_title = Choose the sync folder
+settings.sync_device = Device name
+settings.sync_now = Sync now
+settings.sync_no_folder = Choose a folder to turn sync on.
+settings.sync_running = Syncing...
+settings.sync_error = Last sync failed: {message}
+settings.sync_last = Last sync {time}: {sent} sent, {received} received
+settings.sync_last_time = Last sync {time}
+settings.sync_never = Not synced yet
+settings.sync_devices = {count, plural, =0 {No other devices seen} one {# other device seen} other {# other devices seen}}
+export.other = Other folder...
+export.choose_title = Choose the export folder
+relink.choose_title = Choose the new folder

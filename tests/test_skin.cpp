@@ -4,8 +4,10 @@
 #include <fstream>
 #include <map>
 #include <string>
+#include <vector>
 
 #include "check.hpp"
+#include "deckhand/gfx/png.hpp"
 #include "deckhand/i18n/i18n.hpp"
 #include "deckhand/skin/skin.hpp"
 
@@ -71,7 +73,107 @@ static void check_layout(const Skin& sk, const char* name, float W, float H, flo
   CHECK(interactive > 20);
 }
 
+// A PNG built by hand: stored (uncompressed) deflate blocks, so the decoder's other paths are covered without a
+// compressor. `rows` are raw scanlines without the filter byte; filters[y] is the filter type to apply.
+static std::uint32_t test_crc(const std::vector<std::uint8_t>& d) {
+  std::uint32_t c = 0xFFFFFFFFu;
+  for (std::uint8_t b : d) {
+    c ^= b;
+    for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+  }
+  return ~c;
+}
+static std::vector<std::uint8_t> make_png(int w, int h, int ctype, const std::vector<std::uint8_t>& scan,
+                                          const std::vector<std::uint8_t>& plte = {}, const std::vector<std::uint8_t>& trns = {}) {
+  std::vector<std::uint8_t> out = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+  const auto be = [](std::vector<std::uint8_t>& v, std::uint32_t x) {
+    for (int i = 3; i >= 0; --i) v.push_back(static_cast<std::uint8_t>(x >> (8 * i)));
+  };
+  const auto chunk = [&](const char* type, const std::vector<std::uint8_t>& body) {
+    be(out, static_cast<std::uint32_t>(body.size()));
+    std::vector<std::uint8_t> t(type, type + 4);
+    t.insert(t.end(), body.begin(), body.end());
+    out.insert(out.end(), t.begin(), t.end());
+    be(out, test_crc(t));
+  };
+  std::vector<std::uint8_t> ihdr;
+  be(ihdr, static_cast<std::uint32_t>(w));
+  be(ihdr, static_cast<std::uint32_t>(h));
+  ihdr.insert(ihdr.end(), {8, static_cast<std::uint8_t>(ctype), 0, 0, 0});
+  chunk("IHDR", ihdr);
+  if (!plte.empty()) chunk("PLTE", plte);
+  if (!trns.empty()) chunk("tRNS", trns);
+  std::vector<std::uint8_t> z = {0x78, 0x01, 0x01};  // zlib header, one final stored block
+  const auto len = static_cast<std::uint16_t>(scan.size());
+  z.push_back(len & 0xFF);
+  z.push_back(len >> 8);
+  z.push_back(~len & 0xFF);
+  z.push_back((~len >> 8) & 0xFF);
+  z.insert(z.end(), scan.begin(), scan.end());
+  z.insert(z.end(), {0, 0, 0, 0});  // Adler-32 (not checked)
+  chunk("IDAT", z);
+  chunk("IEND", {});
+  return out;
+}
+
 int main() {
+  // ---- PNG reader (src/gfx/png.cpp)
+  {
+    using deckhand::gfx::Image;
+    using deckhand::gfx::decode_png;
+    Image im;
+    std::string err;
+    // RGBA 2x2: row 0 unfiltered; row 1 uses the Sub filter (each byte adds the pixel to its left)
+    auto rgba = make_png(2, 2, 6, {0, 10, 20, 30, 40, 50, 60, 70, 80, 1, 1, 1, 1, 1, 1, 1, 1, 1});
+    CHECK(decode_png(rgba.data(), rgba.size(), im, err));
+    CHECK(im.width == 2 && im.height == 2 && im.rgba.size() == 16);
+    CHECK(im.rgba[0] == 10 && im.rgba[3] == 40 && im.rgba[4] == 50 && im.rgba[7] == 80);
+    CHECK(im.rgba[8] == 1 && im.rgba[12] == 2);  // second pixel = its byte (1) + the first pixel's (1)
+    // RGB (opaque) and palette with tRNS
+    auto rgb = make_png(1, 1, 2, {0, 1, 2, 3});
+    CHECK(decode_png(rgb.data(), rgb.size(), im, err) && im.rgba[2] == 3 && im.rgba[3] == 255);
+    auto pal = make_png(2, 1, 3, {0, 0, 1}, {255, 0, 0, 0, 255, 0}, {128});
+    CHECK(decode_png(pal.data(), pal.size(), im, err));
+    CHECK(im.rgba[0] == 255 && im.rgba[3] == 128 && im.rgba[5] == 255 && im.rgba[7] == 255);
+    // damaged input is refused, never read out of bounds
+    auto bad = rgba;
+    bad[20] ^= 0xFF;  // IHDR body: CRC mismatch
+    CHECK(!decode_png(bad.data(), bad.size(), im, err));
+    CHECK(!decode_png(rgba.data(), rgba.size() / 2, im, err));
+    CHECK(!decode_png(rgba.data(), 5, im, err));
+    // the shipped atlas uses dynamic Huffman blocks (zlib level 9): it must decode to its declared size
+    CHECK(deckhand::gfx::load_png_file("resources/skins/voidwave.dhskin/img/atlas.png", im, err));
+    CHECK(im.width == 256 && im.height == 256);
+    int opaque = 0;
+    for (std::size_t i = 3; i < im.rgba.size(); i += 4) opaque += im.rgba[i] > 128;
+    CHECK(opaque > 500 && opaque < 40000);
+  }
+
+  // ---- hidden widgets give back their space in flow containers
+  {
+    ParseResult r = parse_skin(wrap("window w size=400x100 {\n row gap=10 {\n label id=a w=100\n label id=b w=100 show=\"app.x\"\n label id=c w=100\n }\n}\n"));
+    CHECK(r.ok());
+    const Skin& sk = *r.skin;
+    int b_node = -1;
+    for (std::size_t i = 0; i < sk.nodes.size(); ++i)
+      if (sk.nodes[i].id == "b") b_node = static_cast<int>(i);
+    CHECK(b_node >= 0);
+    const auto find = [](const Layout& l, const char* id) -> const ResolvedWidget* {
+      for (const ResolvedWidget& w : l.widgets)
+        if (w.id == id) return &w;
+      return nullptr;
+    };
+    Layout shown = solve_layout(sk, 0, 400, 100, 1);
+    CHECK(find(shown, "c")->rect.x == 220);  // 100 + 10 + 100 + 10
+    std::vector<char> hidden(sk.nodes.size(), 0);
+    hidden[static_cast<std::size_t>(b_node)] = 1;
+    Layout gone = solve_layout(sk, 0, 400, 100, 1, &hidden);
+    CHECK(find(gone, "c")->rect.x == 110);  // b and its gap are gone
+    CHECK(find(gone, "b") && find(gone, "b")->rect.w == 0);
+    CHECK(gone.widgets.size() == shown.widgets.size());  // same widgets in the same order
+    for (std::size_t i = 0; i < gone.widgets.size(); ++i) CHECK(gone.widgets[i].node == shown.widgets[i].node);
+  }
+
   // ---- shipped skins
   std::map<std::string, std::shared_ptr<const Skin>> skins;
   for (const char* n : {"default", "voidwave"}) {
@@ -85,6 +187,7 @@ int main() {
   CHECK(skins["voidwave"]->find_window("main") && !skins["voidwave"]->find_window("main")->shape.empty());
   CHECK(skins["default"]->find_window("main")->shape.empty());
   CHECK(!skins["voidwave"]->animations.empty());
+  CHECK(skins["voidwave"]->find_atlas("art") && !skins["voidwave"]->root_dir.empty());  // a directory skin with an image
 
   struct Size { float w, h, s; };
   const Size sizes[] = {{1280, 720, 1}, {1920, 1080, 1}, {3024, 1964, 2}, {1024, 600, 1}};

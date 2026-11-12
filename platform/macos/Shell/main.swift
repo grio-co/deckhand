@@ -51,6 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     sender.reply(toOpenOrPrint: .success)
   }
 
+  @objc private func showBluetoothMIDI() { Platform.showBluetoothMIDI() }
+
   private func fail(_ message: String) {
     let alert = NSAlert()
     alert.messageText = message
@@ -65,6 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let appMenu = NSMenu()
     appMenu.addItem(withTitle: "About DeckHand",
                     action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+    appMenu.addItem(.separator())
+    let bluetooth = appMenu.addItem(withTitle: "Bluetooth MIDI\u{2026}", action: #selector(showBluetoothMIDI), keyEquivalent: "")
+    bluetooth.target = self
     appMenu.addItem(.separator())
     appMenu.addItem(withTitle: "Hide DeckHand", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
     appMenu.addItem(withTitle: "Quit DeckHand", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
