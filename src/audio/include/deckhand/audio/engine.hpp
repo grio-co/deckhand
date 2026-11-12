@@ -1,6 +1,7 @@
 #pragma once
 // Real-time audio engine: decks, mixer, cue bus. The audio callback takes no locks,
 // allocates nothing and does no I/O; everything reaches it through wait-free queues.
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -98,6 +99,10 @@ enum class Op : std::uint8_t {
   RecStart,      // f = 1 tap before the master soft clip, 0 after; needs Engine::record_open first
   RecStop,       // stops recording; the writer thread finalises the file
   StreamEnable,  // i = 1 on / 0 off, f = 1 pre-soft-clip tap; feeds Engine::stream_read
+  // ---- internal (scheduling); never pass these to send() / schedule() ----
+  SchedInsert,     // i = payload slot handed over by Engine::schedule
+  SchedCancel,     // d = schedule id
+  SchedCancelAll,
 };
 
 enum class ColorFx : std::uint8_t { Filter = 0, Noise, DubEcho, Crush, Pitch, Space, Count };
@@ -144,7 +149,12 @@ struct Command {
   LoadedSample* sample = nullptr;
 };
 
-enum class EventType : std::uint8_t { HotCueSet, HotCueCleared, CueSet, TrackEnded };
+// ScheduledFired: `sched_id` fired at engine clock frame `clock_frame` (the first output sample the command
+// affected); `deck` = the command's deck, `slot` = the command's Op, `frame` = for deck-position schedules the
+// trigger deck's playhead (track frames) when it fired, else 0.
+// ScheduledDropped: the entry was discarded without running; `slot` = a DropReason, `clock_frame` = when.
+enum class EventType : std::uint8_t { HotCueSet, HotCueCleared, CueSet, TrackEnded, ScheduledFired, ScheduledDropped };
+enum class DropReason : std::int32_t { DeckUnloaded = 1, TableFull = 2, Unresolvable = 3 };  // Unresolvable: no track / grid
 
 struct EngineEvent {
   EventType type{};
@@ -152,6 +162,50 @@ struct EngineEvent {
   std::int32_t slot = 0;
   double frame = 0;
   std::int64_t track_id = 0;
+  // appended
+  std::uint64_t sched_id = 0;
+  std::uint64_t clock_frame = 0;
+};
+
+// When a scheduled command runs. The command executes inside the audio callback on the exact output sample.
+enum class ScheduleKind : std::uint8_t { ClockFrame, DeckFrame, DeckBeat };
+struct Schedule {
+  ScheduleKind kind = ScheduleKind::ClockFrame;
+  std::uint64_t clock_frame = 0;  // ClockFrame: absolute engine frame (Engine::clock_frames() timeline)
+  std::uint8_t deck = 0;          // DeckFrame / DeckBeat: the deck whose playhead triggers
+  double frame = 0;               // DeckFrame: track position in the track's own frames
+  double beat = 0;                // DeckBeat: absolute beat number (beat 0 = first grid beat; sections continue the count),
+                                  //   or, when `relative`, beats ahead of the playhead (> 0; 1 = the next grid beat)
+  bool relative = false;          // DeckBeat: `beat` is beats_from_now
+  bool bar_aligned = false;       // DeckBeat: move on to the next bar line (grid beat whose bar_beat is 1)
+  bool fire_if_passed = false;    // Deck kinds: also fire when the playhead is already past / jumps past the target
+  static Schedule at_clock_frame(std::uint64_t f) {
+    Schedule s;
+    s.clock_frame = f;
+    return s;
+  }
+  static Schedule at_deck_frame(int deck, double frame, bool fire_if_passed = false) {
+    Schedule s;
+    s.kind = ScheduleKind::DeckFrame;
+    s.deck = static_cast<std::uint8_t>(deck);
+    s.frame = frame;
+    s.fire_if_passed = fire_if_passed;
+    return s;
+  }
+  static Schedule at_deck_beat(int deck, double beat_number, bool bar_aligned = false, bool fire_if_passed = false) {
+    Schedule s;
+    s.kind = ScheduleKind::DeckBeat;
+    s.deck = static_cast<std::uint8_t>(deck);
+    s.beat = beat_number;
+    s.bar_aligned = bar_aligned;
+    s.fire_if_passed = fire_if_passed;
+    return s;
+  }
+  static Schedule beats_from_now(int deck, double beats, bool bar_aligned = false) {
+    Schedule s = at_deck_beat(deck, beats, bar_aligned);
+    s.relative = true;
+    return s;
+  }
 };
 
 struct FxSlotView {
@@ -257,6 +311,22 @@ class Engine {
   void stream_enable(bool on, bool pre_clip = false);
   std::size_t stream_read(float* interleaved_stereo, std::size_t max_frames);
   std::uint64_t stream_dropped_frames() const;
+
+  // ---- engine clock and sample-accurate scheduling ----
+  // Output frames rendered so far (monotonic, any thread; advances once per callback).
+  std::uint64_t clock_frames() const;
+  double clock_seconds() const;
+  // Estimated engine frame being rendered at wall time `t` (extrapolated from the device callback timing; error is
+  // about one callback jitter; add the device output latency yourself). Offline: just clock_frames().
+  std::uint64_t clock_at_wall(std::chrono::steady_clock::time_point t) const;
+  // Run `c` on the exact output sample given by `when`. Returns an id (> 0), or 0 when rejected: queue / table
+  // pool full, Load / SamplerLoad (pointer commands), internal Ops, bad deck, or relative beats <= 0.
+  // Beat / deck kinds are resolved on the audio thread when the entry is accepted (ClockFrame in the past runs at
+  // the start of the next callback). Capacity 1024 live entries; beyond that the entry is dropped (event).
+  std::uint64_t schedule(const Command& c, const Schedule& when);
+  bool cancel(std::uint64_t id);      // true if it was still pending when called (no event is emitted)
+  std::size_t scheduled_count() const;  // pending entries, including ones still in the command queue
+  void cancel_all();
 
   // Call regularly from one non-real-time thread: drains events and frees retired tracks.
   bool poll(EngineEvent& out);

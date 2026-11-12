@@ -104,6 +104,16 @@ final class DeckHandView: MTKView, MTKViewDelegate {
   }
 
   // MARK: keyboard
+  override func flagsChanged(with event: NSEvent) {
+    guard let core else { return }
+    var mods: UInt32 = 0
+    if event.modifierFlags.contains(.shift) { mods |= UInt32(DH_MOD_SHIFT) }
+    if event.modifierFlags.contains(.command) { mods |= UInt32(DH_MOD_COMMAND) }
+    if event.modifierFlags.contains(.option) { mods |= UInt32(DH_MOD_ALT) }
+    if event.modifierFlags.contains(.control) { mods |= UInt32(DH_MOD_CONTROL) }
+    dh_app_modifiers(core, mods)
+  }
+
   override func keyDown(with event: NSEvent) {
     guard let core else { return }
     var mods: UInt32 = 0

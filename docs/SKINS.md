@@ -46,19 +46,52 @@ Flow rule: fixed/percent children first (shrunk proportionally if they exceed th
 `flex` (default 1) honouring min/max. Everything is clamped to the window and to its parent.
 
 ## Bindings
-`bind="deck[1].play"`: dotted lowercase segments, optional `[index]` (max 3 digits), at most 64 chars.
-Controls and values the application provides (the default skin uses all of these):
+`bind="deck[1].play"`: dotted lowercase segments, optional `[index]` (1-based, max 3 digits), at most 64 chars.
+Skin names are the public API; the application translates them to its control table (`deck1.play`,
+`deck2.eq_high`, `mixer.head_level`...) or to its own actions in ONE place, `map_binding()` in
+`src/app/skin_view.cpp`. Unknown bindings are harmless: the widget draws but does nothing.
 
-    deck[N].  letter title artist bpm key tempo loop jog waveform pads load cue play sync
-    mixer.    crossfader master.level headphone.volume headphone.mix
-              ch[N].  trim eq.high eq.mid eq.low filter fader level cue
-    browser.  tree tracks search count
-    app.      controller audio import
+    deck[N].  letter title artist bpm key time elapsed remaining loop loaded   (labels, `show`)
+              play cue sync key_lock quantize slip reverse eject               (buttons; cue acts on press and release)
+              tempo (fader, -1..1)  tempo_range (button: steps 6/10/16/100 %, label shows the range)
+              key_shift (label)  key_shift.minus .plus .reset (buttons)
+              fx[S].select (button: steps through the effects, shows the name)  fx[S].on  fx[S].wet (fader)
+              jog  waveform (mode=zoomed|overview; overview seeks on click/drag)  pads (hot cues, cols= rows=)
+              load (button: loads the selected library track)
+    mixer.    crossfader master.level (meter) master.volume headphone.volume headphone.mix sampler.level
+              ch[N].  trim eq.high eq.mid eq.low filter fader (knobs, faders)  level (meter)  cue (headphone cue)
+    browser.  tree tracks search (editable label) count add_to remove edit can_remove (show)
+              playlist.add_list .add_folder .rename .delete
+    sampler.  pads (16 slots: click plays, shift-click or the corner square stops)  level  stop
+    app.      controller audio status (labels)  import rec export language skin layout settings sampler learn (buttons)
+              has_import multi_language multi_skin has_four (for `show=`)
 
-`show="deck[1].loaded"` (prefix `!` to negate) hides a widget when false. `format` = `text int fixed0..3
-time percent signed db`. A label with `text="@id"` and a `bind` formats the id with `value`/`count` = the bound
-value; `args="deck=A"` adds fixed arguments (`parse_text_args`). `button text_on=` is shown while on.
-`browser columns="title,artist,..."` header ids are `browser.col.<name>`.
+`show="deck[1].loaded"` (prefix `!` to negate) hides a widget and its children when false (the layout space
+stays reserved). `format` = `text int fixed0..3 time percent signed db`. A label with `text="@id"` and a
+`bind` formats the id with `value`/`count` = the bound value; `args="deck=A"` adds fixed arguments
+(`parse_text_args`). `button text_on=` is shown while on. A button or label with a `bind` but no `text` shows
+the application's own text for it (REC with its clock, the language tag, the skin name, an effect name).
+`browser columns="title,artist,..."` header ids are `browser.col.<name>`; known columns are title, artist,
+bpm, key, time.
+
+## Windows
+A skin may declare up to four windows. The application uses `main` (the first) and, when present, `four`: the
+`app.layout` button (shown with `show="app.has_four"`) toggles between them, persisted as setting `ui.layout`.
+`four` is expected to bind decks 1-4.
+
+## Interaction
+Knobs: vertical drag, shift = fine, double-click = default. Faders: drag (a press off the thumb jumps there,
+then the drag is relative), shift = fine, double-click = default. With the shell's `touch` flag buttons, knobs and
+faders get at least 44 pt hit targets. Safe-area insets given to `dh_app_set_display` shrink the solved window.
+`transition=ms` tweens colours between states; `anim=` animations run (`opacity scale offset_x offset_y glow`;
+triggers `always hover pressed on beat`, where `beat` is the time since the last beat of the bound deck).
+`rotate` animations and `sprite`/`image` are parsed but not drawn yet. Panels the application draws itself
+(settings, sampler, MIDI learn, track details, export destinations, add-to-playlist) use the skin's colour tokens
+by name: `bg panel panel2 line text dim accent bad good hover deck1..deck4` (with fallbacks, e.g. voidwave's
+`void glass haze rim ink violet cyan magenta`). A skin that cannot be loaded is reported in the status line and
+the previous skin stays; if even the built-in one fails the app falls back to a minimal code-drawn UI.
+Skins are chosen with the `app.skin` button (cycles built-in skins and those in `<data>/skins`), or in
+Settings; the choice is setting `ui.skin` and applies without a restart.
 
 ## Text and i18n
 Skins never hardcode UI text: `text="@deck.sync"` resolves via `resolve_text()` - the skin's own `strings`
@@ -79,5 +112,8 @@ skin (`ParseResult::skin == nullptr` plus messages); the app then keeps the buil
 the UI process only and can never affect audio.
 
 ## Built-in skins
-`default.dhskin`: two decks, central mixer, waveforms and library, all procedural. `voidwave.dhskin`: hexagonal
-window, free-form stack, orbiting/pulsing decorations. Original design; no third-party assets.
+`default.dhskin`: `main` = two decks (transport, key lock/quantise/slip/reverse, key shift, tempo, three effect
+slots, hot-cue pads, overview) around a central mixer, zoomed waveforms, playlist tree and track table with
+every library action; `four` = four compact decks with a four-strip mixer. All procedural. `voidwave.dhskin`:
+hexagonal window, free-form stack, orbiting/pulsing decorations; exposes fewer controls (plus the skin and settings
+buttons). Original design; no third-party assets.

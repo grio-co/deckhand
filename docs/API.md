@@ -8,13 +8,21 @@ Everything DeckHand can do is reachable here; the UI is just a client.
 - gRPC and GraphQL deliberately not used (harder to script; GraphQL suits nested data queries,
   not commands). gRPC may be added later if needed.
 
+## OpenAPI
+The full machine-readable description (every path, scope, schema, the control-name tables and the
+WebSocket protocol) is [`openapi.yaml`](openapi.yaml), OpenAPI 3.1. Open it in any OpenAPI viewer
+(Swagger Editor, Redoc, Scalar, Postman, Insomnia) or feed it to a client generator. The code is the
+source of truth if the two ever disagree.
+
 ## Scheduled commands
 Any command may carry a schedule: an exact timestamp, beat or bar. The engine executes it
 sample-accurately, so scripted sets are not limited by request jitter.
 
 ## Security
-- Bearer tokens, each with an ACL scope: e.g. `deck.control`, `mixer.control`, `library.read`,
-  `library.write`, `stream.control`, `admin`. Least privilege by default.
+- Bearer tokens, each with a set of scopes: `read`, `control` (or narrower `control:deck:1`,
+  `control:mixer`), `library:read`, `library:write`, `export`, `admin`. A scope covers its
+  sub-scopes; `admin` covers everything. `POST /v1/commands` and the sampler routes need the
+  broad `control` scope. Least privilege by default.
 - Tokens stored hashed; expiry and revocation supported.
 - TLS supported; self-generated certificate with pinning on first use, or user-supplied cert.
 - Binds to localhost by default; remote access is opt-in.
@@ -67,10 +75,19 @@ Send `Authorization: Bearer <token>`. Bodies and replies are JSON.
 | `GET`/`POST /v1/tokens`, `DELETE /v1/tokens/{id}` | `admin` | Token management |
 
 Control bodies: `{"value": 0.5}`. Without a value a toggle flips, a button is tapped and a trigger
-fires. Any control may be scheduled by adding one of `"in_ms": 500`, `"at_unix_ms": 1790000000000`
-or `"when": {"deck": 1, "seconds": 200.0}` (fires when that deck's playhead gets there); the reply
-is `202` with a `scheduled_id`. Scheduled commands currently fire within a few milliseconds, not
-yet sample-accurately.
+fires. Any control may be scheduled by adding one trigger; the engine then executes it on the exact
+output sample, and the reply is `202` with a `scheduled_id`:
+
+| Trigger | Fires |
+|---|---|
+| `"in_ms": 500` or `"at_unix_ms": 1790000000000` | At that time (as exact as the audio clock can be related to wall time: about one audio callback) |
+| `"when": {"deck": 1, "seconds": 200.0}` | When deck 1's playhead reaches 200 s (at once if it is already past) |
+| `"at_beat": {"deck": 1, "beat": 256, "bar": true}` | On that beat of deck 1's grid (beat 0 = first grid beat); `bar` moves it to the next bar line |
+| `"in_beats": {"deck": 1, "beats": 16, "bar": true}` | That many beats from deck 1's current beat |
+
+A toggle given a value (`{"value": 1}`) is compared with the deck's state when the request arrives,
+not when it fires. The result of each scheduled command arrives on the `events` topic as
+`{"type": "scheduled", "scheduled_id", "control", "ok", "clock_frame"}`.
 
 WebSocket at `/v1/ws` (token in `Authorization`, or `Sec-WebSocket-Protocol: bearer.<token>`):
 `{"cmd": "subscribe", "args": {"topics": ["decks", "mixer", "events"]}}`. `decks` and `mixer` are

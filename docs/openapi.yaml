@@ -1,0 +1,1372 @@
+openapi: 3.1.0
+info:
+  title: DeckHand API
+  version: "1"
+  summary: Local REST and WebSocket API for the DeckHand DJ application.
+  description: |
+    Everything DeckHand can do is reachable here; the UI is just a client. Bodies and replies are JSON
+    (`application/json; charset=utf-8`). This file describes the API as implemented in
+    `src/app/api_bridge.cpp`, `src/app/controls.cpp` and `src/api/`.
+
+    ## Connecting and authentication
+    The server listens on `http://127.0.0.1:7373` by default (settings `api.enabled`, `api.port`,
+    `api.bind`, `api.tls`). Plain HTTP is only allowed on loopback; any other bind address turns TLS on
+    (TLS 1.2+, self-signed certificate `api-cert.pem` in the data folder unless replaced). On first run an
+    owner token with the `admin` scope is written to `api-admin-token.txt` in the data folder (mode 0600).
+
+    Send `Authorization: Bearer <token>` on every request. Tokens look like `dh_` plus 64 hex characters and
+    are never accepted in URLs. Unmatched paths also need a token (no route probing). Create narrower
+    tokens with `POST /v1/tokens` or `deckhandctl token create`.
+
+    ## Scopes
+    A scope is a colon-separated path of segments `[a-z0-9_.*-]`, for example `read`, `control`,
+    `control:deck:1`, `control:deck:*`. A granted scope covers a required scope when its segments are a
+    prefix of the required segments and each granted segment equals the required one or is `*`. So
+    `control` covers `control:deck:1` and `control:mixer`; `control:deck:*` covers every deck. `admin`
+    (exactly) covers everything. Otherwise scopes imply nothing: `control` does not include `read`.
+    Route scopes may use path captures (`control:deck:{deck}`); a capture used in a scope must consist of
+    `[a-z0-9_.-]` or the request is rejected with 400. Each operation below states its scope in the
+    `x-scope` extension and in its description.
+
+    Scopes used: `read`, `control`, `control:deck:{n}`, `control:mixer`, `library:read`, `library:write`,
+    `export`, `admin`. Tokens may also carry an expiry and a list of allowed source CIDRs (a request from
+    another address gets 403).
+
+    ## Errors
+    Every error has the shape `{"error": {"code": <http status>, "message": "<text>"}}`. Status codes used
+    include 400 (bad body, parameter or control), 401 (missing/invalid/expired token, with
+    `WWW-Authenticate`), 403 (scope missing, origin or source address not allowed), 404, 405, 408, 409
+    (valid request refused by the application state), 413 (body over 1 MiB), 429 and 500. Chunked request
+    bodies are not supported (400); HEAD is not implemented.
+
+    ## Rate limiting and lockout
+    Requests (and WebSocket commands) are limited per token (100/s, burst 200) and per IP (200/s, burst
+    400); excess requests get 429 with `Retry-After: 1`. Failed authentication is counted per IP; after 10
+    failures within 60 s every request from that IP gets 429 (`Retry-After` set) for 60 s.
+
+    ## Control requests and scheduling
+    Control endpoints (`POST /v1/decks/{deck}/{control}`, `POST /v1/mixer/{control}`,
+    `POST /v1/sampler/{slot}/{control}`, each entry of `POST /v1/commands`, and the WebSocket `control`
+    command) share one body, `ControlRequest`. `value` is a number or boolean (booleans become 1/0).
+    Without a value a toggle flips, a button is tapped and a trigger fires; a plain value control without a
+    value is a 400. Add one of `in_ms`, `at_unix_ms` or `when` to schedule instead of executing now; the
+    reply is then 202 with a `scheduled_id`. If several are given, `when` wins over the time fields and
+    `at_unix_ms` wins over `in_ms`. Scheduled commands are checked every ~2 ms, so they fire within a few
+    milliseconds (not yet sample-accurate). A control name is validated when the request arrives, but its
+    value is only validated when it fires; a failure then is reported on the `events` WebSocket topic as a
+    `scheduled` event with `ok: false`. At most 10000 commands may be pending (429 beyond that).
+
+    ## Control names
+    A control is addressed by a dotted name: `deck<1..4>.<control>`, `mixer.<control>` or
+    `sampler.<1..16>.<control>`. In the REST paths the name is split: `/v1/decks/1/play` is `deck1.play`,
+    `/v1/mixer/crossfader` is `mixer.crossfader`, `/v1/sampler/3/trigger` is `sampler.3.trigger`.
+    `GET /v1/controls` lists every name with kind, range and help. Kinds: `trigger` (fires, value ignored),
+    `toggle` (1 on, 0 off, none = flip), `button` (1 press, 0 release, none = tap), `value` (value required).
+
+    | Deck control | Kind | Value | Purpose |
+    |---|---|---|---|
+    | `play` | toggle | 0 pause, 1 play | Start or pause playback |
+    | `cue` | button | 1 press, 0 release | CUE button |
+    | `sync` | toggle | 0/1 | Beat sync to the other deck |
+    | `seek` | value | seconds from start, 0..1e9 | Move the playhead |
+    | `beatjump` | value | beats, -512..512 | Jump by beats |
+    | `tempo` | value | -1..1 of the tempo range | Tempo fader |
+    | `tempo_range` | value | 0.01..1 (e.g. 0.06 0.10 0.16 1.0) | Tempo fader range |
+    | `hotcue.<1..8>` | button | 1 press, 0 release | Hot cue pad: set if empty, else jump |
+    | `hotcue_clear.<1..8>` | trigger | none | Delete a hot cue |
+    | `loop_in` / `loop_out` | trigger | none | Set loop start / end and start looping |
+    | `loop` | value | beats 0.03125..64 (default 4) | Toggle a loop |
+    | `beatloop` | value | beats 0.03125..64 | Start a loop of this length |
+    | `reloop` | trigger | none | Return to the last loop |
+    | `loop_scale` | value | 0.5..2 | Halve or double the active loop |
+    | `loop_move` | value | beats, -64..64 | Move the active loop |
+    | `loop_exit` | trigger | none | Leave the active loop |
+    | `cue_call` | value | -1 previous, 1 next | Jump to memory cue |
+    | `trim` | value | 0..1 (0.5 unity) | Channel trim |
+    | `eq_high` / `eq_mid` / `eq_low` | value | 0..1 (0.5 flat) | EQ |
+    | `filter` | value | 0..1 (0.5 off) | Channel filter |
+    | `fader` | value | 0..1 | Channel fader |
+    | `pfl` | toggle | 0/1 | Headphone cue |
+    | `eject` | trigger | none | Unload (refused while playing) |
+    | `key_lock` | toggle | 0/1 | Keep pitch when tempo changes |
+    | `key_shift` | value | semitones, -12..12 | Transpose |
+    | `quantize` | toggle | 0/1 | Snap to beat grid |
+    | `slip` | toggle | 0/1 | Slip mode |
+    | `reverse` | toggle | 0/1 | Play backwards |
+    | `color_fx` | value | 0 filter, 1 noise, 2 dub echo, 3 crush, 4 pitch, 5 space | Effect on the filter knob |
+    | `auto_gain` | value | dB, -24..12 | Loudness trim |
+    | `fx<1..3>.select` | value | effect number 0..14 from `GET /v1/effects` (0 none; colour effects refused) | Choose effect |
+    | `fx<1..3>.on` | toggle | 0/1 | Effect on |
+    | `fx<1..3>.wet` / `.param` | value | 0..1 | Level / effect parameter |
+    | `fx<1..3>.time` | value | beats 0.0625..16 | Beat-synced time |
+
+    | Mixer control | Kind | Value | Purpose |
+    |---|---|---|---|
+    | `crossfader` | value | 0..1 (0 left) | Crossfader |
+    | `head_mix` | value | 0 cue .. 1 master | Headphone mix |
+    | `head_level` / `master_level` / `sampler_level` | value | 0..1 | Levels |
+    | `master_bpm` | value | 0..300 (0 follows decks) | Tempo for beat-synced effects and sampler |
+    | `fx<1..3>.select/on/wet/param/time` | as deck | as deck | Master-bus effect slots |
+
+    | Sampler control (slot 1..16) | Kind | Value | Purpose |
+    |---|---|---|---|
+    | `trigger` / `stop` | trigger | none | Play / stop the sample |
+    | `gain` | value | 0..1 (0.8 unity) | Slot level |
+    | `loop` | value | 0 one-shot, 1 loop | Loop the sample |
+    | `sync` | value | 0/1 | Follow the master tempo |
+
+    ## WebSocket protocol
+    OpenAPI cannot model WebSockets, so the protocol is described here.
+
+    **Connection.** `GET /v1/ws` with a standard WebSocket upgrade (version 13). Authenticate with
+    `Authorization: Bearer <token>`, or, for browsers, with
+    `Sec-WebSocket-Protocol: deckhand.v1, bearer.<token>` (list `deckhand.v1` first so the server echoes it
+    and not the token). Tokens in URLs are ignored. A browser `Origin` must be on the server's allowlist
+    (otherwise 403); non-browser clients send none. Failed upgrades are ordinary error responses (401, 403,
+    426, 429, 503 when 64 clients are connected). Clients must mask frames and send text frames only; the
+    server pings every 15 s and closes connections silent for 45 s. A message may be at most 256 KiB.
+    Closing codes: 1008 token revoked or expired (checked about every 2 s), 1013 slow consumer (queue
+    overflow), 1009 message too big, 1002/1003/1007 protocol errors.
+
+    **Client messages.** `{"id": <any JSON, echoed>, "cmd": "<name>", "args": {...}}`.
+    Built-in commands (no scope): `ping` (result `"pong"`), `subscribe` and `unsubscribe` with
+    `args.topics`, a non-empty array (max 64) of topic patterns. Application command: `control`, scope
+    `control`, with `args` equal to a `ControlRequest` plus the required string `control` holding the full
+    control name, for example `{"id":1,"cmd":"control","args":{"control":"deck1.play","value":1}}`.
+    Unknown commands get 404.
+
+    **Replies.** Every message gets one reply envelope, `{"id", "ok", "status", "result" | "error"}`: `id`
+    is omitted if the request had none, `ok` is true when `status < 400`, `result` carries the body for
+    successes (omitted if empty) and `error` is the `{code, message}` object for failures. Examples:
+    `{"id":1,"ok":true,"status":200,"result":{"control":"deck1.play"}}`;
+    `{"id":2,"ok":true,"status":200,"result":{"topics":["decks","events"]}}` (the full current
+    subscription list); `{"id":3,"ok":false,"status":400,"error":{"code":400,"message":"unknown deck control"}}`.
+    Rate limiting replies 429 on the message. Invalid JSON gets a 400 reply without `id`.
+
+    **Topics and published messages.** Published messages are `{"topic": "<topic>", "data": <payload>}`,
+    delivered to clients subscribed to that exact topic, to `prefix.*`, or to `*`, and whose token has the
+    `read` scope. Topic names are 1..128 characters from `[A-Za-z0-9._:/*-]`; at most 256 subscriptions per
+    client. DeckHand publishes:
+
+    - `decks`: array of four `Deck` objects, ten times a second (only while any client is connected).
+    - `mixer`: one `Mixer` object, ten times a second.
+    - `events`: discrete events, each an object with a `type`:
+      `deck.loaded` and `deck.unloaded` (track changed), `deck.play` and `deck.pause`, each with
+      `deck` set to a full `Deck` object; and `scheduled` with `scheduled_id`, `control`, `ok` and, on failure,
+      `error`, emitted when a scheduled command fires.
+servers:
+  - url: http://127.0.0.1:7373
+    description: Default local server (plain HTTP, loopback only)
+  - url: https://{host}:{port}
+    description: TLS (self-signed certificate unless replaced); required for non-loopback binds
+    variables:
+      host: {default: 127.0.0.1}
+      port: {default: "7373"}
+security:
+  - bearerAuth: []
+tags:
+  - {name: Status}
+  - {name: Decks}
+  - {name: Mixer}
+  - {name: Controls}
+  - {name: Schedule}
+  - {name: Effects}
+  - {name: Sampler}
+  - {name: Recording}
+  - {name: Library}
+  - {name: History}
+  - {name: Export}
+  - {name: Settings}
+  - {name: Tokens}
+
+paths:
+  /v1/status:
+    get:
+      tags: [Status]
+      operationId: getStatus
+      summary: Application status
+      description: "Required scope: `read`."
+      x-scope: read
+      responses:
+        "200":
+          description: Application, audio device and track count.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Status"}
+              example: {app: DeckHand, api: 1, status: "Audio running", audio_device: "Built-in Output", tracks: 1423}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/decks:
+    get:
+      tags: [Decks]
+      operationId: listDecks
+      summary: State of all four decks
+      description: "Required scope: `read`."
+      x-scope: read
+      responses:
+        "200":
+          description: Array of four decks, in order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Deck"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/decks/{deck}:
+    get:
+      tags: [Decks]
+      operationId: getDeck
+      summary: State of one deck
+      description: "Required scope: `read`. 404 if the deck is not 1..4."
+      x-scope: read
+      parameters:
+        - {$ref: "#/components/parameters/Deck"}
+      responses:
+        "200":
+          description: The deck, including the loaded track when there is one.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Deck"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/decks/{deck}/load:
+    post:
+      tags: [Decks]
+      operationId: loadDeck
+      summary: Load a track into a deck
+      description: |
+        Required scope: `control:deck:{deck}`. Give `track_id` (a library track) or `path` (an absolute file
+        path, which is also added to the library; `path` wins if both are given). Loading is asynchronous:
+        the reply is 202 with an empty body.
+      x-scope: "control:deck:{deck}"
+      parameters:
+        - {$ref: "#/components/parameters/Deck"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LoadRequest"}
+            examples:
+              byId: {value: {track_id: 12}}
+              byPath: {value: {path: /Users/me/Music/track.flac}}
+      responses:
+        "202": {description: Accepted; loading has started. Empty body.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: The application refused the load (for example the deck is playing or the track is unknown).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/decks/{deck}/{control}:
+    post:
+      tags: [Decks, Controls]
+      operationId: controlDeck
+      summary: Run a deck control (optionally scheduled)
+      description: |
+        Required scope: `control:deck:{deck}`. `{control}` is any deck control from the control-name tables
+        in the API description, for example `play`, `cue`, `sync`, `seek`, `hotcue.3`, `beatloop`, `eq_low`,
+        `fx1.wet`. The literal path `load` is a separate operation. Executes immediately (200) or, with a
+        scheduling field, is queued (202).
+      x-scope: "control:deck:{deck}"
+      parameters:
+        - {$ref: "#/components/parameters/Deck"}
+        - name: control
+          in: path
+          required: true
+          description: Deck control name, with its slot suffix where it takes one.
+          schema:
+            type: string
+            pattern: '^(play|cue|sync|seek|beatjump|tempo|tempo_range|hotcue\.[1-8]|hotcue_clear\.[1-8]|loop_in|loop_out|loop|beatloop|reloop|loop_scale|cue_call|trim|eq_high|eq_mid|eq_low|filter|fader|pfl|eject|key_lock|key_shift|quantize|slip|reverse|loop_move|loop_exit|color_fx|auto_gain|fx[1-3]\.(select|on|wet|param|time))$'
+          examples:
+            play: {value: play}
+            hotcue: {value: hotcue.3}
+            effect: {value: fx1.wet}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ControlRequest"}
+            examples:
+              seek: {value: {value: 62.5}}
+              scheduled: {value: {value: 1, when: {deck: 1, seconds: 180.0}}}
+      responses:
+        "200": {$ref: "#/components/responses/ControlExecuted"}
+        "202": {$ref: "#/components/responses/ControlScheduled"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "429": {$ref: "#/components/responses/RateLimited"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/mixer:
+    get:
+      tags: [Mixer]
+      operationId: getMixer
+      summary: Mixer state
+      description: "Required scope: `read`."
+      x-scope: read
+      responses:
+        "200":
+          description: Mixer levels and positions.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Mixer"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/mixer/{control}:
+    post:
+      tags: [Mixer, Controls]
+      operationId: controlMixer
+      summary: Run a mixer control (optionally scheduled)
+      description: |
+        Required scope: `control:mixer`. `{control}` is a mixer control: `crossfader`, `head_mix`,
+        `head_level`, `master_level`, `master_bpm`, `sampler_level`, or a master-bus effect slot control
+        `fx1.select`, `fx1.on`, `fx1.wet`, `fx1.param`, `fx1.time` (slots 1..3).
+      x-scope: "control:mixer"
+      parameters:
+        - name: control
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^(crossfader|head_mix|head_level|master_level|master_bpm|sampler_level|fx[1-3]\.(select|on|wet|param|time))$'
+          example: crossfader
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ControlRequest"}
+            example: {value: 0.5, in_ms: 500}
+      responses:
+        "200": {$ref: "#/components/responses/ControlExecuted"}
+        "202": {$ref: "#/components/responses/ControlScheduled"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "429": {$ref: "#/components/responses/RateLimited"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/controls:
+    get:
+      tags: [Controls]
+      operationId: listControls
+      summary: Every control with kind, range, help and current value
+      description: |
+        Required scope: `read`. Lists all deck (1..4), mixer, effect-slot and sampler controls by full name
+        (several hundred entries). `value` is present only for controls whose state can be read; sampler
+        controls have none.
+      x-scope: read
+      responses:
+        "200":
+          description: Control catalogue.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Control"}
+              example:
+                - {name: deck1.play, kind: toggle, range: "0 pause, 1 play, none = toggle", help: Start or pause playback, value: 0}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/commands:
+    post:
+      tags: [Controls]
+      operationId: runCommands
+      summary: Run several controls in one request
+      description: |
+        Required scope: `control` (note: individual entries are not checked against narrower scopes such as
+        `control:deck:1`, so a token needs the broad `control` scope). Each entry is a `ControlRequest` with
+        a required full `control` name. Entries run in order; one failing does not stop the rest. The HTTP
+        status is 200 whenever the list itself is valid; each entry reports its own `status`.
+      x-scope: control
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CommandsRequest"}
+            example:
+              commands:
+                - {control: deck1.play}
+                - {control: mixer.crossfader, value: 1.0, in_ms: 4000}
+      responses:
+        "200":
+          description: One result per command, in order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/CommandResult"}
+              example:
+                - {status: 200, result: {control: deck1.play}}
+                - {status: 202, result: {control: mixer.crossfader, scheduled_id: 7}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/schedule:
+    get:
+      tags: [Schedule]
+      operationId: listSchedule
+      summary: Pending scheduled commands
+      description: "Required scope: `read`."
+      x-scope: read
+      responses:
+        "200":
+          description: Commands that have not fired yet.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/ScheduledCommand"}
+        default: {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Schedule]
+      operationId: clearSchedule
+      summary: Cancel all pending scheduled commands
+      description: "Required scope: `control`."
+      x-scope: control
+      responses:
+        "204": {description: Cleared. Empty body.}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/schedule/{id}:
+    delete:
+      tags: [Schedule]
+      operationId: cancelScheduled
+      summary: Cancel one scheduled command
+      description: "Required scope: `control`."
+      x-scope: control
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The `scheduled_id` returned when it was queued.
+          schema: {type: integer, minimum: 1}
+      responses:
+        "204": {description: Cancelled. Empty body.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/effects:
+    get:
+      tags: [Effects]
+      operationId: listEffects
+      summary: Available effects
+      description: |
+        Required scope: `read`. The `number` is what `fxN.select` takes. Effects flagged `colour_only` are
+        the filter-knob effects (`color_fx`) and cannot be selected into a slot.
+      x-scope: read
+      responses:
+        "200":
+          description: Effect catalogue.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Effect"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/sampler/{slot}/load:
+    post:
+      tags: [Sampler]
+      operationId: loadSample
+      summary: Load an audio file into a sampler slot
+      description: "Required scope: `control`. Asynchronous; 202 with an empty body."
+      x-scope: control
+      parameters:
+        - {$ref: "#/components/parameters/Slot"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PathRequest"}
+            example: {path: /Users/me/Samples/airhorn.wav}
+      responses:
+        "202": {description: Accepted. Empty body.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/sampler/{slot}/{control}:
+    post:
+      tags: [Sampler, Controls]
+      operationId: controlSampler
+      summary: Run a sampler control (optionally scheduled)
+      description: |
+        Required scope: `control`. Controls: `trigger`, `stop` (triggers), `gain` (0..1), `loop` (0 or 1),
+        `sync` (0 or 1). The literal path `load` is a separate operation.
+      x-scope: control
+      parameters:
+        - {$ref: "#/components/parameters/Slot"}
+        - name: control
+          in: path
+          required: true
+          schema: {type: string, enum: [trigger, stop, gain, loop, sync]}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ControlRequest"}
+            example: {}
+      responses:
+        "200": {$ref: "#/components/responses/ControlExecuted"}
+        "202": {$ref: "#/components/responses/ControlScheduled"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "429": {$ref: "#/components/responses/RateLimited"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/recording:
+    get:
+      tags: [Recording]
+      operationId: getRecording
+      summary: Master recorder status
+      description: "Required scope: `read`."
+      x-scope: read
+      responses:
+        "200":
+          description: Recorder state.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Recording"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/recording/{action}:
+    post:
+      tags: [Recording]
+      operationId: controlRecording
+      summary: Start or stop recording the master output
+      description: "Required scope: `control`. Any action other than `start` or `stop` is a 404."
+      x-scope: control
+      parameters:
+        - name: action
+          in: path
+          required: true
+          schema: {type: string, enum: [start, stop]}
+      responses:
+        "200":
+          description: The file being written (start) or just written (stop).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [path]
+                properties:
+                  path: {type: string}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: Refused (for example already recording, or the file could not be opened).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks:
+    get:
+      tags: [Library]
+      operationId: listTracks
+      summary: Search and page through the library
+      description: "Required scope: `library:read`."
+      x-scope: "library:read"
+      parameters:
+        - {name: search, in: query, description: Free-text search., schema: {type: string}}
+        - {name: playlist, in: query, description: Playlist id; 0 or absent means the whole library., schema: {type: integer, default: 0}}
+        - name: sort
+          in: query
+          description: Sort key; anything else uses the default order.
+          schema: {type: string, enum: [title, artist, album, genre, bpm, key, duration, rating, added]}
+        - {name: desc, in: query, description: "`1` for descending order.", schema: {type: string, enum: ["0", "1"]}}
+        - {name: limit, in: query, description: Page size (clamped to 1..2000)., schema: {type: integer, default: 200, minimum: 1, maximum: 2000}}
+        - {name: offset, in: query, description: Items to skip., schema: {type: integer, default: 0, minimum: 0}}
+      responses:
+        "200":
+          description: A page of tracks.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TrackPage"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Library]
+      operationId: addTrackFile
+      summary: Add an audio file to the library
+      description: "Required scope: `library:write`. Import and analysis run asynchronously; 202 with an empty body."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PathRequest"}
+            example: {path: /Users/me/Music/track.flac}
+      responses:
+        "202": {description: Accepted. Empty body.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks/{id}:
+    parameters:
+      - {$ref: "#/components/parameters/TrackId"}
+    get:
+      tags: [Library]
+      operationId: getTrack
+      summary: One track with cues and beat grid
+      description: "Required scope: `library:read`."
+      x-scope: "library:read"
+      responses:
+        "200":
+          description: The track.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TrackDetail"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Library]
+      operationId: editTrack
+      summary: Edit track tags
+      description: "Required scope: `library:write`. Only the fields present (with the right type) are changed. `rating` is clamped to 0..5 and `year` to 0..9999."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TrackEdit"}
+            example: {genre: Techno, rating: 4}
+      responses:
+        "200":
+          description: The track after the edit.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Track"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/playlists:
+    get:
+      tags: [Library]
+      operationId: listPlaylists
+      summary: All playlists and folders
+      description: "Required scope: `library:read`. A flat list; use `parent` to rebuild the tree."
+      x-scope: "library:read"
+      responses:
+        "200":
+          description: Playlist nodes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Playlist"}
+        default: {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Library]
+      operationId: createPlaylist
+      summary: Create a playlist or folder
+      description: "Required scope: `library:write`."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PlaylistCreate"}
+            example: {name: Warm-up, parent: 0, folder: false}
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: {type: integer, format: int64}
+              example: {id: 5}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/playlists/{id}:
+    parameters:
+      - {$ref: "#/components/parameters/PlaylistId"}
+    patch:
+      tags: [Library]
+      operationId: updatePlaylist
+      summary: Rename or move a playlist
+      description: "Required scope: `library:write`. Give `name` to rename, `parent` and/or `position` to move. 409 if a folder would be moved into itself."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PlaylistUpdate"}
+            example: {name: Peak time}
+      responses:
+        "200": {description: Updated. Empty body.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: Cannot move a folder into itself.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        default: {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Library]
+      operationId: deletePlaylist
+      summary: Delete a playlist or folder
+      description: "Required scope: `library:write`."
+      x-scope: "library:write"
+      responses:
+        "204": {description: Deleted. Empty body.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/playlists/{id}/tracks:
+    post:
+      tags: [Library]
+      operationId: addToPlaylist
+      summary: Add a track to a playlist
+      description: "Required scope: `library:write`. 404 if the track does not exist."
+      x-scope: "library:write"
+      parameters:
+        - {$ref: "#/components/parameters/PlaylistId"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PlaylistAddTrack"}
+            example: {track_id: 12}
+      responses:
+        "201": {description: Added. Empty body.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/playlists/{id}/tracks/{position}:
+    delete:
+      tags: [Library]
+      operationId: removeFromPlaylist
+      summary: Remove the entry at a position
+      description: "Required scope: `library:write`. `position` is the entry's position in the playlist."
+      x-scope: "library:write"
+      parameters:
+        - {$ref: "#/components/parameters/PlaylistId"}
+        - {name: position, in: path, required: true, schema: {type: integer, minimum: 0}}
+      responses:
+        "204": {description: Removed. Empty body.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/history:
+    get:
+      tags: [History]
+      operationId: listHistory
+      summary: Play-history sessions
+      description: "Required scope: `library:read`."
+      x-scope: "library:read"
+      responses:
+        "200":
+          description: Sessions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/HistorySession"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/history/{id}:
+    get:
+      tags: [History]
+      operationId: getHistorySession
+      summary: Entries of one history session
+      description: "Required scope: `library:read`. An unknown but numeric session id returns an empty array."
+      x-scope: "library:read"
+      parameters:
+        - {name: id, in: path, required: true, description: Session id., schema: {type: integer, minimum: 0}}
+      responses:
+        "200":
+          description: Played tracks.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/HistoryEntry"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/export:
+    post:
+      tags: [Export]
+      operationId: exportLibrary
+      summary: Export to a removable drive
+      description: "Required scope: `export`. Asynchronous; 202 with an empty body."
+      x-scope: export
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ExportRequest"}
+            example: {destination: /Volumes/STICK, playlist_id: 3}
+      responses:
+        "202": {description: Accepted. Empty body.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409":
+          description: Refused by the application (for example an export is already running).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/settings/{key}:
+    parameters:
+      - {name: key, in: path, required: true, description: Setting name (for example `api.port`)., schema: {type: string, maxLength: 64}}
+    get:
+      tags: [Settings]
+      operationId: getSetting
+      summary: Read a setting
+      description: "Required scope: `admin`. Keys containing `password` are write-only (403). Most settings take effect at the next start."
+      x-scope: admin
+      responses:
+        "200":
+          description: The setting (empty string if unset).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key, value]
+                properties:
+                  key: {type: string}
+                  value: {type: string}
+              example: {key: api.port, value: "7373"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        default: {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Settings]
+      operationId: setSetting
+      summary: Write a setting
+      description: "Required scope: `admin`. Value must be a string of at most 4096 characters; key at most 64."
+      x-scope: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: {type: string, maxLength: 4096}
+            example: {value: "7374"}
+      responses:
+        "204": {description: Stored. Empty body.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/tokens:
+    get:
+      tags: [Tokens]
+      operationId: listTokens
+      summary: List tokens
+      description: "Required scope: `admin`. Secrets are never returned."
+      x-scope: admin
+      responses:
+        "200":
+          description: Tokens.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Token"}
+        default: {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Tokens]
+      operationId: createToken
+      summary: Create a token
+      description: "Required scope: `admin`. The secret is returned once and only its hash is stored."
+      x-scope: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/TokenCreate"}
+            example: {name: stream-deck, scopes: ["read", "control:deck:*", "control:mixer"], expires: 0}
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TokenSecret"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/tokens/{id}:
+    delete:
+      tags: [Tokens]
+      operationId: revokeToken
+      summary: Revoke a token
+      description: "Required scope: `admin`. Live WebSocket connections using it are dropped within about 2 s."
+      x-scope: admin
+      parameters:
+        - {name: id, in: path, required: true, description: Token id (16 hex characters)., schema: {type: string}}
+      responses:
+        "204": {description: Revoked. Empty body.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        A DeckHand token (`dh_` + 64 hex characters). Each operation needs a token whose scopes cover the
+        operation's `x-scope`; see the Scopes section of the API description. WebSocket clients may instead
+        use the `Sec-WebSocket-Protocol: deckhand.v1, bearer.<token>` header.
+  parameters:
+    Deck:
+      name: deck
+      in: path
+      required: true
+      description: Deck number, 1..4.
+      schema: {type: integer, minimum: 1, maximum: 4}
+    Slot:
+      name: slot
+      in: path
+      required: true
+      description: Sampler slot, 1..16.
+      schema: {type: integer, minimum: 1, maximum: 16}
+    TrackId:
+      name: id
+      in: path
+      required: true
+      description: Library track id.
+      schema: {type: integer, format: int64, minimum: 0}
+    PlaylistId:
+      name: id
+      in: path
+      required: true
+      description: Playlist or folder id.
+      schema: {type: integer, format: int64, minimum: 0}
+  responses:
+    Error:
+      description: Error. The status is any of the codes listed in the API description; the body is always an `Error`.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    BadRequest:
+      description: Malformed JSON, missing or invalid field, unknown control or value out of range.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: 400, message: "unknown deck control"}}
+    NotFound:
+      description: No such deck, slot, track, playlist, token or command.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: 404, message: "no such deck"}}
+    Forbidden:
+      description: The token lacks the required scope, or the operation is not allowed.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: 403, message: "token lacks required scope: control:deck:2"}}
+    RateLimited:
+      description: Rate limit, authentication lockout, or too many scheduled commands.
+      headers:
+        Retry-After:
+          description: Seconds to wait (not set for the scheduled-command limit).
+          schema: {type: integer}
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+          example: {error: {code: 429, message: "rate limit exceeded"}}
+    ControlExecuted:
+      description: The control was applied now.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ControlResult"}
+          example: {control: deck1.play}
+    ControlScheduled:
+      description: The control was queued; it fires at the requested time.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ScheduledResult"}
+          example: {control: deck2.play, scheduled_id: 7}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: integer, description: HTTP status code.}
+            message: {type: string}
+      example: {error: {code: 401, message: "missing bearer token"}}
+    Status:
+      type: object
+      required: [app, api, status, audio_device, tracks]
+      properties:
+        app: {type: string, example: DeckHand}
+        api: {type: integer, description: API major version., example: 1}
+        status: {type: string, description: Human-readable application status.}
+        audio_device: {type: string}
+        tracks: {type: integer, description: Number of tracks in the library.}
+    Track:
+      type: object
+      required: [id, title, artist, album, genre, key, bpm, duration_ms, rating, format, path]
+      properties:
+        id: {type: integer, format: int64}
+        title: {type: string}
+        artist: {type: string}
+        album: {type: string}
+        genre: {type: string}
+        key: {type: string, description: Musical key.}
+        bpm: {type: number}
+        duration_ms: {type: integer, format: int64}
+        rating: {type: integer, minimum: 0, maximum: 5}
+        format: {type: string, description: File format.}
+        path: {type: string, description: Absolute file path.}
+    Cue:
+      type: object
+      required: [kind, start_ms, label]
+      properties:
+        kind: {type: string, enum: [hot, loop, memory]}
+        slot: {type: integer, minimum: 1, maximum: 8, description: Hot-cue slot; absent for memory cues.}
+        start_ms: {type: number}
+        end_ms: {type: number, description: Loop end; absent unless a loop.}
+        label: {type: string}
+    BeatSection:
+      type: object
+      required: [first_beat_ms, bpm, bar_beat]
+      properties:
+        first_beat_ms: {type: number}
+        bpm: {type: number}
+        bar_beat: {type: integer, description: Beat-in-bar number of the first beat.}
+    TrackDetail:
+      description: A `Track` plus its cues and beat grid.
+      allOf:
+        - {$ref: "#/components/schemas/Track"}
+        - type: object
+          required: [cues, beatgrid]
+          properties:
+            cues:
+              type: array
+              items: {$ref: "#/components/schemas/Cue"}
+            beatgrid:
+              type: array
+              items: {$ref: "#/components/schemas/BeatSection"}
+    TrackPage:
+      type: object
+      required: [total, offset, items]
+      properties:
+        total: {type: integer, description: Matches before paging.}
+        offset: {type: integer}
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/Track"}
+    TrackEdit:
+      type: object
+      properties:
+        title: {type: string}
+        artist: {type: string}
+        album: {type: string}
+        genre: {type: string}
+        key: {type: string}
+        comment: {type: string}
+        rating: {type: integer, minimum: 0, maximum: 5}
+        year: {type: integer, minimum: 0, maximum: 9999}
+    Playlist:
+      type: object
+      required: [id, parent, name, folder, tracks]
+      properties:
+        id: {type: integer, format: int64}
+        parent: {type: integer, format: int64, description: Parent folder id; 0 is the top level.}
+        name: {type: string}
+        folder: {type: boolean}
+        tracks: {type: integer, description: Number of tracks.}
+    PlaylistCreate:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 200}
+        parent: {type: integer, format: int64, default: 0}
+        folder: {type: boolean, default: false}
+    PlaylistUpdate:
+      type: object
+      properties:
+        name: {type: string, minLength: 1}
+        parent: {type: integer, format: int64, description: New parent folder (0 = top level).}
+        position: {type: integer, description: New position among siblings; omitted or -1 = end.}
+    PlaylistAddTrack:
+      type: object
+      required: [track_id]
+      properties:
+        track_id: {type: integer, format: int64}
+        position: {type: integer, description: Insert position; omitted or -1 = end.}
+    HistorySession:
+      type: object
+      required: [id, started_at_ms, entries]
+      properties:
+        id: {type: integer, format: int64}
+        started_at_ms: {type: integer, format: int64, description: Unix milliseconds.}
+        entries: {type: integer, description: Number of played tracks.}
+    HistoryEntry:
+      type: object
+      required: [track_id, deck, title, artist, started_at_ms, played_ms]
+      properties:
+        track_id: {type: integer, format: int64}
+        deck: {type: integer}
+        title: {type: string}
+        artist: {type: string}
+        started_at_ms: {type: integer, format: int64, description: Unix milliseconds.}
+        played_ms: {type: integer, format: int64, description: How long it was played.}
+    ExportRequest:
+      type: object
+      required: [destination]
+      properties:
+        destination: {type: string, description: Absolute destination folder, e.g. a mounted drive.}
+        playlist_id: {type: integer, format: int64, default: 0, description: Playlist to export; 0 = whole library.}
+    PathRequest:
+      type: object
+      required: [path]
+      properties:
+        path: {type: string, description: Absolute path of an existing file.}
+    LoadRequest:
+      type: object
+      description: Give `track_id` or `path`.
+      properties:
+        track_id: {type: integer, format: int64}
+        path: {type: string, description: Absolute path of an existing file.}
+    Fx:
+      type: object
+      required: [effect, on, wet, param, beats]
+      properties:
+        effect: {type: string, description: Effect name; empty when the slot is empty.}
+        on: {type: boolean}
+        wet: {type: number}
+        param: {type: number}
+        beats: {type: number}
+    Loop:
+      type: object
+      required: [active, in_seconds, out_seconds]
+      properties:
+        active: {type: boolean}
+        in_seconds: {type: [number, "null"]}
+        out_seconds: {type: [number, "null"]}
+    Channel:
+      type: object
+      required: [trim, eq_high, eq_mid, eq_low, filter, fader]
+      properties:
+        trim: {type: number}
+        eq_high: {type: number}
+        eq_mid: {type: number}
+        eq_low: {type: number}
+        filter: {type: number}
+        fader: {type: number}
+    Deck:
+      type: object
+      required: [deck, loaded, playing, sync, pfl, position_seconds, length_seconds, bpm, tempo, tempo_range, speed, cue_seconds, loop, hot_cues, level, key_lock, key_shift, quantize, slip, reverse, auto_gain_db, fx, channel]
+      properties:
+        deck: {type: integer, minimum: 1, maximum: 4}
+        loaded: {type: boolean}
+        playing: {type: boolean}
+        sync: {type: boolean}
+        pfl: {type: boolean}
+        position_seconds: {type: number}
+        length_seconds: {type: number}
+        bpm: {type: number}
+        tempo: {type: number, description: Current tempo offset as a fraction (positive = faster).}
+        tempo_range: {type: number}
+        speed: {type: number, description: Effective playback speed.}
+        cue_seconds: {type: [number, "null"]}
+        loop: {$ref: "#/components/schemas/Loop"}
+        hot_cues:
+          type: array
+          description: Eight slots; null for an empty slot.
+          items: {type: [number, "null"]}
+          minItems: 8
+          maxItems: 8
+        level: {type: number, description: Output level meter.}
+        key_lock: {type: boolean}
+        key_shift: {type: number, description: Semitones.}
+        quantize: {type: boolean}
+        slip: {type: boolean}
+        reverse: {type: boolean}
+        auto_gain_db: {type: number}
+        fx:
+          type: array
+          description: The three effect slots.
+          items: {$ref: "#/components/schemas/Fx"}
+        channel: {$ref: "#/components/schemas/Channel"}
+        track:
+          description: Present when a library track is loaded.
+          $ref: "#/components/schemas/Track"
+    Mixer:
+      type: object
+      required: [crossfader, head_mix, head_level, master_level, peak_left, peak_right]
+      properties:
+        crossfader: {type: number}
+        head_mix: {type: number}
+        head_level: {type: number}
+        master_level: {type: number}
+        peak_left: {type: number}
+        peak_right: {type: number}
+    Control:
+      type: object
+      required: [name, kind, range, help]
+      properties:
+        name: {type: string, description: "Full control name, e.g. `deck1.hotcue.3`."}
+        kind: {type: string, enum: [trigger, toggle, button, value]}
+        range: {type: string, description: Human-readable value range.}
+        help: {type: string}
+        value: {type: number, description: Current value; absent for sampler controls.}
+    Effect:
+      type: object
+      required: [number, name, param, beat_synced, colour_only, release]
+      properties:
+        number: {type: integer, description: Value for `fxN.select`.}
+        name: {type: string}
+        param: {type: string, description: What the `param` control does for this effect.}
+        beat_synced: {type: boolean}
+        colour_only: {type: boolean, description: Only usable through `color_fx`, not selectable into a slot.}
+        release: {type: boolean}
+    ScheduleFields:
+      type: object
+      description: Optional scheduling. Without any of these the control runs immediately.
+      properties:
+        in_ms: {type: integer, minimum: 0, description: Run this many milliseconds from now.}
+        at_unix_ms: {type: integer, format: int64, description: Run at this Unix time in milliseconds.}
+        when:
+          type: object
+          description: Run when this deck's playhead reaches `seconds`.
+          required: [deck, seconds]
+          properties:
+            deck: {type: integer, minimum: 1, maximum: 4}
+            seconds: {type: number}
+    ControlRequest:
+      description: |
+        Body of every control endpoint. `value` may be a number or a boolean. Omit it to flip a toggle, tap
+        a button or fire a trigger.
+      allOf:
+        - {$ref: "#/components/schemas/ScheduleFields"}
+        - type: object
+          properties:
+            value: {type: [number, boolean]}
+    CommandEntry:
+      description: A control request that carries its own full control name.
+      allOf:
+        - {$ref: "#/components/schemas/ControlRequest"}
+        - type: object
+          required: [control]
+          properties:
+            control: {type: string, description: "Full control name, e.g. `deck1.play`.", example: deck1.play}
+    CommandsRequest:
+      type: object
+      required: [commands]
+      properties:
+        commands:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: {$ref: "#/components/schemas/CommandEntry"}
+    ControlResult:
+      type: object
+      required: [control]
+      properties:
+        control: {type: string, description: Full control name.}
+    ScheduledResult:
+      type: object
+      required: [control, scheduled_id]
+      properties:
+        control: {type: string}
+        scheduled_id: {type: integer, format: int64}
+    CommandResult:
+      type: object
+      required: [status, result]
+      properties:
+        status: {type: integer, description: HTTP-style status of this entry (200, 202, 400, 429).}
+        result:
+          oneOf:
+            - {$ref: "#/components/schemas/ControlResult"}
+            - {$ref: "#/components/schemas/ScheduledResult"}
+            - {$ref: "#/components/schemas/Error"}
+    ScheduledCommand:
+      type: object
+      required: [scheduled_id, control]
+      properties:
+        scheduled_id: {type: integer, format: int64}
+        control: {type: string}
+        value: {type: number, description: Present only if a value was given.}
+        at_unix_ms: {type: integer, format: int64, description: Present for time-based commands.}
+        when:
+          type: object
+          description: Present for playhead-triggered commands.
+          required: [deck, seconds]
+          properties:
+            deck: {type: integer, minimum: 1, maximum: 4}
+            seconds: {type: number}
+    Recording:
+      type: object
+      required: [recording, seconds, bytes, dropped_frames]
+      properties:
+        recording: {type: boolean}
+        seconds: {type: number}
+        bytes: {type: integer, format: int64}
+        dropped_frames: {type: integer, format: int64}
+    Token:
+      type: object
+      required: [id, name, scopes, created, expires]
+      properties:
+        id: {type: string, description: Public identifier (16 hex characters), not secret.}
+        name: {type: string}
+        scopes:
+          type: array
+          items: {type: string, pattern: '^[a-z0-9_.*-]+(:[a-z0-9_.*-]+)*$'}
+        created: {type: integer, format: int64, description: Unix seconds.}
+        expires: {type: integer, format: int64, description: Unix seconds; 0 = never.}
+    TokenCreate:
+      type: object
+      required: [name, scopes]
+      properties:
+        name: {type: string}
+        scopes:
+          type: array
+          items: {type: string, pattern: '^[a-z0-9_.*-]+(:[a-z0-9_.*-]+)*$'}
+        expires: {type: integer, format: int64, default: 0, description: Unix seconds; 0 = never.}
+        cidrs:
+          type: array
+          description: Allowed source networks (CIDR or bare address); empty = any.
+          items: {type: string}
+    TokenSecret:
+      type: object
+      required: [id, token]
+      properties:
+        id: {type: string}
+        token: {type: string, description: "The bearer secret (`dh_` + 64 hex). Shown once."}
+    WsClientMessage:
+      type: object
+      description: Message a WebSocket client sends (documented in the API description; not an HTTP body).
+      required: [cmd]
+      properties:
+        id: {description: Any JSON value; echoed in the reply.}
+        cmd: {type: string, enum: [ping, subscribe, unsubscribe, control]}
+        args: {type: object}
+    WsReply:
+      type: object
+      description: Reply envelope for a WebSocket command.
+      required: [ok, status]
+      properties:
+        id: {description: Echo of the request id; absent if none was sent.}
+        ok: {type: boolean}
+        status: {type: integer}
+        result: {description: Present on success when there is a body.}
+        error:
+          type: object
+          properties:
+            code: {type: integer}
+            message: {type: string}
+    WsEvent:
+      type: object
+      description: Message the server publishes to subscribers.
+      required: [topic, data]
+      properties:
+        topic: {type: string, enum: [decks, mixer, events]}
+        data: {description: "`decks`: array of Deck; `mixer`: Mixer; `events`: object with a `type`."}

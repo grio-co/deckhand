@@ -30,7 +30,9 @@ class ApiBridge {
   ApiBridge(ApiHost& host, const std::string& data_dir);
   ~ApiBridge();
   bool running() const;
-  std::string describe() const;  // e.g. "API http://127.0.0.1:7373"
+  std::string describe() const;
+  // Forward engine events here (scheduled commands that fired or were dropped). Any thread.
+  void engine_event(const EngineEvent& e);  // e.g. "API http://127.0.0.1:7373"
 
  private:
   struct Impl;

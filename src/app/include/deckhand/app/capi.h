@@ -73,6 +73,9 @@ void    dh_app_destroy(dh_app* app);
 
 void    dh_app_set_display(dh_app* app, float w_px, float h_px, float scale,
                            float inset_l, float inset_t, float inset_r, float inset_b);
+/* Optional: the keyboard modifiers (DH_MOD_* bits) currently held, sent whenever they change or before each
+   pointer event. Shift gives fine control while dragging knobs and faders, and shift-click stops a sampler slot. */
+void    dh_app_modifiers(dh_app* app, uint32_t mods);
 void    dh_app_pointer(dh_app* app, dh_ptr_kind kind, uint32_t id, float x_px, float y_px, int clicks);
 void    dh_app_scroll(dh_app* app, float x_px, float y_px, float dx_px, float dy_px);
 void    dh_app_key(dh_app* app, dh_key key, uint32_t mods);

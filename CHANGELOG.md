@@ -44,7 +44,16 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
   modifiers and `when=` conditions, soft takeover, dead zones, mapping actions and LED states for
   every engine function, MIDI learn support, two example mappings.
 - Effect slot controls on each deck panel; REC button; key lock, quantise and slip buttons.
-- Tests for the library, analysis, API, export, effects, languages, skins and streaming.
+- The UI is drawn from skins: default skin with two- and four-deck layouts, an example skin,
+  live skin switching; a minimal built-in layout remains as a fallback.
+- Panels: settings (language, skin, audio device and buffer, API, streaming), sampler, MIDI
+  learn, track details (tags, relink, remove); key shift, reverse, tempo range and tempo fader.
+- Scheduled commands execute in the engine on the exact output sample: at a clock time, at a
+  deck position, or on a beat or bar of a deck's grid.
+- DDJ-FLX4 mapping completed from the published MIDI list: all pad modes, shift layer, beat FX,
+  CFX button.
+- OpenAPI 3.1 description of the REST API (`docs/openapi.yaml`).
+- Tests for the library, analysis, API, export, effects, scheduling, languages, skins and streaming.
 
 ### Fixed
 - iOS: the engine no longer overrides the audio session the shell configures.

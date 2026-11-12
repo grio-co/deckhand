@@ -30,8 +30,8 @@ static bool rejects(const std::string& text, const char* needle) {
   return true;
 }
 
-static void check_layout(const Skin& sk, const char* name, float W, float H, float scale) {
-  Layout L = solve_layout(sk, 0, W, H, scale);
+static void check_layout(const Skin& sk, const char* name, float W, float H, float scale, size_t win = 0) {
+  Layout L = solve_layout(sk, win, W, H, scale);
   CHECK(!L.widgets.empty());
   CHECK(L.width == W && L.height == H);
   const float eps = 0.01f;
@@ -90,6 +90,32 @@ int main() {
   const Size sizes[] = {{1280, 720, 1}, {1920, 1080, 1}, {3024, 1964, 2}, {1024, 600, 1}};
   for (auto& [name, sk] : skins)
     for (auto& z : sizes) check_layout(*sk, name.c_str(), z.w, z.h, z.s);
+
+  // the four-deck window of the default skin lays out cleanly too, and "main" stays first
+  {
+    const Skin& d = *skins["default"];
+    CHECK(d.windows.size() == 2 && d.windows[0].id == "main" && d.windows[1].id == "four");
+    for (auto& z : sizes) check_layout(d, "default/four", z.w, z.h, z.s, 1);
+    // the bindings the application maps (src/app/skin_view.cpp map_binding) are all present
+    std::map<std::string, int> main_binds, four_binds;
+    for (auto& w : solve_layout(d, 0, 1280, 800, 1).widgets) {
+      if (!w.bind.empty()) ++main_binds[w.bind];
+      if (!w.show.empty()) ++main_binds[w.show[0] == '!' ? w.show.substr(1) : w.show];
+    }
+    for (auto& w : solve_layout(d, 1, 1440, 900, 1).widgets) if (!w.bind.empty()) ++four_binds[w.bind];
+    for (const char* b : {"deck[1].key_lock", "deck[1].quantize", "deck[1].slip", "deck[2].reverse", "deck[1].tempo", "deck[1].tempo_range",
+                          "deck[1].key_shift", "deck[1].key_shift.minus", "deck[1].key_shift.plus", "deck[2].key_shift.reset",
+                          "deck[1].fx[1].select", "deck[1].fx[2].on", "deck[2].fx[3].wet", "deck[1].time", "deck[1].letter",
+                          "mixer.master.volume", "mixer.headphone.volume", "mixer.headphone.mix", "mixer.sampler.level",
+                          "app.rec", "app.export", "app.import", "app.language", "app.skin", "app.layout", "app.settings", "app.sampler",
+                          "app.learn", "app.status", "app.controller", "app.audio", "app.has_import", "app.multi_language", "app.multi_skin",
+                          "app.has_four", "browser.search", "browser.count", "browser.playlist.add_list", "browser.playlist.add_folder",
+                          "browser.playlist.rename", "browser.playlist.delete", "browser.add_to", "browser.remove", "browser.can_remove",
+                          "browser.edit", "deck[2].load"})
+      if (!main_binds.count(b)) { std::fprintf(stderr, "default main window lacks binding %s\n", b); CHECK(false); }
+    for (const char* b : {"deck[3].play", "deck[4].pads", "mixer.ch[3].fader", "mixer.ch[4].eq.low", "deck[4].waveform", "mixer.ch[4].cue"})
+      if (!four_binds.count(b)) { std::fprintf(stderr, "default four window lacks binding %s\n", b); CHECK(false); }
+  }
 
   // default skin specifics
   {

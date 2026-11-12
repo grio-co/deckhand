@@ -222,7 +222,8 @@ std::vector<ControlInfo> list_controls() {
   return out;
 }
 
-bool apply_control(Engine& engine, std::string_view name, bool has_value, double value, std::string& error) {
+bool build_control(const Engine& engine, std::string_view name, bool has_value, double value, std::vector<Command>& out,
+                   std::string& error) {
   Parsed p;
   if (!parse(name, p, error)) return false;
   const Def& d = *p.def;
@@ -257,7 +258,7 @@ bool apply_control(Engine& engine, std::string_view name, bool has_value, double
         c.f = static_cast<float>(value);
       }
     }
-    engine.send(c);
+    out.push_back(c);
     return true;
   }
   if (p.sampler) {
@@ -269,19 +270,19 @@ bool apply_control(Engine& engine, std::string_view name, bool has_value, double
       c.f = static_cast<float>(value);
       c.i = value != 0 ? 1 : 0;
     }
-    engine.send(c);
+    out.push_back(c);
     return true;
   }
 
   switch (d.kind) {
-    case Kind::Trigger: engine.send(c); return true;
+    case Kind::Trigger: out.push_back(c); return true;
     case Kind::Toggle: {
       const bool current = d.op == Op::PlayToggle ? view.playing : d.op == Op::SyncToggle ? view.sync : view.pfl;
       if (d.op != Op::PlayToggle && d.op != Op::SyncToggle) {  // these take 1 / 0 / -1 (toggle)
         c.i = has_value ? (value != 0 ? 1 : 0) : -1;
-        engine.send(c);
+        out.push_back(c);
       } else if (!has_value || (value != 0) != current) {
-        engine.send(c);
+        out.push_back(c);
       }
       return true;
     }
@@ -289,11 +290,11 @@ bool apply_control(Engine& engine, std::string_view name, bool has_value, double
       const Op down = d.op, up = d.op == Op::CueDown ? Op::CueUp : Op::HotCueUp;
       if (!has_value || value != 0) {
         c.op = down;
-        engine.send(c);
+        out.push_back(c);
       }
       if (!has_value || value == 0) {
         c.op = up;
-        engine.send(c);
+        out.push_back(c);
       }
       return true;
     }
@@ -319,11 +320,18 @@ bool apply_control(Engine& engine, std::string_view name, bool has_value, double
       } else {
         c.f = static_cast<float>(value);
       }
-      engine.send(c);
+      out.push_back(c);
       return true;
     }
   }
   return false;
+}
+
+bool apply_control(Engine& engine, std::string_view name, bool has_value, double value, std::string& error) {
+  std::vector<Command> commands;
+  if (!build_control(engine, name, has_value, value, commands, error)) return false;
+  for (const Command& c : commands) engine.send(c);
+  return true;
 }
 
 bool read_control(const Engine& engine, std::string_view name, double& value) {

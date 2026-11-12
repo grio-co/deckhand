@@ -32,18 +32,23 @@ init 91 17 7F
 # Soft takeover is not enabled here: the faders are physical, so they should act as soon as they are
 # touched. To try it, add: defaults pickup=1
 #
-# TODO(midi-numbers): the following are not in the message list this file was written from, so no
-# numbers are guessed. Fill in the notes, then uncomment (deck 1 shown; deck 2 is the same on 91/99/9A):
-#   padfx1 pads    in button 97 ?? padfx deck=1 pad=1 effect=echo beats=1            (pads 1-8, mode=padfx1)
-#   padfx2 pads    in button 97 ?? padfx deck=1 pad=1 effect=roll beats=0.25         (pads 1-8, mode=padfx2)
-#   sampler pads   in button 97 ?? sampler deck=1 slot=1                             (pads 1-8; deck 2: offset=8)
-#   keyboard pads  in button 97 ?? keyboard deck=1 slot=1 semitones=0                (pads 1-8)
-#   key shift pads in button 97 ?? keyshift deck=1 slot=1 semitones=-4               (pads 1-8)
-#   KEY LOCK       in button 90 ?? key_lock deck=1       out 90 ?? key_lock deck=1
-#   SHIFT button   in button 90 ?? modifier name=shift deck=1   (then rules can use when=shift)
-#   CFX knobs / CFX selection   in abs14 B6 ?? ?? filter ...; in button .. color_fx deck=1 dir=1
-#   BEAT FX section (select, time, level, on)   fx_select / fx_time / fx_wet / fx_on unit=master
-#   sampler volume    in abs14 B6 ?? ?? sampler_level
+# Numbers below were transcribed from the page images of that list (Ver 1.0), not from extracted text.
+# Per-pad note = mode base + (pad-1): hot cue 00, pad FX 1 10, beat jump 20, sampler 30, keyboard 40,
+# pad FX 2 50, beat loop 60, key shift 70. Deck 1 pads send on 97 (SHIFT + pad on 98), deck 2 on 99 (9A).
+# The unit sends a different message for SHIFT + control; those are separate rules, so the SHIFT button
+# (90 3F / 91 3F) is mapped only as a modifier for any user rule that wants when=shift.
+#
+# Not mapped, and why (all looked for in the list):
+#   KEY LOCK / master tempo   no such control or message exists on this unit's list.
+#   Sampler volume            no such control exists on this unit.
+#   Smart Fader (96 01, SHIFT 96 09, LED out 96 01)   no matching action in the format.
+#   MIC LEVEL (B6 05/25, 14-bit)   sends MIDI, but the format has no mic action.
+#   MASTER CUE (96 63, SHIFT 96 78)   sends MIDI, no master-cue action in the format.
+#   Android MONO/STEREO switch (96 6D, 7F = mono)   hardware setting, no action.
+#   BEAT FX channel select (CH1/CH2/CH1&CH2 switch: notes 94 10, 94 11, 95 10, 95 11 carry the position)
+#       the format cannot route the beat effect to a channel; only the master bus (unit=master) exists.
+#   SHIFT variants of PLAY (0E), CH CUE (68), pad notes in non-hotcue modes (98/9A), BEAT FX
+#       SHIFT+beat arrows (94 66 / 94 6B) and SHIFT+FX ON (94 43 / 95 43): not mapped.
 
 # ---- deck 1 ----------------------------------------------------------------
 in button 90 0B play deck=1
@@ -153,6 +158,99 @@ out 97 27 loaded deck=1
 out 97 67 loop_beats deck=1 beats=32
 out B0 02 level deck=1 min=26 max=7F
 
+# ---- deck 1 pad FX, sampler, keyboard, key shift, SHIFT ----
+# pad FX 1: echo ping_pong reverb spiral low_cut_echo filter_sweep flanger phaser, beats 1 (4 for the last three)
+# pad FX 2: roll transform pitch crusher vinyl_brake backspin, then echo and ping_pong at 1/4 beat; momentary
+in button 97 10 padfx deck=1 slot=1 pad=1 effect=echo beats=1
+in button 97 11 padfx deck=1 slot=1 pad=2 effect=ping_pong beats=1
+in button 97 12 padfx deck=1 slot=1 pad=3 effect=reverb beats=1
+in button 97 13 padfx deck=1 slot=1 pad=4 effect=spiral beats=1
+in button 97 14 padfx deck=1 slot=1 pad=5 effect=low_cut_echo beats=1
+in button 97 15 padfx deck=1 slot=1 pad=6 effect=filter_sweep beats=4
+in button 97 16 padfx deck=1 slot=1 pad=7 effect=flanger beats=4
+in button 97 17 padfx deck=1 slot=1 pad=8 effect=phaser beats=4
+in button 97 50 padfx deck=1 slot=1 pad=1 effect=roll beats=0.5
+in button 97 51 padfx deck=1 slot=1 pad=2 effect=transform beats=0.5
+in button 97 52 padfx deck=1 slot=1 pad=3 effect=pitch beats=1
+in button 97 53 padfx deck=1 slot=1 pad=4 effect=crusher beats=1
+in button 97 54 padfx deck=1 slot=1 pad=5 effect=vinyl_brake beats=1
+in button 97 55 padfx deck=1 slot=1 pad=6 effect=backspin beats=1
+in button 97 56 padfx deck=1 slot=1 pad=7 effect=echo beats=0.25
+in button 97 57 padfx deck=1 slot=1 pad=8 effect=ping_pong beats=0.25
+in button 97 30 sampler deck=1 slot=1
+in button 97 31 sampler deck=1 slot=2
+in button 97 32 sampler deck=1 slot=3
+in button 97 33 sampler deck=1 slot=4
+in button 97 34 sampler deck=1 slot=5
+in button 97 35 sampler deck=1 slot=6
+in button 97 36 sampler deck=1 slot=7
+in button 97 37 sampler deck=1 slot=8
+in button 98 30 sampler_stop deck=1 slot=1   # SHIFT + pad
+in button 98 31 sampler_stop deck=1 slot=2   # SHIFT + pad
+in button 98 32 sampler_stop deck=1 slot=3   # SHIFT + pad
+in button 98 33 sampler_stop deck=1 slot=4   # SHIFT + pad
+in button 98 34 sampler_stop deck=1 slot=5   # SHIFT + pad
+in button 98 35 sampler_stop deck=1 slot=6   # SHIFT + pad
+in button 98 36 sampler_stop deck=1 slot=7   # SHIFT + pad
+in button 98 37 sampler_stop deck=1 slot=8   # SHIFT + pad
+in button 97 40 keyboard deck=1 slot=1 semitones=0
+in button 97 41 keyboard deck=1 slot=2 semitones=1
+in button 97 42 keyboard deck=1 slot=3 semitones=2
+in button 97 43 keyboard deck=1 slot=4 semitones=3
+in button 97 44 keyboard deck=1 slot=5 semitones=4
+in button 97 45 keyboard deck=1 slot=6 semitones=5
+in button 97 46 keyboard deck=1 slot=7 semitones=6
+in button 97 47 keyboard deck=1 slot=8 semitones=7
+in button 97 70 keyshift deck=1 slot=1 semitones=-4
+in button 97 71 keyshift deck=1 slot=2 semitones=-3
+in button 97 72 keyshift deck=1 slot=3 semitones=-2
+in button 97 73 keyshift deck=1 slot=4 semitones=-1
+in button 97 74 keyshift deck=1 slot=5 semitones=0
+in button 97 75 keyshift deck=1 slot=6 semitones=1
+in button 97 76 keyshift deck=1 slot=7 semitones=2
+in button 97 77 keyshift deck=1 slot=8 semitones=3
+out 97 10 fx_on deck=1 slot=1 effect=echo mode=padfx1
+out 97 11 fx_on deck=1 slot=1 effect=ping_pong mode=padfx1
+out 97 12 fx_on deck=1 slot=1 effect=reverb mode=padfx1
+out 97 13 fx_on deck=1 slot=1 effect=spiral mode=padfx1
+out 97 14 fx_on deck=1 slot=1 effect=low_cut_echo mode=padfx1
+out 97 15 fx_on deck=1 slot=1 effect=filter_sweep mode=padfx1
+out 97 16 fx_on deck=1 slot=1 effect=flanger mode=padfx1
+out 97 17 fx_on deck=1 slot=1 effect=phaser mode=padfx1
+out 97 50 fx_on deck=1 slot=1 effect=roll mode=padfx2
+out 97 51 fx_on deck=1 slot=1 effect=transform mode=padfx2
+out 97 52 fx_on deck=1 slot=1 effect=pitch mode=padfx2
+out 97 53 fx_on deck=1 slot=1 effect=crusher mode=padfx2
+out 97 54 fx_on deck=1 slot=1 effect=vinyl_brake mode=padfx2
+out 97 55 fx_on deck=1 slot=1 effect=backspin mode=padfx2
+out 97 56 fx_on deck=1 slot=1 effect=echo mode=padfx2
+out 97 57 fx_on deck=1 slot=1 effect=ping_pong mode=padfx2
+out 97 30 sampler_playing slot=1 deck=1 mode=sampler
+out 97 31 sampler_playing slot=2 deck=1 mode=sampler
+out 97 32 sampler_playing slot=3 deck=1 mode=sampler
+out 97 33 sampler_playing slot=4 deck=1 mode=sampler
+out 97 34 sampler_playing slot=5 deck=1 mode=sampler
+out 97 35 sampler_playing slot=6 deck=1 mode=sampler
+out 97 36 sampler_playing slot=7 deck=1 mode=sampler
+out 97 37 sampler_playing slot=8 deck=1 mode=sampler
+out 97 40 key_shift deck=1 slot=1 mode=keyboard
+out 97 41 key_shift deck=1 slot=2 mode=keyboard
+out 97 42 key_shift deck=1 slot=3 mode=keyboard
+out 97 43 key_shift deck=1 slot=4 mode=keyboard
+out 97 44 key_shift deck=1 slot=5 mode=keyboard
+out 97 45 key_shift deck=1 slot=6 mode=keyboard
+out 97 46 key_shift deck=1 slot=7 mode=keyboard
+out 97 47 key_shift deck=1 slot=8 mode=keyboard
+out 97 70 key_shift deck=1 slot=1 mode=keyshift
+out 97 71 key_shift deck=1 slot=2 mode=keyshift
+out 97 72 key_shift deck=1 slot=3 mode=keyshift
+out 97 73 key_shift deck=1 slot=4 mode=keyshift
+out 97 74 key_shift deck=1 slot=5 mode=keyshift
+out 97 75 key_shift deck=1 slot=6 mode=keyshift
+out 97 76 key_shift deck=1 slot=7 mode=keyshift
+out 97 77 key_shift deck=1 slot=8 mode=keyshift
+in button 90 3F modifier name=shift deck=1
+
 # ---- deck 2 ----------------------------------------------------------------
 in button 91 0B play deck=2
 in button 91 0C cue deck=2
@@ -261,14 +359,130 @@ out 99 27 loaded deck=2
 out 99 67 loop_beats deck=2 beats=32
 out B1 02 level deck=2 min=26 max=7F
 
+# ---- deck 2 pad FX, sampler, keyboard, key shift, SHIFT ----
+# pad FX 1: echo ping_pong reverb spiral low_cut_echo filter_sweep flanger phaser, beats 1 (4 for the last three)
+# pad FX 2: roll transform pitch crusher vinyl_brake backspin, then echo and ping_pong at 1/4 beat; momentary
+in button 99 10 padfx deck=2 slot=1 pad=1 effect=echo beats=1
+in button 99 11 padfx deck=2 slot=1 pad=2 effect=ping_pong beats=1
+in button 99 12 padfx deck=2 slot=1 pad=3 effect=reverb beats=1
+in button 99 13 padfx deck=2 slot=1 pad=4 effect=spiral beats=1
+in button 99 14 padfx deck=2 slot=1 pad=5 effect=low_cut_echo beats=1
+in button 99 15 padfx deck=2 slot=1 pad=6 effect=filter_sweep beats=4
+in button 99 16 padfx deck=2 slot=1 pad=7 effect=flanger beats=4
+in button 99 17 padfx deck=2 slot=1 pad=8 effect=phaser beats=4
+in button 99 50 padfx deck=2 slot=1 pad=1 effect=roll beats=0.5
+in button 99 51 padfx deck=2 slot=1 pad=2 effect=transform beats=0.5
+in button 99 52 padfx deck=2 slot=1 pad=3 effect=pitch beats=1
+in button 99 53 padfx deck=2 slot=1 pad=4 effect=crusher beats=1
+in button 99 54 padfx deck=2 slot=1 pad=5 effect=vinyl_brake beats=1
+in button 99 55 padfx deck=2 slot=1 pad=6 effect=backspin beats=1
+in button 99 56 padfx deck=2 slot=1 pad=7 effect=echo beats=0.25
+in button 99 57 padfx deck=2 slot=1 pad=8 effect=ping_pong beats=0.25
+in button 99 30 sampler deck=2 slot=1 offset=8
+in button 99 31 sampler deck=2 slot=2 offset=8
+in button 99 32 sampler deck=2 slot=3 offset=8
+in button 99 33 sampler deck=2 slot=4 offset=8
+in button 99 34 sampler deck=2 slot=5 offset=8
+in button 99 35 sampler deck=2 slot=6 offset=8
+in button 99 36 sampler deck=2 slot=7 offset=8
+in button 99 37 sampler deck=2 slot=8 offset=8
+in button 9A 30 sampler_stop deck=2 slot=1 offset=8   # SHIFT + pad
+in button 9A 31 sampler_stop deck=2 slot=2 offset=8   # SHIFT + pad
+in button 9A 32 sampler_stop deck=2 slot=3 offset=8   # SHIFT + pad
+in button 9A 33 sampler_stop deck=2 slot=4 offset=8   # SHIFT + pad
+in button 9A 34 sampler_stop deck=2 slot=5 offset=8   # SHIFT + pad
+in button 9A 35 sampler_stop deck=2 slot=6 offset=8   # SHIFT + pad
+in button 9A 36 sampler_stop deck=2 slot=7 offset=8   # SHIFT + pad
+in button 9A 37 sampler_stop deck=2 slot=8 offset=8   # SHIFT + pad
+in button 99 40 keyboard deck=2 slot=1 semitones=0
+in button 99 41 keyboard deck=2 slot=2 semitones=1
+in button 99 42 keyboard deck=2 slot=3 semitones=2
+in button 99 43 keyboard deck=2 slot=4 semitones=3
+in button 99 44 keyboard deck=2 slot=5 semitones=4
+in button 99 45 keyboard deck=2 slot=6 semitones=5
+in button 99 46 keyboard deck=2 slot=7 semitones=6
+in button 99 47 keyboard deck=2 slot=8 semitones=7
+in button 99 70 keyshift deck=2 slot=1 semitones=-4
+in button 99 71 keyshift deck=2 slot=2 semitones=-3
+in button 99 72 keyshift deck=2 slot=3 semitones=-2
+in button 99 73 keyshift deck=2 slot=4 semitones=-1
+in button 99 74 keyshift deck=2 slot=5 semitones=0
+in button 99 75 keyshift deck=2 slot=6 semitones=1
+in button 99 76 keyshift deck=2 slot=7 semitones=2
+in button 99 77 keyshift deck=2 slot=8 semitones=3
+out 99 10 fx_on deck=2 slot=1 effect=echo mode=padfx1
+out 99 11 fx_on deck=2 slot=1 effect=ping_pong mode=padfx1
+out 99 12 fx_on deck=2 slot=1 effect=reverb mode=padfx1
+out 99 13 fx_on deck=2 slot=1 effect=spiral mode=padfx1
+out 99 14 fx_on deck=2 slot=1 effect=low_cut_echo mode=padfx1
+out 99 15 fx_on deck=2 slot=1 effect=filter_sweep mode=padfx1
+out 99 16 fx_on deck=2 slot=1 effect=flanger mode=padfx1
+out 99 17 fx_on deck=2 slot=1 effect=phaser mode=padfx1
+out 99 50 fx_on deck=2 slot=1 effect=roll mode=padfx2
+out 99 51 fx_on deck=2 slot=1 effect=transform mode=padfx2
+out 99 52 fx_on deck=2 slot=1 effect=pitch mode=padfx2
+out 99 53 fx_on deck=2 slot=1 effect=crusher mode=padfx2
+out 99 54 fx_on deck=2 slot=1 effect=vinyl_brake mode=padfx2
+out 99 55 fx_on deck=2 slot=1 effect=backspin mode=padfx2
+out 99 56 fx_on deck=2 slot=1 effect=echo mode=padfx2
+out 99 57 fx_on deck=2 slot=1 effect=ping_pong mode=padfx2
+out 99 30 sampler_playing slot=1 offset=8 deck=2 mode=sampler
+out 99 31 sampler_playing slot=2 offset=8 deck=2 mode=sampler
+out 99 32 sampler_playing slot=3 offset=8 deck=2 mode=sampler
+out 99 33 sampler_playing slot=4 offset=8 deck=2 mode=sampler
+out 99 34 sampler_playing slot=5 offset=8 deck=2 mode=sampler
+out 99 35 sampler_playing slot=6 offset=8 deck=2 mode=sampler
+out 99 36 sampler_playing slot=7 offset=8 deck=2 mode=sampler
+out 99 37 sampler_playing slot=8 offset=8 deck=2 mode=sampler
+out 99 40 key_shift deck=2 slot=1 mode=keyboard
+out 99 41 key_shift deck=2 slot=2 mode=keyboard
+out 99 42 key_shift deck=2 slot=3 mode=keyboard
+out 99 43 key_shift deck=2 slot=4 mode=keyboard
+out 99 44 key_shift deck=2 slot=5 mode=keyboard
+out 99 45 key_shift deck=2 slot=6 mode=keyboard
+out 99 46 key_shift deck=2 slot=7 mode=keyboard
+out 99 47 key_shift deck=2 slot=8 mode=keyboard
+out 99 70 key_shift deck=2 slot=1 mode=keyshift
+out 99 71 key_shift deck=2 slot=2 mode=keyshift
+out 99 72 key_shift deck=2 slot=3 mode=keyshift
+out 99 73 key_shift deck=2 slot=4 mode=keyshift
+out 99 74 key_shift deck=2 slot=5 mode=keyshift
+out 99 75 key_shift deck=2 slot=6 mode=keyshift
+out 99 76 key_shift deck=2 slot=7 mode=keyshift
+out 99 77 key_shift deck=2 slot=8 mode=keyshift
+in button 91 3F modifier name=shift deck=2
+
 # ---- mixer and browse -----------------------------------------------------------
 in abs14  B6 1F 3F crossfader                  # 0 at the left
 in abs14  B6 0C 2C head_mix
-# MASTER LEVEL (B6 08 28) and HEADPHONE LEVEL (B6 0D 2D) also send MIDI. They are left
-# unmapped on the assumption that the unit applies them itself; if those knobs do nothing,
-# uncomment the two lines below.
+# MASTER LEVEL (B6 08/28) and HEADPHONE LEVEL (B6 0D/2D) send 14-bit MIDI (confirmed in the list), but the
+# list does not say whether the unit also applies them in hardware. Left unmapped to avoid applying
+# them twice; if those knobs do nothing, uncomment the two lines below.
 # in abs14 B6 08 28 master_level
 # in abs14 B6 0D 2D head_level
 in rel2   B6 40 browse
 in rel2   B6 64 browse scale=10                # SHIFT + turn
 in button 96 41 browse_press
+
+# ---- beat FX section (one set, on the master bus, effect slot 1) ----
+# FX SELECT / SHIFT+FX SELECT: next / previous effect. BEAT arrows: shorter / longer time.
+# LEVEL/DEPTH is 14-bit. The list gives status B4 for it while its channel column says 6 (B5 would be
+# expected); the status column is used here, see docs/TESTING-FLX4.md.
+# FX ON/OFF sends 94 47 for CH1 and CH1&CH2, 95 47 for CH2, so both toggle the master slot.
+# LED for FX ON/OFF: a footnote says it blinks on NOTE ON and lights on NOTE OFF, but the message table
+# lists no output message for it, so no out rule yet.
+in button 94 63 fx_select unit=master slot=1 dir=1
+in button 94 64 fx_select unit=master slot=1 dir=-1   # SHIFT + FX SELECT
+in button 94 4A fx_time unit=master slot=1 dir=-1
+in button 94 4B fx_time unit=master slot=1 dir=1
+in abs14  B4 02 22 fx_wet unit=master slot=1
+in button 94 47 fx_on unit=master slot=1
+in button 95 47 fx_on unit=master slot=1
+
+# ---- SMART CFX button (96 00, SHIFT 96 08): steps the colour effect the CFX knobs drive, both decks ----
+# (the list names only the button; this meaning is a choice. No LED state exists for it, so its
+# output message 96 00 is not driven.)
+in button 96 00 color_fx deck=1 dir=1
+in button 96 00 color_fx deck=2 dir=1
+in button 96 08 color_fx deck=1 dir=-1
+in button 96 08 color_fx deck=2 dir=-1

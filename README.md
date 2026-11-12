@@ -23,16 +23,17 @@ full control API.
 - USB export for club players: database, analysis files and audio, from the app, the command
   line or the API. Written from public format documentation and verified by a read-back parser;
   **not yet tested on a player** (see [docs/EXPORT.md](docs/EXPORT.md)).
-- API: REST + WebSocket with bearer tokens, per-scope access, TLS and scheduled commands
-  ([docs/API.md](docs/API.md)).
+- API: REST + WebSocket with bearer tokens, per-scope access, TLS and sample-accurate scheduled
+  commands ([docs/API.md](docs/API.md), [docs/openapi.yaml](docs/openapi.yaml)).
 - Streaming: now-playing files, a browser overlay and an OBS WebSocket connection
   ([docs/STREAMING.md](docs/STREAMING.md)); tested against a mock, not yet a real OBS.
 - Languages: English, German, French, Spanish and Japanese packs; switch from the top bar.
 - Controllers: declarative mapping files, any matching MIDI device; DDJ-FLX4 mapping included.
 - Portable mode: put a file named `portable` beside the app and all data stays next to it.
 
-Built but not yet connected to the UI: the skin format with its parser and layout solver
-([docs/SKINS.md](docs/SKINS.md)); the app still draws its default layout in code.
+- Skins: the whole UI is drawn from declarative skin files ([docs/SKINS.md](docs/SKINS.md));
+  two- and four-deck default layouts, one example skin, switchable while running.
+- Panels for settings, sampler, MIDI learn and track details.
 
 ## Goals
 - **Stable.** The audio path never blocks; the engine is designed to run as its own process.

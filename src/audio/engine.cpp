@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -206,6 +207,31 @@ struct Deck {
   }
 };
 
+constexpr int kSchedCap = 1024;    // live scheduled entries owned by the audio thread
+constexpr int kSchedPool = 2048;   // payloads in flight between schedule() and the audio thread
+constexpr std::uint64_t kLiveMask = 4095;
+
+// Handed from schedule() to the audio thread through a preallocated pool slot.
+struct SchedPayload {
+  Command cmd;
+  Schedule when;
+  std::uint64_t id = 0;
+};
+
+struct SchedEntry {
+  Command cmd;
+  std::uint64_t id = 0;
+  std::uint64_t at = 0;      // clock frame (clock entries)
+  double frame = 0;          // track frame (deck entries)
+  std::uint8_t deck = 0;     // trigger deck (deck entries)
+  bool is_deck = false, armed = false, fire_if_passed = false, flagged = false, alive = false;
+};
+
+struct ClockSnap {
+  double offset = 0;         // steady-clock seconds at which frame 0 would have been rendered
+  std::uint32_t valid = 0;
+};
+
 }  // namespace
 
 struct Engine::Impl {
@@ -222,7 +248,7 @@ struct Engine::Impl {
 
   SpscRing<Command, 1024> commands;
   std::mutex send_mutex;
-  SpscRing<EngineEvent, 256> events;
+  SpscRing<EngineEvent, 2048> events;
   SpscRing<LoadedTrack*, 64> garbage;
 
   Deck decks[kMaxDecks];
@@ -259,6 +285,38 @@ struct Engine::Impl {
   std::atomic<bool> stream_on{false};
   bool stream_pre = false;
   std::atomic<std::uint64_t> stream_dropped{0};
+
+  // ---- engine clock and scheduled commands ---------------------------------------
+  std::uint64_t clock = 0;                       // audio thread: frames rendered before the current chunk
+  std::atomic<std::uint64_t> clock_pub{0};
+  bool timing_on = false;                        // device mode: record callback timing
+  double off_est = 0;
+  bool off_init = false;
+  Snapshot<ClockSnap> clock_snap;
+
+  std::vector<SchedPayload> sched_pool = std::vector<SchedPayload>(kSchedPool);
+  std::vector<std::uint32_t> sched_free_slots;   // non-real-time side (guarded by send_mutex)
+  SpscRing<std::uint32_t, 4096> sched_free;      // audio -> non-real-time: slots to reuse
+  std::uint64_t sched_next_id = 0;
+  std::atomic<std::uint64_t> sched_live[kLiveMask + 1];
+  std::atomic<std::int64_t> sched_pending{0};
+
+  SchedEntry slab[kSchedCap];
+  std::uint16_t slab_free[kSchedCap];
+  int slab_free_n = 0;
+  std::uint16_t clock_order[kSchedCap];          // slab indices sorted by (at, id)
+  int n_clock = 0;
+  std::uint16_t deck_list[kSchedCap];
+  int n_deck = 0;
+  int deck_cnt[kMaxDecks] = {};
+  int n_flagged = 0;
+
+  Impl() {
+    sched_free_slots.reserve(kSchedPool);
+    for (int i = kSchedPool - 1; i >= 0; --i) sched_free_slots.push_back(static_cast<std::uint32_t>(i));
+    for (int i = 0; i < kSchedCap; ++i) slab_free[slab_free_n++] = static_cast<std::uint16_t>(kSchedCap - 1 - i);
+    for (auto& l : sched_live) l.store(0, std::memory_order_relaxed);
+  }
 
   void prepare_audio() {
     for (Deck& d : decks) d.st.prepare(sr);
@@ -700,6 +758,9 @@ struct Engine::Impl {
       case Op::RecStart: rec_pre = c.f > 0.5f; rec.start(); return true;
       case Op::RecStop: rec.stop(); return true;
       case Op::StreamEnable: stream_pre = c.f > 0.5f; stream_on.store(c.i != 0); return true;
+      case Op::SchedInsert: sched_accept(c.i); return true;
+      case Op::SchedCancel: sched_cancel(static_cast<std::uint64_t>(c.d)); return true;
+      case Op::SchedCancelAll: sched_cancel_all(); return true;
       default: return true;
     }
   }
@@ -711,6 +772,7 @@ struct Engine::Impl {
     const double before = track ? d->pos : 0;
     const bool was_play = track && d->playing && !d->preview;
     if (!apply_ext(c)) apply_core(c);
+    if ((c.op == Op::Load || c.op == Op::Eject) && d && n_deck > 0) sched_deck_unloaded(c.deck);
     if (d && d->trk && d->slip) {
       const bool now = exc_active(*d);
       if (!was && now && was_play) {
@@ -722,6 +784,295 @@ struct Engine::Impl {
       }
       if (!d->playing) d->slip_on = false;
     }
+  }
+
+  // ---- scheduling core (audio thread) ----------------------------------------------
+  void emit_sched(EventType t, std::uint64_t id, const Command& c, int slot, double frame) {
+    EngineEvent e;
+    e.type = t;
+    e.deck = c.deck;
+    e.slot = slot;
+    e.frame = frame;
+    e.sched_id = id;
+    e.clock_frame = clock;
+    events.push(e);
+  }
+  void sched_release(SchedEntry& e, int idx) {
+    e.alive = false;
+    std::uint64_t expect = e.id;
+    sched_live[e.id & kLiveMask].compare_exchange_strong(expect, 0);
+    sched_pending.fetch_sub(1);
+    slab_free[slab_free_n++] = static_cast<std::uint16_t>(idx);
+  }
+  void list_erase(std::uint16_t* a, int& n, int idx) {
+    for (int k = 0; k < n; ++k)
+      if (a[k] == idx) {
+        std::memmove(a + k, a + k + 1, sizeof(std::uint16_t) * static_cast<std::size_t>(n - k - 1));
+        --n;
+        return;
+      }
+  }
+  // Removes an entry from its list and frees it.
+  void sched_remove(int idx) {
+    SchedEntry& e = slab[idx];
+    if (e.is_deck) {
+      list_erase(deck_list, n_deck, idx);
+      --deck_cnt[e.deck];
+      if (e.flagged) --n_flagged;
+    } else {
+      list_erase(clock_order, n_clock, idx);
+    }
+    sched_release(e, idx);
+  }
+  void sched_fire(int idx) {
+    SchedEntry& e = slab[idx];
+    if (!e.alive) return;
+    const Command c = e.cmd;
+    const std::uint64_t id = e.id;
+    const double at = e.is_deck ? decks[e.deck].pos : 0.0;
+    sched_remove(idx);
+    apply(c);
+    emit_sched(EventType::ScheduledFired, id, c, static_cast<int>(c.op), at);
+  }
+  void sched_drop(int idx, DropReason r) {
+    SchedEntry& e = slab[idx];
+    if (!e.alive) return;
+    const Command c = e.cmd;
+    const std::uint64_t id = e.id;
+    sched_remove(idx);
+    emit_sched(EventType::ScheduledDropped, id, c, static_cast<int>(r), 0);
+  }
+  void sched_deck_unloaded(int di) {
+    for (int k = n_deck - 1; k >= 0; --k)
+      if (k < n_deck && slab[deck_list[k]].deck == di) sched_drop(deck_list[k], DropReason::DeckUnloaded);
+  }
+  void sched_cancel(std::uint64_t id) {
+    for (int i = 0; i < kSchedCap; ++i)
+      if (slab[i].alive && slab[i].id == id) { sched_remove(i); return; }
+  }
+  void sched_cancel_all() {
+    for (int i = 0; i < kSchedCap; ++i)
+      if (slab[i].alive) sched_remove(i);
+  }
+
+  // Beat grid arithmetic. Beat 0 is the first grid beat; section i + 1 continues the count after the whole beats of
+  // section i (so beat numbers are monotonic across tempo changes).
+  struct Grid {
+    const GridSection* s = nullptr;
+    int n = 0;
+    GridSection virt;
+    double sr = 44100;
+    double base[64];  // beat number at the start of each section (first 64 sections)
+    double bf(int i) const { return 60.0 / s[i].bpm * sr; }
+  };
+  static bool make_grid(const LoadedTrack& t, Grid& g) {
+    g.sr = t.audio->sample_rate;
+    if (t.grid.empty()) {
+      if (t.bpm <= 0) return false;
+      g.virt = GridSection{0, t.bpm, 1};
+      g.s = &g.virt;
+      g.n = 1;
+    } else {
+      g.s = t.grid.data();
+      g.n = static_cast<int>(std::min<std::size_t>(t.grid.size(), 64));
+    }
+    g.base[0] = 0;
+    for (int i = 0; i < g.n; ++i) {
+      if (g.s[i].bpm <= 0) return false;
+      if (i > 0) g.base[i] = g.base[i - 1] + std::ceil((g.s[i].first_beat_frame - g.s[i - 1].first_beat_frame) / g.bf(i - 1) - 1e-6);
+    }
+    return true;
+  }
+  static double grid_beat_to_frame(const Grid& g, double b) {
+    int i = 0;
+    while (i + 1 < g.n && g.base[i + 1] <= b) ++i;
+    return g.s[i].first_beat_frame + (b - g.base[i]) * g.bf(i);
+  }
+  static double grid_frame_to_beat(const Grid& g, double p) {
+    int i = 0;
+    while (i + 1 < g.n && g.s[i + 1].first_beat_frame <= p) ++i;
+    return g.base[i] + (p - g.s[i].first_beat_frame) / g.bf(i);
+  }
+  static int grid_bar_beat(const Grid& g, double b) {  // 1..4
+    int i = 0;
+    while (i + 1 < g.n && g.base[i + 1] <= b) ++i;
+    const long k = static_cast<long>(g.s[i].bar_beat - 1) + static_cast<long>(std::llround(b - g.base[i]));
+    return static_cast<int>(((k % 4) + 4) % 4) + 1;
+  }
+  bool resolve_beat(const Deck& d, const Schedule& w, double& frame) const {
+    Grid g;
+    if (!d.trk || !make_grid(*d.trk, g)) return false;
+    double b;
+    if (w.relative) b = std::floor(grid_frame_to_beat(g, d.pos) + 1e-9) + w.beat;
+    else b = w.beat;
+    if (w.bar_aligned) {
+      b = std::ceil(b - 1e-9);
+      for (int k = 0; k < 4 && grid_bar_beat(g, b) != 1; ++k) b += 1;
+    }
+    frame = grid_beat_to_frame(g, b);
+    return true;
+  }
+
+  void sched_accept(int slot) {
+    const SchedPayload p = sched_pool[static_cast<std::size_t>(slot)];
+    sched_free.push(static_cast<std::uint32_t>(slot));
+    auto reject = [&](DropReason r) {
+      std::uint64_t expect = p.id;
+      sched_live[p.id & kLiveMask].compare_exchange_strong(expect, 0);
+      sched_pending.fetch_sub(1);
+      emit_sched(EventType::ScheduledDropped, p.id, p.cmd, static_cast<int>(r), 0);
+    };
+    if (slab_free_n == 0) return reject(DropReason::TableFull);
+    double frame = p.when.frame;
+    const bool is_deck = p.when.kind != ScheduleKind::ClockFrame;
+    if (is_deck) {
+      if (p.when.deck >= kMaxDecks || !decks[p.when.deck].trk) return reject(DropReason::Unresolvable);
+      if (p.when.kind == ScheduleKind::DeckBeat && !resolve_beat(decks[p.when.deck], p.when, frame))
+        return reject(DropReason::Unresolvable);
+    }
+    const int idx = slab_free[--slab_free_n];
+    SchedEntry& e = slab[idx];
+    e = SchedEntry{};
+    e.cmd = p.cmd;
+    e.id = p.id;
+    e.alive = true;
+    e.is_deck = is_deck;
+    if (!is_deck) {
+      e.at = p.when.clock_frame;
+      int lo = 0, hi = n_clock;  // upper_bound on `at`: equal frames keep insertion order
+      while (lo < hi) {
+        const int mid = (lo + hi) / 2;
+        if (slab[clock_order[mid]].at <= e.at) lo = mid + 1; else hi = mid;
+      }
+      std::memmove(clock_order + lo + 1, clock_order + lo, sizeof(std::uint16_t) * static_cast<std::size_t>(n_clock - lo));
+      clock_order[lo] = static_cast<std::uint16_t>(idx);
+      ++n_clock;
+    } else {
+      e.deck = p.when.deck;
+      e.frame = frame;
+      e.fire_if_passed = p.when.fire_if_passed;
+      e.armed = decks[e.deck].pos < frame;
+      if (!e.armed && e.fire_if_passed) { e.flagged = true; ++n_flagged; }
+      deck_list[n_deck++] = static_cast<std::uint16_t>(idx);
+      ++deck_cnt[e.deck];
+    }
+  }
+
+  // Mirrors render_deck's position recurrence for a steadily playing deck; returns the first step (0-based) in
+  // which the playhead moves from below `fmin` to at / beyond it, or -1.
+  int sim_cross(const Deck& d, int di, int n, double fmin, double& lo, double& hi) const {
+    const TrackAudio& a = *d.trk->audio;
+    const double ratio = static_cast<double>(a.sample_rate) / sr;
+    const double total = static_cast<double>(static_cast<std::int64_t>(a.frames));
+    const double bend = std::clamp(d.bend * kBendPerRev, -0.6, 0.6);
+    double target = effective_tempo(d, di) * (1.0 + bend);
+    const double slew = 1.0 - std::exp(-1.0 / (0.003 * sr));
+    double speed = d.speed, pos = d.pos;
+    for (int i = 0; i < n; ++i) {
+      speed += (target - speed) * slew;
+      const double before = pos;
+      pos += speed * ratio;
+      if (speed > 0 && before < fmin && pos >= fmin) {
+        lo = before;
+        hi = pos;
+        return i;
+      }
+      if (d.loop_active && speed > 0 && pos >= d.loop_out) {
+        const double len = d.loop_out - d.loop_in;
+        pos = len > 1 ? d.loop_in + std::fmod(pos - d.loop_out, len) : d.loop_in;
+      } else if (d.loop_active && speed < 0 && pos < d.loop_in) {
+        const double len = d.loop_out - d.loop_in;
+        pos = len > 1 ? d.loop_out - std::fmod(d.loop_in - pos, len) : d.loop_out;
+      }
+      if (pos >= total) {
+        pos = total;
+        target = 0;
+      } else if (pos < 0) {
+        pos = 0;
+      }
+    }
+    return -1;
+  }
+
+  // Called before each chunk while anything is scheduled: fires what is due now and shortens the chunk so the
+  // next due trigger lands exactly on a chunk start.
+  void sched_begin_chunk(int& n) {
+    while (n_clock > 0 && slab[clock_order[0]].at <= clock) sched_fire(clock_order[0]);
+    if (n_deck > 0) {
+      std::uint16_t buf[kSchedCap];
+      int nb = 0;
+      bool active[kMaxDecks];
+      for (int di = 0; di < kMaxDecks; ++di) {
+        const Deck& d = decks[di];
+        active[di] = d.trk && deck_cnt[di] > 0 && (d.playing || d.touching || d.speed != 0 || d.pos != d.pos_prev);
+      }
+      for (int k = 0; k < n_deck; ++k) {
+        SchedEntry& e = slab[deck_list[k]];
+        if (e.flagged) { buf[nb++] = deck_list[k]; continue; }
+        if (!active[e.deck]) continue;
+        const double pos = decks[e.deck].pos;
+        if (e.armed) {
+          if (pos >= e.frame) {  // passed without being seen crossing: a jump
+            if (e.fire_if_passed) buf[nb++] = deck_list[k];
+            else e.armed = false;
+          }
+        } else if (pos < e.frame) {
+          e.armed = true;
+        }
+      }
+      std::sort(buf, buf + nb, [&](std::uint16_t x, std::uint16_t y) { return slab[x].id < slab[y].id; });
+      for (int k = 0; k < nb; ++k) sched_fire(buf[k]);
+    }
+    if (n_clock > 0) {
+      const std::uint64_t until = slab[clock_order[0]].at - clock;
+      if (until < static_cast<std::uint64_t>(n)) n = static_cast<int>(until);
+    }
+    if (n_deck == 0) return;
+    int step[kMaxDecks];
+    double lo[kMaxDecks], hi[kMaxDecks];
+    for (int di = 0; di < kMaxDecks; ++di) {
+      step[di] = -1;
+      const Deck& d = decks[di];
+      if (deck_cnt[di] == 0 || !d.trk || !d.playing || d.touching || d.reverse) continue;
+      double fmin = 1e300;
+      for (int k = 0; k < n_deck; ++k) {
+        const SchedEntry& e = slab[deck_list[k]];
+        if (e.deck == di && e.armed && !e.flagged && e.frame > d.pos) fmin = std::min(fmin, e.frame);
+      }
+      if (fmin >= 1e300) continue;
+      const int k = sim_cross(d, di, n, fmin, lo[di], hi[di]);
+      if (k >= 0) {
+        step[di] = k;
+        n = k + 1;
+      }
+    }
+    for (int di = 0; di < kMaxDecks; ++di) {
+      if (step[di] < 0 || step[di] + 1 != n) continue;
+      for (int k = 0; k < n_deck; ++k) {
+        SchedEntry& e = slab[deck_list[k]];
+        if (e.deck == di && e.armed && !e.flagged && e.frame > lo[di] && e.frame <= hi[di]) {
+          e.flagged = true;
+          ++n_flagged;
+        }
+      }
+    }
+  }
+
+  void note_callback_time() {
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double raw = t - static_cast<double>(clock) / sr;
+    if (!off_init) {
+      off_est = raw;
+      off_init = true;
+    } else if (raw < off_est) {
+      off_est = raw;  // an early callback is the best look at the true timeline
+    } else {
+      off_est += (raw - off_est) * 0.002;  // slow leak absorbs clock skew
+    }
+    ClockSnap cs;
+    cs.offset = off_est;
+    cs.valid = 1;
+    clock_snap.write(cs);
   }
 
   // Raw deck audio (after the play/scratch transport, before the mixer) into buf.
@@ -1106,16 +1457,20 @@ struct Engine::Impl {
   }
 
   void render(float* out, std::uint32_t frames) {
+    if (timing_on) note_callback_time();
     Command c;
     while (commands.pop(c)) apply(c);
     std::memset(out, 0, sizeof(float) * frames * static_cast<std::size_t>(channels));
     std::uint32_t done = 0;
     while (done < frames) {
-      const int n = static_cast<int>(std::min<std::uint32_t>(kChunk, frames - done));
+      int n = static_cast<int>(std::min<std::uint32_t>(kChunk, frames - done));
+      if (n_clock + n_deck > 0) sched_begin_chunk(n);  // may shorten the chunk to land a trigger on its first sample
       render_chunk(out + static_cast<std::size_t>(done) * static_cast<std::size_t>(channels), n);
       done += static_cast<std::uint32_t>(n);
+      clock += static_cast<std::uint64_t>(n);
     }
     publish();
+    clock_pub.store(clock, std::memory_order_release);
   }
 
   static void data_callback(ma_device* device, void* output, const void*, ma_uint32 frames) {
@@ -1215,6 +1570,8 @@ bool Engine::start(const OutputConfig& config, std::string& error) {
                     : -1;
   s.prepare_audio();  // rebuild filters, stretchers and effect memory for this rate
 
+  s.off_init = false;
+  s.timing_on = true;
   if (ma_device_start(&s.dev) != MA_SUCCESS) {
     error = "could not start audio device: " + s.dev_name;
     stop();
@@ -1231,6 +1588,7 @@ void Engine::stop() {
   if (s.dev_ok) ma_device_uninit(&s.dev);
   if (s.ctx_ok) ma_context_uninit(&s.ctx);
   s.dev_ok = s.ctx_ok = false;
+  s.timing_on = false;
 }
 
 bool Engine::running() const { return impl_->dev_ok; }
@@ -1252,6 +1610,70 @@ void Engine::load(int deck, std::unique_ptr<LoadedTrack> track) {
   c.op = Op::Load;
   c.deck = static_cast<std::uint8_t>(deck);
   c.track = track.release();
+  send(c);
+}
+
+std::uint64_t Engine::clock_frames() const { return impl_->clock_pub.load(std::memory_order_acquire); }
+double Engine::clock_seconds() const { return static_cast<double>(clock_frames()) / impl_->sr; }
+
+std::uint64_t Engine::clock_at_wall(std::chrono::steady_clock::time_point t) const {
+  const Impl& s = *impl_;
+  const ClockSnap cs = s.clock_snap.read();
+  if (!s.dev_ok || !cs.valid) return clock_frames();
+  const double secs = std::chrono::duration<double>(t.time_since_epoch()).count() - cs.offset;
+  return secs <= 0 ? 0 : static_cast<std::uint64_t>(secs * s.sr);
+}
+
+std::uint64_t Engine::schedule(const Command& c, const Schedule& when) {
+  Impl& s = *impl_;
+  if (c.op == Op::Load || c.op == Op::SamplerLoad || c.op >= Op::SchedInsert || c.track || c.sample) return 0;
+  if (when.kind > ScheduleKind::DeckBeat) return 0;
+  if (when.kind != ScheduleKind::ClockFrame && when.deck >= kMaxDecks) return 0;
+  if (when.kind == ScheduleKind::DeckBeat && when.relative && !(when.beat > 0)) return 0;
+  std::lock_guard<std::mutex> lock(s.send_mutex);
+  std::uint32_t slot;
+  while (s.sched_free.pop(slot)) s.sched_free_slots.push_back(slot);
+  if (s.sched_free_slots.empty()) return 0;
+  slot = s.sched_free_slots.back();
+  s.sched_free_slots.pop_back();
+  const std::uint64_t id = ++s.sched_next_id;
+  SchedPayload& p = s.sched_pool[slot];
+  p.cmd = c;
+  p.when = when;
+  p.id = id;
+  Command ins;
+  ins.op = Op::SchedInsert;
+  ins.i = static_cast<std::int32_t>(slot);
+  s.sched_live[id & kLiveMask].store(id);  // before the push: the audio thread may retire it at once
+  s.sched_pending.fetch_add(1);
+  if (!s.commands.push(ins)) {
+    s.sched_pending.fetch_sub(1);
+    s.sched_live[id & kLiveMask].store(0);
+    s.sched_free_slots.push_back(slot);
+    return 0;
+  }
+  return id;
+}
+
+bool Engine::cancel(std::uint64_t id) {
+  Impl& s = *impl_;
+  if (id == 0) return false;
+  std::lock_guard<std::mutex> lock(s.send_mutex);
+  if (s.sched_live[id & kLiveMask].load() != id) return false;
+  Command c;
+  c.op = Op::SchedCancel;
+  c.d = static_cast<double>(id);
+  return s.commands.push(c);
+}
+
+std::size_t Engine::scheduled_count() const {
+  const std::int64_t n = impl_->sched_pending.load();
+  return n > 0 ? static_cast<std::size_t>(n) : 0;
+}
+
+void Engine::cancel_all() {
+  Command c;
+  c.op = Op::SchedCancelAll;
   send(c);
 }
 

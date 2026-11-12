@@ -25,27 +25,29 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [x] Streaming: now-playing files, browser overlay, OBS WebSocket client and rules (mock-tested only)
 - [x] Controllers: pad modes, modifiers, soft takeover, actions for every engine function, learn (library)
 - [x] Effect slot controls on the deck panels
+- [x] UI drawn from skins (default two- and four-deck layouts, example skin), live skin chooser
+- [x] Settings, sampler, MIDI learn and track details panels; key shift, reverse, tempo fader
+- [x] Sample-accurate scheduled commands (clock, deck position, beat) through the API
+- [x] DDJ-FLX4 mapping completed from the published MIDI list (untested on hardware)
+- [x] OpenAPI document
 
 ## Next
-- [ ] Draw the UI from the skin (the layout is still drawn in code); skin chooser
-- [ ] UI for effect slots, sampler, key shift, reverse; four-deck layout
-- [ ] Audio device chooser and latency setting in the UI
-- [ ] Relink and tag editing in the UI; settings screen (API, language, export options)
-- [ ] Sample-accurate scheduled commands (they currently fire within a few milliseconds)
+- [ ] Linux port (in progress: build, decoder, MIDI, shell; tested in a container)
+- [ ] Windows port (after Linux; built and tested on the Windows PC)
 - [ ] Engine in its own process (survives a UI crash)
-- [ ] Settings screen for streaming and OBS (today: settings through the API); test against a real OBS
-- [ ] MIDI learn UI (the library support exists); HID controllers
-- [ ] DDJ-FLX4: fill in the pad FX, sampler, keyboard, key shift, CFX and beat FX lines from the published MIDI list
-- [ ] Long translated labels overflow in the mixer strip (seen in German)
+- [ ] Skins: window shapes, images/sprites and rotate animations are parsed but not drawn;
+      hidden widgets keep their layout space
+- [ ] Controllers: effect unit channel select, mic and master-cue actions (needed by the FLX4's
+      beat FX channel switch); MIDI learn by control name; HID controllers
 - [ ] Listening test of key lock on real mixes; transient handling if needed
+- [ ] Test against a real OBS
 - [ ] USB export: check against a reference export, then the CDJ-3000 test; write exportExt.pdb
-- [ ] Windows and Linux shells; CI on all three; vendored dependencies for portable builds
+- [ ] CI on all platforms; vendored dependencies for portable builds
 - [ ] iOS app (pull request open; touch layout pending)
 - [ ] Cloud sync
 
 ## Known limits of the current build
 - Tracks are decoded fully into memory.
 - Analysis can split a steady track at a long breakdown; such splits are merged when the tempo agrees.
-- The API has no OpenAPI document yet; docs/API.md is the reference.
 - HID controllers and MIDI learn are not supported yet.
 - Built against the host's Homebrew SQLCipher, so the app runs on this macOS version and newer.

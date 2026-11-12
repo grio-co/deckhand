@@ -1,7 +1,8 @@
 // DeckHand default skin. Original design: procedural shapes and tokens only, no image assets.
+// Two windows: "main" (two decks) and "four" (four decks, switched with the 2/4 button).
 dhskin 1
 
-meta name="DeckHand Default" author="DeckHand contributors" license="MIT" min_version="0.1" description="Conventional two-deck layout with central mixer and library browser"
+meta name="DeckHand Default" author="DeckHand contributors" license="MIT" min_version="0.1" description="Conventional two- and four-deck layouts with central mixer and library browser"
 
 tokens {
   color bg       #0e1014
@@ -13,8 +14,11 @@ tokens {
   color accent   #3ea6ff
   color deck1    #3ea6ff
   color deck2    #ff8a3d
+  color deck3    #a678ff
+  color deck4    #ff5fa8
   color good     #3ddc84
   color warn     #ffb020
+  color bad      #ff5c5c
   color hover    #ffffff14
   color press    #ffffff26
   number r 4
@@ -28,53 +32,211 @@ tokens {
 
 animation beat_flash property=glow from=1 to=0 duration=180 ease=out trigger=beat
 
-// One deck: header, platter + tempo, transport, pads.
-template deck n color {
-  column bg=panel radius=r pad=8 gap=6 {
-    row h=40 gap=8 {
-      label bind="deck[${n}].letter" w=30 font=big color=${color}
-      column gap=2 {
-        label bind="deck[${n}].title" font=ui color=text
-        label bind="deck[${n}].artist" font=ui color=dim
-      }
-      column w=96 gap=0 {
-        label bind="deck[${n}].bpm" format=fixed1 font=mono color=text text_align=right
-        label bind="deck[${n}].key" font=small color=dim text_align=right
-      }
-    }
-    row gap=8 {
-      jog bind="deck[${n}].jog" aspect=1 color=${color} bg=panel2 border=line border_w=1 anim=beat_flash glow=${color} {
-        state hover { border=${color} }
-        state pressed { bg=press }
-      }
-      column w=44 gap=2 {
-        fader bind="deck[${n}].tempo" orientation=vertical color=${color} bg=panel2 radius=2
-        label bind="deck[${n}].tempo" format=signed font=small color=dim text_align=center h=14
-      }
-    }
-    row h=30 gap=6 {
-      button bind="deck[${n}].cue" text="@deck.cue" font=ui bg=panel2 border=line border_w=1 radius=r {
-        state hover { bg=hover }
-        state pressed { bg=press }
-        state on { bg=warn color=bg }
-      }
-      button bind="deck[${n}].play" text="@deck.play" text_on="@deck.pause" font=ui bg=panel2 border=line border_w=1 radius=r {
-        state hover { bg=hover }
-        state pressed { bg=press }
-        state on { bg=good color=bg }
-      }
-      button bind="deck[${n}].sync" text="@deck.sync" font=ui bg=panel2 border=line border_w=1 radius=r {
-        state hover { bg=hover }
-        state pressed { bg=press }
-        state on { bg=accent color=bg }
-      }
-      label bind="deck[${n}].loop" font=small color=accent w=70 text_align=right
-    }
-    pads bind="deck[${n}].pads" cols=4 rows=2 h=56 gap=4 bg=panel2 radius=r color=${color}
+// A flat button with hover / pressed / on states; `on` is the fill while the bound control is active.
+template btn bind label w on {
+  button bind="${bind}" text="${label}" font=small bg=panel2 border=line border_w=1 radius=r w=${w} margin=0,3 transition=90 {
+    state hover { bg=hover }
+    state pressed { bg=press }
+    state on { bg=${on} color=bg }
   }
 }
 
-// One mixer channel strip.
+// Same for buttons whose text comes from the application (REC with its clock...).
+template dbtn bind w on {
+  button bind="${bind}" font=small bg=panel2 border=line border_w=1 radius=r w=${w} margin=0,3 transition=90 {
+    state hover { bg=hover }
+    state pressed { bg=press }
+    state on { bg=${on} color=bg }
+  }
+}
+
+// A small flex button for toggles inside decks.
+template tog bind label on {
+  button bind="${bind}" text="${label}" font=small bg=panel2 border=line border_w=1 radius=r transition=90 {
+    state hover { bg=hover }
+    state pressed { bg=press }
+    state on { bg=${on} color=bg }
+  }
+}
+
+template topbar dummy {
+  row h=32 bg=panel radius=r pad=8,0 gap=6 {
+    label text="@app.title" font=title color=text w=110
+    spacer
+    button bind="app.language" show="app.multi_language" font=small bg=panel2 border=line border_w=1 radius=r w=40 margin=0,3 {
+      state hover { bg=hover }
+      state pressed { bg=press }
+    }
+    button bind="app.skin" show="app.multi_skin" font=small bg=panel2 border=line border_w=1 radius=r w=84 margin=0,3 {
+      state hover { bg=hover }
+      state pressed { bg=press }
+    }
+    button bind="app.layout" show="app.has_four" text="@app.layout_toggle" font=small bg=panel2 border=line border_w=1 radius=r w=96 margin=0,3 {
+      state hover { bg=hover }
+      state pressed { bg=press }
+      state on { bg=accent color=bg }
+    }
+    use btn bind="app.sampler" label="@app.sampler" w=84 on=accent
+    use btn bind="app.learn" label="@app.learn" w=84 on=accent
+    use btn bind="app.settings" label="@app.settings" w=84 on=accent
+    use dbtn bind="app.rec" w=92 on=bad
+    use btn bind="app.export" label="@app.export_usb" w=100 on=accent
+    button bind="app.import" show="app.has_import" text="@app.import_library" font=small bg=panel2 border=line border_w=1 radius=r w=120 margin=0,3 {
+      state hover { bg=hover }
+      state pressed { bg=press }
+    }
+  }
+}
+
+template statusbar dummy {
+  row h=18 gap=8 pad=8,0 {
+    label bind="app.status" font=ui color=dim
+    label bind="app.controller" font=ui color=dim w=240 text_align=right
+    label bind="app.audio" font=ui color=dim w=300 text_align=right
+  }
+}
+
+// One deck: header, overview, platter + tempo + transport + effects, pads.
+template deck n color {
+  column bg=panel radius=r pad=6 gap=4 {
+    row h=34 gap=8 {
+      label bind="deck[${n}].letter" w=26 font=big color=${color}
+      column gap=0 {
+        label bind="deck[${n}].title" font=title color=text h=18
+        label bind="deck[${n}].artist" font=ui color=dim
+      }
+      column w=60 gap=0 {
+        label bind="deck[${n}].bpm" font=mono color=text text_align=right h=24
+        label bind="deck[${n}].key" font=small color=dim text_align=right
+      }
+      column w=92 gap=0 {
+        label bind="deck[${n}].time" font=small color=text text_align=right h=16
+        label bind="deck[${n}].loop" font=small color=accent text_align=right
+      }
+    }
+    waveform bind="deck[${n}].waveform" mode=overview color=${color} bg=panel2 radius=2 h=22
+    row flex=1 gap=6 {
+      jog bind="deck[${n}].jog" aspect=1 color=${color} bg=panel2 border=line border_w=1 anim=beat_flash glow=${color} {
+        state hover { border=${color} }
+      }
+      column w=46 gap=2 {
+        button bind="deck[${n}].tempo_range" font=small bg=panel2 border=line border_w=1 radius=r h=18 {
+          state hover { bg=hover }
+          state pressed { bg=press }
+        }
+        fader bind="deck[${n}].tempo" orientation=vertical color=${color} bg=panel2 radius=2
+        label bind="deck[${n}].tempo" font=small color=dim text_align=center h=12
+      }
+      column flex=1 gap=3 {
+        row h=26 gap=4 {
+          button bind="deck[${n}].cue" text="@deck.cue" font=ui bg=panel2 border=line border_w=1 radius=r {
+            state hover { bg=hover }
+            state pressed { bg=press }
+            state on { bg=warn color=bg }
+          }
+          button bind="deck[${n}].play" text="@deck.play" text_on="@deck.pause" font=ui bg=panel2 border=line border_w=1 radius=r {
+            state hover { bg=hover }
+            state pressed { bg=press }
+            state on { bg=good color=bg }
+          }
+          button bind="deck[${n}].sync" text="@deck.sync" font=ui bg=panel2 border=line border_w=1 radius=r {
+            state hover { bg=hover }
+            state pressed { bg=press }
+            state on { bg=accent color=bg }
+          }
+        }
+        row h=22 gap=3 {
+          use tog bind="deck[${n}].key_lock" label="@deck.key_lock" on=accent
+          use tog bind="deck[${n}].quantize" label="@deck.quantize" on=accent
+          use tog bind="deck[${n}].slip" label="@deck.slip" on=accent
+          use tog bind="deck[${n}].reverse" label="@deck.reverse" on=accent
+        }
+        row h=22 gap=3 {
+          use tog bind="deck[${n}].key_shift.minus" label="@deck.key_down" on=accent
+          label bind="deck[${n}].key_shift" font=small color=text text_align=center
+          use tog bind="deck[${n}].key_shift.plus" label="@deck.key_up" on=accent
+          use tog bind="deck[${n}].key_shift.reset" label="@deck.key_reset" on=accent
+        }
+        use fxrow n=${n} s=1 color=${color}
+        use fxrow n=${n} s=2 color=${color}
+        use fxrow n=${n} s=3 color=${color}
+      }
+    }
+    pads bind="deck[${n}].pads" cols=4 rows=2 h=40 bg=panel2 radius=r color=${color}
+  }
+}
+
+// One effect slot: effect name (click to step), on, wet.
+template fxrow n s color {
+  row h=20 gap=3 {
+    button bind="deck[${n}].fx[${s}].select" font=small bg=panel2 border=line border_w=1 radius=r flex=3 {
+      state hover { bg=hover }
+      state pressed { bg=press }
+    }
+    button bind="deck[${n}].fx[${s}].on" text="@fx.on" font=small bg=panel2 border=line border_w=1 radius=r w=36 transition=90 {
+      state hover { bg=hover }
+      state pressed { bg=press }
+      state on { bg=${color} color=bg }
+    }
+    fader bind="deck[${n}].fx[${s}].wet" orientation=horizontal color=${color} bg=panel2 radius=2 flex=3
+  }
+}
+
+// A compact deck for the four-deck window: no effects or key shift.
+template deck_small n color {
+  column bg=panel radius=r pad=6 gap=4 {
+    row h=30 gap=8 {
+      label bind="deck[${n}].letter" w=22 font=title color=${color}
+      column gap=0 {
+        label bind="deck[${n}].title" font=ui color=text h=16
+        label bind="deck[${n}].artist" font=small color=dim
+      }
+      column w=56 gap=0 {
+        label bind="deck[${n}].bpm" font=title color=text text_align=right h=18
+        label bind="deck[${n}].key" font=small color=dim text_align=right
+      }
+    }
+    waveform bind="deck[${n}].waveform" mode=overview color=${color} bg=panel2 radius=2 h=18
+    row flex=1 gap=6 {
+      jog bind="deck[${n}].jog" aspect=1 color=${color} bg=panel2 border=line border_w=1 anim=beat_flash glow=${color} {
+        state hover { border=${color} }
+      }
+      column w=48 gap=2 {
+        fader bind="deck[${n}].tempo" orientation=vertical color=${color} bg=panel2 radius=2
+        label bind="deck[${n}].tempo" font=small color=dim text_align=center h=12
+      }
+      column flex=1 gap=3 {
+        row h=26 gap=4 {
+          button bind="deck[${n}].cue" text="@deck.cue" font=small bg=panel2 border=line border_w=1 radius=r {
+            state hover { bg=hover }
+            state pressed { bg=press }
+            state on { bg=warn color=bg }
+          }
+          button bind="deck[${n}].play" text="@deck.play" text_on="@deck.pause" font=small bg=panel2 border=line border_w=1 radius=r {
+            state hover { bg=hover }
+            state pressed { bg=press }
+            state on { bg=good color=bg }
+          }
+          button bind="deck[${n}].sync" text="@deck.sync" font=small bg=panel2 border=line border_w=1 radius=r {
+            state hover { bg=hover }
+            state pressed { bg=press }
+            state on { bg=accent color=bg }
+          }
+        }
+        row h=22 gap=3 {
+          use tog bind="deck[${n}].key_lock" label="@deck.key_lock" on=accent
+          use tog bind="deck[${n}].quantize" label="@deck.quantize" on=accent
+          use tog bind="deck[${n}].slip" label="@deck.slip" on=accent
+          use tog bind="deck[${n}].reverse" label="@deck.reverse" on=accent
+        }
+        label bind="deck[${n}].time" font=small color=text text_align=right
+      }
+    }
+    pads bind="deck[${n}].pads" cols=4 rows=2 h=34 bg=panel2 radius=r color=${color}
+  }
+}
+
+// One mixer channel strip (two-deck window).
 template strip n color {
   column gap=4 {
     grid cols=2 gap=4 flex=3 {
@@ -83,31 +245,73 @@ template strip n color {
       knob bind="mixer.ch[${n}].eq.mid" text="@mixer.eq.mid" color=${color} font=small
       knob bind="mixer.ch[${n}].eq.low" text="@mixer.eq.low" color=${color} font=small
       knob bind="mixer.ch[${n}].filter" text="@mixer.filter" bipolar=true color=accent font=small
-      button bind="mixer.ch[${n}].cue" text="@mixer.cue" font=small bg=panel radius=r {
+      button bind="mixer.ch[${n}].cue" text="@mixer.cue" font=small bg=panel radius=r margin=2,3 {
         state hover { bg=hover }
         state on { bg=warn color=bg }
       }
     }
-    row gap=4 flex=4 {
+    row gap=4 flex=3 {
       meter bind="mixer.ch[${n}].level" orientation=vertical w=14 bg=panel
       fader bind="mixer.ch[${n}].fader" orientation=vertical color=${color} bg=panel radius=2
     }
   }
 }
 
-window main size=1280x720 min=960x560 title="@app.title" {
-  column bg=bg pad=4 gap=gap {
-    row h=32 bg=panel radius=r pad=8,0 gap=8 {
-      label text="@app.title" font=title color=text w=120
-      spacer
-      label bind="app.controller" font=ui color=dim w=200 text_align=right
-      label bind="app.audio" font=ui color=dim w=260 text_align=right
-      button bind="app.import" text="@app.import_library" font=ui bg=panel2 border=line border_w=1 radius=r w=130 margin=4,3 {
-        state hover { bg=hover }
-        state pressed { bg=press }
+// A narrow strip for the four-deck mixer.
+template strip4 n color {
+  column gap=2 {
+    knob bind="mixer.ch[${n}].eq.high" text="@mixer.eq.high" color=${color} font=small
+    knob bind="mixer.ch[${n}].eq.mid" text="@mixer.eq.mid" color=${color} font=small
+    knob bind="mixer.ch[${n}].eq.low" text="@mixer.eq.low" color=${color} font=small
+    knob bind="mixer.ch[${n}].filter" text="@mixer.filter" bipolar=true color=accent font=small
+    button bind="mixer.ch[${n}].cue" text="@mixer.cue" font=small bg=panel radius=r h=18 {
+      state hover { bg=hover }
+      state on { bg=warn color=bg }
+    }
+    row gap=3 flex=2 {
+      meter bind="mixer.ch[${n}].level" orientation=vertical w=8 bg=panel
+      fader bind="mixer.ch[${n}].fader" orientation=vertical color=${color} bg=panel radius=2
+    }
+  }
+}
+
+template library dummy {
+  row flex=2 gap=gap {
+    column w=250 gap=4 {
+      tree bind="browser.tree" text="@browser.collection" bg=panel radius=r font=ui color=text
+      row h=22 gap=3 {
+        use tog bind="browser.playlist.add_list" label="@playlist.add_list" on=accent
+        use tog bind="browser.playlist.add_folder" label="@playlist.add_folder" on=accent
+        use tog bind="browser.playlist.rename" label="@playlist.rename" on=accent
+        use tog bind="browser.playlist.delete" label="@playlist.delete" on=bad
       }
     }
-    column h=20% gap=2 {
+    column bg=panel radius=r pad=6 gap=4 {
+      row h=24 gap=6 {
+        label bind="browser.search" text="@browser.search" editable=true font=ui color=text bg=panel2 radius=r w=220 pad=6,0
+        label bind="browser.count" text="@browser.tracks" font=small color=dim w=90
+        spacer
+        use tog bind="browser.edit" label="@browser.edit" on=accent
+        use tog bind="browser.add_to" label="@browser.add_to" on=accent
+        button bind="browser.remove" show="browser.can_remove" text="@browser.remove" font=small bg=panel2 radius=r {
+          state hover { bg=hover }
+        }
+        button bind="deck[1].load" text="@browser.load" args="deck=A" font=small color=deck1 bg=panel2 radius=r {
+          state hover { bg=hover }
+        }
+        button bind="deck[2].load" text="@browser.load" args="deck=B" font=small color=deck2 bg=panel2 radius=r {
+          state hover { bg=hover }
+        }
+      }
+      browser bind="browser.tracks" columns="title,artist,bpm,key,time" row_h=22 font=ui color=text
+    }
+  }
+}
+
+window main size=1280x800 min=960x600 title="@app.title" {
+  column bg=bg pad=4 gap=gap {
+    use topbar dummy=1
+    column h=14% gap=2 {
       waveform bind="deck[1].waveform" mode=zoomed color=deck1 bg=panel radius=r
       waveform bind="deck[2].waveform" mode=zoomed color=deck2 bg=panel radius=r
     }
@@ -118,36 +322,67 @@ window main size=1280x720 min=960x560 title="@app.title" {
           label text="@mixer.master" font=small color=dim w=60
           meter bind="mixer.master.level" orientation=horizontal bg=panel
         }
-        row gap=8 {
+        row flex=1 gap=8 {
           use strip n=1 color=deck1
           use strip n=2 color=deck2
         }
         label text="@mixer.crossfader" font=small color=dim h=12 text_align=center
         fader bind="mixer.crossfader" orientation=horizontal color=accent bg=panel radius=2 h=26
-        row h=44 gap=8 {
+        row h=44 gap=6 {
+          knob bind="mixer.master.volume" text="@mixer.master" font=small color=text
           knob bind="mixer.headphone.volume" text="@mixer.headphones" font=small color=text
           knob bind="mixer.headphone.mix" text="@mixer.headphone_mix" font=small color=text
+          knob bind="mixer.sampler.level" text="@mixer.sampler" font=small color=accent
         }
       }
       use deck n=2 color=deck2
     }
-    row flex=2 gap=gap {
-      tree bind="browser.tree" text="@browser.collection" w=200 bg=panel radius=r font=ui color=text
-      column bg=panel radius=r pad=6 gap=4 {
-        row h=24 gap=6 {
-          label bind="browser.search" text="@browser.search" editable=true font=ui color=text bg=panel2 radius=r w=240 pad=6,0
-          label bind="browser.count" text="@browser.tracks" font=small color=dim
-          spacer
-          button bind="deck[1].load" text="@browser.load" args="deck=A" font=small color=deck1 bg=panel2 radius=r w=70 {
-            state hover { bg=hover }
-          }
-          button bind="deck[2].load" text="@browser.load" args="deck=B" font=small color=deck2 bg=panel2 radius=r w=70 {
-            state hover { bg=hover }
-          }
+    use library dummy=1
+    use statusbar dummy=1
+  }
+}
+
+window four size=1440x900 min=1100x680 title="@app.title" {
+  column bg=bg pad=4 gap=gap {
+    use topbar dummy=1
+    column h=16% gap=2 {
+      waveform bind="deck[1].waveform" mode=zoomed color=deck1 bg=panel radius=r
+      waveform bind="deck[2].waveform" mode=zoomed color=deck2 bg=panel radius=r
+      waveform bind="deck[3].waveform" mode=zoomed color=deck3 bg=panel radius=r
+      waveform bind="deck[4].waveform" mode=zoomed color=deck4 bg=panel radius=r
+    }
+    row flex=4 gap=gap {
+      column gap=gap {
+        use deck_small n=1 color=deck1
+        use deck_small n=3 color=deck3
+      }
+      column w=360 bg=panel2 radius=r pad=8 gap=6 {
+        row h=20 gap=6 {
+          label text="@mixer.master" font=small color=dim w=60
+          meter bind="mixer.master.level" orientation=horizontal bg=panel
         }
-        browser bind="browser.tracks" columns="title,artist,bpm,key,time" row_h=20 font=ui color=text
+        row flex=1 gap=6 {
+          use strip4 n=1 color=deck1
+          use strip4 n=3 color=deck3
+          use strip4 n=4 color=deck4
+          use strip4 n=2 color=deck2
+        }
+        label text="@mixer.crossfader" font=small color=dim h=12 text_align=center
+        fader bind="mixer.crossfader" orientation=horizontal color=accent bg=panel radius=2 h=24
+        row h=44 gap=6 {
+          knob bind="mixer.master.volume" text="@mixer.master" font=small color=text
+          knob bind="mixer.headphone.volume" text="@mixer.headphones" font=small color=text
+          knob bind="mixer.headphone.mix" text="@mixer.headphone_mix" font=small color=text
+          knob bind="mixer.sampler.level" text="@mixer.sampler" font=small color=accent
+        }
+      }
+      column gap=gap {
+        use deck_small n=2 color=deck2
+        use deck_small n=4 color=deck4
       }
     }
+    use library dummy=1
+    use statusbar dummy=1
   }
 }
 

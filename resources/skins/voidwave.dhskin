@@ -54,6 +54,8 @@ window main size=1100x620 min=800x480 shape=hex title="@app.title" {
         label text="@app.title" font=title color=cyan glow=cyan glow_r=10 anim=pulse w=200
         spacer
         label bind="app.audio" font=small color=dim w=260 text_align=right
+        button bind="app.skin" show="app.multi_skin" font=small color=ink bg=glass border=rim border_w=1 radius=14 w=96 margin=8,2 anim=hover_pop
+        button bind="app.settings" text="@app.settings" font=small color=ink bg=glass border=rim border_w=1 radius=14 w=96 margin=0,2 anim=hover_pop
       }
       row flex=1 gap=18 {
         use flank n=1 color=cyan

@@ -73,15 +73,14 @@ SortKey sort_key(const std::string& s) {
   return SortKey::Default;
 }
 
-// A control change waiting for its moment.
+// A scheduled control change, kept for listing; the engine holds the real entry.
 struct Scheduled {
-  std::uint64_t id = 0;
+  std::uint64_t id = 0;               // first engine schedule id
+  std::vector<std::uint64_t> engine_ids;
   std::string control;
   bool has_value = false;
   double value = 0;
-  std::int64_t at_unix_ms = 0;  // > 0: wall-clock trigger
-  int when_deck = -1;           // >= 0: trigger when this deck's playhead reaches when_seconds
-  double when_seconds = 0;
+  std::string when;                   // human-readable trigger
 };
 
 }  // namespace
@@ -99,7 +98,6 @@ struct ApiBridge::Impl {
   std::thread ticker;
   std::mutex sched_mutex;
   std::vector<Scheduled> scheduled;
-  std::uint64_t next_schedule_id = 1;
 
   Impl(ApiHost& h, const std::string& dir) : host(h), data_dir(dir), lib(dir + "/library.db"), tokens(dir + "/api-tokens.json") {}
 
@@ -181,80 +179,104 @@ struct ApiBridge::Impl {
     const bool has_value = !value.is_null();
     const double v = value.is_bool() ? (value.as_bool() ? 1.0 : 0.0) : value.as_double();
 
+    std::vector<Command> commands;
+    std::string error;
+    if (!build_control(host.api_engine(), name, has_value, v, commands, error)) return Response::error(400, error);
+
+    // Optional trigger: wall clock, a deck position, or a beat of a deck's grid. Executed by the
+    // engine on the exact output sample.
+    Engine& engine = host.api_engine();
+    bool scheduled_request = false;
+    Schedule when;
+    std::string when_text;
+    const auto deck_of = [&](const Json& j, int& deck) {
+      const std::int64_t d = j["deck"].as_int(0);
+      if (d < 1 || d > kMaxDecks) return false;
+      deck = static_cast<int>(d - 1);
+      return true;
+    };
+    if (body["in_ms"].is_number() || body["at_unix_ms"].is_number()) {
+      const double delay_ms = body["in_ms"].is_number() ? std::max(0.0, body["in_ms"].as_double())
+                                                        : static_cast<double>(body["at_unix_ms"].as_int() - unix_ms());
+      const auto at = std::chrono::steady_clock::now() + std::chrono::microseconds(static_cast<std::int64_t>(std::max(0.0, delay_ms) * 1000.0));
+      when = Schedule::at_clock_frame(engine.clock_at_wall(at));
+      when_text = "clock";
+      scheduled_request = true;
+    } else if (body["when"].is_object()) {
+      int deck = 0;
+      if (!deck_of(body["when"], deck) || !body["when"]["seconds"].is_number()) return Response::error(400, "when needs deck (1..4) and seconds");
+      const DeckView dv = engine.deck(deck);
+      if (!dv.loaded) return Response::error(409, "that deck has no track");
+      when = Schedule::at_deck_frame(deck, body["when"]["seconds"].as_double() * dv.sample_rate, true);
+      when_text = "deck " + std::to_string(deck + 1) + " at " + std::to_string(body["when"]["seconds"].as_double()) + " s";
+      scheduled_request = true;
+    } else if (body["at_beat"].is_object() || body["in_beats"].is_object()) {
+      const bool relative = body["in_beats"].is_object();
+      const Json& b = relative ? body["in_beats"] : body["at_beat"];
+      int deck = 0;
+      const char* field = relative ? "beats" : "beat";
+      if (!deck_of(b, deck) || !b[field].is_number()) return Response::error(400, "give deck (1..4) and a beat number");
+      if (!engine.deck(deck).loaded) return Response::error(409, "that deck has no track");
+      when = relative ? Schedule::beats_from_now(deck, b[field].as_double(), b["bar"].as_bool(false))
+                      : Schedule::at_deck_beat(deck, b[field].as_double(), b["bar"].as_bool(false), false);
+      when_text = "deck " + std::to_string(deck + 1) + (relative ? " in " : " at beat ") + std::to_string(b[field].as_double()) + (relative ? " beats" : "");
+      scheduled_request = true;
+    }
+    Json j = Json::object();
+    j.set("control", name);
+    if (!scheduled_request) {
+      for (const Command& c : commands) engine.send(c);
+      return Response::ok(std::move(j));
+    }
     Scheduled s;
     s.control = name;
     s.has_value = has_value;
     s.value = v;
-    if (body["in_ms"].is_number()) s.at_unix_ms = unix_ms() + std::max<std::int64_t>(0, body["in_ms"].as_int());
-    if (body["at_unix_ms"].is_number()) s.at_unix_ms = body["at_unix_ms"].as_int();
-    const Json& when = body["when"];
-    if (when.is_object()) {
-      const std::int64_t deck = when["deck"].as_int(0);
-      if (deck < 1 || deck > kMaxDecks || !when["seconds"].is_number()) return Response::error(400, "when needs deck (1..4) and seconds");
-      s.when_deck = static_cast<int>(deck - 1);
-      s.when_seconds = when["seconds"].as_double();
-    }
-    if (s.at_unix_ms == 0 && s.when_deck < 0) {
-      std::string error;
-      if (!apply_control(host.api_engine(), name, has_value, v, error)) return Response::error(400, error);
-      Json j = Json::object();
-      j.set("control", name);
-      return Response::ok(std::move(j));
-    }
-    {  // validate the name now so mistakes are reported at request time
-      double ignored;
-      std::string error;
-      bool known = read_control(host.api_engine(), name, ignored);
-      if (!known) {
-        for (const ControlInfo& c : list_controls()) known = known || c.name == name;
+    s.when = when_text;
+    for (const Command& c : commands) {
+      const std::uint64_t id = engine.schedule(c, when);
+      if (id == 0) {
+        for (const auto done : s.engine_ids) engine.cancel(done);
+        return Response::error(429, "the schedule is full or this control cannot be scheduled");
       }
-      if (!known) return Response::error(400, "unknown control");
+      s.engine_ids.push_back(id);
     }
-    std::lock_guard<std::mutex> lock(sched_mutex);
-    if (scheduled.size() >= 10000) return Response::error(429, "too many scheduled commands");
-    s.id = next_schedule_id++;
-    Json j = Json::object();
-    j.set("control", name);
+    if (s.engine_ids.empty()) return Response::ok(std::move(j));  // nothing to do (already in that state)
+    s.id = s.engine_ids.front();
     j.set("scheduled_id", s.id);
-    scheduled.push_back(std::move(s));
+    {
+      std::lock_guard<std::mutex> lock(sched_mutex);
+      scheduled.push_back(std::move(s));
+    }
     Response r = Response::ok(std::move(j));
     r.status = 202;
     return r;
   }
 
-  void run_due() {
-    std::vector<Scheduled> due;
+  // Called for ScheduledFired / ScheduledDropped engine events (any thread).
+  void engine_event(const EngineEvent& e) {
+    if (e.type != EventType::ScheduledFired && e.type != EventType::ScheduledDropped) return;
+    Json out;
     {
       std::lock_guard<std::mutex> lock(sched_mutex);
-      if (scheduled.empty()) return;
-      const std::int64_t now = unix_ms();
-      DeckView views[kMaxDecks];
-      for (int i = 0; i < kMaxDecks; ++i) views[i] = host.api_engine().deck(i);
-      for (auto it = scheduled.begin(); it != scheduled.end();) {
-        bool fire = it->at_unix_ms > 0 && now >= it->at_unix_ms;
-        if (it->when_deck >= 0) {
-          const DeckView& v = views[it->when_deck];
-          fire = v.loaded && v.sample_rate > 0 && v.position / v.sample_rate >= it->when_seconds;
-        }
-        if (fire) {
-          due.push_back(std::move(*it));
-          it = scheduled.erase(it);
-        } else {
-          ++it;
-        }
+      for (auto it = scheduled.begin(); it != scheduled.end(); ++it) {
+        const auto pos = std::find(it->engine_ids.begin(), it->engine_ids.end(), e.sched_id);
+        if (pos == it->engine_ids.end()) continue;
+        it->engine_ids.erase(pos);
+        if (!it->engine_ids.empty()) return;  // wait for the last command of this control
+        out = Json::object();
+        out.set("type", "scheduled");
+        out.set("scheduled_id", it->id);
+        out.set("control", it->control);
+        out.set("ok", e.type == EventType::ScheduledFired);
+        out.set("clock_frame", e.clock_frame);
+        if (e.type == EventType::ScheduledDropped)
+          out.set("error", e.slot == 1 ? "deck unloaded" : e.slot == 2 ? "schedule full" : "no track or beat grid");
+        scheduled.erase(it);
+        break;
       }
     }
-    for (const Scheduled& s : due) {
-      std::string error;
-      const bool ok = apply_control(host.api_engine(), s.control, s.has_value, s.value, error);
-      Json e = Json::object();
-      e.set("type", "scheduled");
-      e.set("scheduled_id", s.id);
-      e.set("control", s.control);
-      e.set("ok", ok);
-      if (!ok) e.set("error", error);
-      server->publish("events", e);
-    }
+    if (!out.is_null() && server) server->publish("events", out);
   }
 
   // Publishes deck and mixer state, and events for changes worth reacting to.
@@ -265,9 +287,8 @@ struct ApiBridge::Impl {
     } seen[kMaxDecks];
     int n = 0;
     while (!quit) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      run_due();
-      if (++n % 50 != 0) continue;  // state at 10 Hz
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));  // state at 10 Hz
+      ++n;
       for (int i = 0; i < kMaxDecks; ++i) {
         const DeckView v = host.api_engine().deck(i);
         const std::int64_t id = v.loaded ? v.track_id : 0;
@@ -375,13 +396,7 @@ struct ApiBridge::Impl {
         j.set("scheduled_id", c.id);
         j.set("control", c.control);
         if (c.has_value) j.set("value", c.value);
-        if (c.at_unix_ms) j.set("at_unix_ms", c.at_unix_ms);
-        if (c.when_deck >= 0) {
-          Json w = Json::object();
-          w.set("deck", c.when_deck + 1);
-          w.set("seconds", c.when_seconds);
-          j.set("when", std::move(w));
-        }
+        j.set("when", c.when);
         a.push_back(std::move(j));
       }
       return Response::ok(std::move(a));
@@ -389,6 +404,7 @@ struct ApiBridge::Impl {
     s.add_route("DELETE", "/v1/schedule", "control", [this](const Request&) {
       std::lock_guard<std::mutex> lock(sched_mutex);
       scheduled.clear();
+      host.api_engine().cancel_all();
       Response ok;
       ok.status = 204;
       return ok;
@@ -397,8 +413,10 @@ struct ApiBridge::Impl {
       std::int64_t id = 0;
       if (!int_param(r, "id", id)) return Response::error(404, "no such command");
       std::lock_guard<std::mutex> lock(sched_mutex);
-      const auto n = std::erase_if(scheduled, [&](const Scheduled& c) { return c.id == static_cast<std::uint64_t>(id); });
-      if (n == 0) return Response::error(404, "no such command");
+      const auto it = std::find_if(scheduled.begin(), scheduled.end(), [&](const Scheduled& c) { return c.id == static_cast<std::uint64_t>(id); });
+      if (it == scheduled.end()) return Response::error(404, "no such command");
+      for (const auto eid : it->engine_ids) host.api_engine().cancel(eid);
+      scheduled.erase(it);
       Response ok;
       ok.status = 204;
       return ok;
@@ -782,5 +800,6 @@ ApiBridge::~ApiBridge() {
 
 bool ApiBridge::running() const { return impl_->server && impl_->server->running(); }
 std::string ApiBridge::describe() const { return impl_->description; }
+void ApiBridge::engine_event(const EngineEvent& e) { impl_->engine_event(e); }
 
 }  // namespace deckhand
