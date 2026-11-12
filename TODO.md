@@ -33,18 +33,21 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [x] Engine in its own process on macOS: audio, recording and controllers survive a UI crash;
       the UI re-attaches
 - [x] Library sync through any replicated folder or USB stick (no server)
+- [x] Windows port: Win32 + Direct3D 11 shell, DirectWrite text, Media Foundation decoder, WinMM
+      MIDI, Windows IPC layer (cross-compiled; tests pass under Wine; not yet run on Windows)
+- [x] Linux on the current tree with the engine helper, audio fallback and a portable tarball
+- [x] macOS: Bluetooth MIDI pairing window, sync settings, skin images and rotation
 - [x] Linux port: build, FFmpeg decoder, ALSA MIDI, SDL3 + OpenGL shell (container-tested only)
 - [x] Controllers: effect unit assignment, master cue, learn choices by name
 
 ## Next
 - [ ] Linux: rerun the container build against the skin-driven UI; fall back to no audio device
       cleanly; audio-route change notifications; test on a real machine (audio, MIDI, Wayland)
-- [ ] Windows port (after Linux; built and tested on the Windows PC)
-- [ ] Engine process: Windows IPC layer; ship the helper in the Linux install; translate its status
-      messages; restore sampler slot names on re-attach
-- [ ] Sync: settings UI for the folder (today: setting `sync.folder`), passphrase encryption,
-      tombstone clean-up
-- [ ] Bluetooth MIDI pairing window on macOS
+- [ ] Windows: build and test on the real PC (MSVC build, WASAPI audio, MIDI, Media Foundation
+      codecs, HiDPI); then enable the separate engine process there (needs the UI-side quit
+      handling on Windows)
+- [ ] Sync: passphrase encryption, tombstone clean-up
+- [ ] Bluetooth MIDI pairing: try with a real device
 - [ ] Skins: window shapes, images/sprites and rotate animations are parsed but not drawn;
       hidden widgets keep their layout space
 - [ ] Controllers: microphone input (engine has none yet); HID controllers

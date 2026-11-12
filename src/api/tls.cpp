@@ -1,18 +1,17 @@
 // Self-signed certificate generation and fingerprinting (OpenSSL).
-#include <arpa/inet.h>
-#include <fcntl.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
+#include <cctype>
 #include <cstdio>
 #include <memory>
 
 #include "deckhand/api/server.hpp"
+#include "fileio.hpp"
+#include "sockport.hpp"
 
 namespace deckhand::api {
 namespace {
@@ -36,27 +35,8 @@ bool is_ip(const std::string& h) {
   return inet_pton(AF_INET, h.c_str(), buf) == 1 || inet_pton(AF_INET6, h.c_str(), buf) == 1;
 }
 
-bool write_file(const std::string& path, const std::string& data, mode_t mode) {
-  const std::string tmp = path + ".tmp";
-  int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, mode);
-  if (fd < 0) return false;
-  fchmod(fd, mode);
-  const char* p = data.data();
-  std::size_t left = data.size();
-  bool ok = true;
-  while (left > 0) {
-    ssize_t n = ::write(fd, p, left);
-    if (n <= 0) { ok = false; break; }
-    p += n;
-    left -= static_cast<std::size_t>(n);
-  }
-  ok = ok && fsync(fd) == 0;
-  ::close(fd);
-  if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) {
-    ::unlink(tmp.c_str());
-    return false;
-  }
-  return true;
+bool write_file(const std::string& path, const std::string& data, bool owner_only) {
+  return write_file_atomic(path, data, owner_only);
 }
 
 std::string bio_to_string(BIO* b) {
@@ -119,8 +99,8 @@ bool generate_self_signed(const std::string& cert_path, const std::string& key_p
     if (!kb || !cb || !PEM_write_bio_PrivateKey(kb.get(), key.get(), nullptr, nullptr, 0, nullptr, nullptr) ||
         !PEM_write_bio_X509(cb.get(), x.get()))
       return fail("PEM encoding failed");
-    if (!write_file(key_path, bio_to_string(kb.get()), 0600)) return fail("cannot write key file");
-    if (!write_file(cert_path, bio_to_string(cb.get()), 0644)) return fail("cannot write certificate file");
+    if (!write_file(key_path, bio_to_string(kb.get()), true)) return fail("cannot write key file");
+    if (!write_file(cert_path, bio_to_string(cb.get()), false)) return fail("cannot write certificate file");
     return true;
   } catch (...) {
     return fail("internal error");

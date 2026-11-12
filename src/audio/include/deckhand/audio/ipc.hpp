@@ -2,7 +2,7 @@
 // Engine IPC: everything the UI process and the engine process share.
 //
 //  * OS access (shared memory, instance lock, local sockets, spawning) sits behind the small classes in the first
-//    section; ipc_posix.cpp implements them for macOS and Linux and a Windows file can add the same interface.
+//    section; ipc_posix.cpp implements them for macOS and Linux, ipc_win32.cpp for Windows.
 //  * One shared-memory segment ("main") holds, with no pointers in it (offsets and indices only):
 //      - a multi-producer command ring UI -> engine,
 //      - seqlock snapshots engine -> UI (decks, mixer, sampler, recorder, device, controllers, loaded-track info),
@@ -27,6 +27,13 @@ namespace deckhand::ipc {
 
 constexpr std::uint32_t kProtocolVersion = 1;
 constexpr int kBlockSlots = 64;  // track / sample blocks in flight at once
+
+// What the OS hands out for a file or socket: a descriptor on POSIX, a HANDLE / SOCKET on Windows (-1 = none).
+#if defined(_WIN32)
+using OsHandle = std::intptr_t;
+#else
+using OsHandle = int;
+#endif
 
 // =====================================================================================================
 // OS access
@@ -75,7 +82,7 @@ class InstanceLock {
   bool held() const { return fd_ >= 0; }
 
  private:
-  int fd_ = -1;
+  OsHandle fd_ = -1;
   std::string path_;
 };
 
@@ -104,7 +111,7 @@ class Conn {
 
  private:
   friend class Listener;
-  int fd_ = -1;
+  OsHandle fd_ = -1;
 };
 
 class Listener {
@@ -118,8 +125,11 @@ class Listener {
   void close();
 
  private:
-  int fd_ = -1;
+  OsHandle fd_ = -1;
   std::string path_;
+#if defined(_WIN32)
+  std::string secret_;  // the control channel's shared secret (ipc_win32.cpp)
+#endif
 };
 
 // Where one engine lives for one data folder. Everything is derived from the folder's canonical path and the

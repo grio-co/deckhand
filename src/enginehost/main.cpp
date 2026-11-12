@@ -5,10 +5,21 @@
 // (RemoteEngine) talks to it through the shared segments and the control socket described in
 // deckhand/audio/ipc.hpp. The process never stops audio because the UI is gone: it only changes behaviour (browse
 // requests from the controller are forwarded to the UI while it is alive and dropped otherwise).
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <signal.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
+#include <cctype>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -34,6 +45,25 @@ namespace {
 
 std::atomic<int> g_signal{0};
 void on_signal(int s) { g_signal.store(s); }
+#if defined(_WIN32)
+// Console control events play the part of SIGTERM / SIGINT / SIGHUP. The system ends the process a few seconds
+// after a close, logoff or shutdown event returns, so the handler waits for the engine's own (fade-out) exit.
+BOOL WINAPI on_console_event(DWORD type) {
+  on_signal(15);
+  if (type == CTRL_CLOSE_EVENT || type == CTRL_LOGOFF_EVENT || type == CTRL_SHUTDOWN_EVENT) Sleep(4500);
+  return TRUE;
+}
+#endif
+
+// "/x" on POSIX; "C:\x", "C:/x" or "\\server\share" on Windows.
+bool is_absolute_path(const std::string& p) {
+  if (!p.empty() && p[0] == '/') return true;
+#if defined(_WIN32)
+  if (p.size() >= 3 && std::isalpha(static_cast<unsigned char>(p[0])) && p[1] == ':' && (p[2] == '\\' || p[2] == '/')) return true;
+  if (p.size() >= 3 && p[0] == '\\' && p[1] == '\\') return true;
+#endif
+  return false;
+}
 
 struct Options {
   std::string data_dir, resource_dir;
@@ -572,7 +602,7 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
       const std::string path = rd.str();
       const bool pre = rd.u8() != 0;
       std::string error;
-      if (!rd.ok() || path.empty() || path.size() > 1000 || path[0] != '/' || path.find('\0') != std::string::npos) {
+      if (!rd.ok() || path.empty() || path.size() > 1000 || !is_absolute_path(path) || path.find('\0') != std::string::npos) {
         out.u8(0), out.str("bad recording path");
         return;
       }
@@ -732,6 +762,10 @@ bool parse_args(int argc, char** argv, Options& o) {
 int main(int argc, char** argv) {
   Options o;
   if (!parse_args(argc, argv, o)) return 2;
+#if defined(_WIN32)
+  // Started detached from the UI's console (ipc_win32.cpp), so closing that console does not reach it.
+  SetConsoleCtrlHandler(on_console_event, TRUE);
+#else
   setsid();  // own session: closing the UI's terminal or process group must not take the engine down
   struct sigaction sa {};
   sa.sa_handler = on_signal;
@@ -740,6 +774,7 @@ int main(int argc, char** argv) {
   sigaction(SIGINT, &sa, nullptr);
   sigaction(SIGHUP, &sa, nullptr);
   signal(SIGPIPE, SIG_IGN);
+#endif
 
   if (o.probe) {  // diagnostics: which per-session objects exist for this data folder
     SessionNames n;

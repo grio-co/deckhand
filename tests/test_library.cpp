@@ -1,5 +1,6 @@
 // Library editing: playlists, sorting, tags, relinking, history, settings, migration.
 #include <cstdio>
+#include <filesystem>
 #include <string>
 
 #include "check.hpp"
@@ -8,7 +9,7 @@
 using namespace deckhand;
 
 int main() {
-  const std::string path = "/tmp/deckhand_test_library_edit.db";
+  const std::string path = (std::filesystem::temp_directory_path() / "deckhand_test_library_edit.db").string();
   std::remove(path.c_str());
   std::remove((path + "-wal").c_str());
   std::remove((path + "-shm").c_str());

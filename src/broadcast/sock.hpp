@@ -1,5 +1,5 @@
 #pragma once
-// Private thin socket layer (POSIX). On platforms without it every call fails, so start() just returns false.
+// Private thin socket layer (BSD sockets, or Winsock on Windows). Descriptors are plain ints.
 #include <cstddef>
 #include <cstdint>
 #include <string>

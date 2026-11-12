@@ -121,7 +121,11 @@ void App::begin_export_menu() {
       }
     }
   }
+#if defined(_WIN32)
+  if (const char* home = std::getenv("USERPROFILE")) export_targets_.push_back(std::string(home) + "\\Music\\DeckHand USB Export");
+#else
   if (const char* home = std::getenv("HOME")) export_targets_.push_back(std::string(home) + "/Music/DeckHand USB Export");
+#endif
 }
 
 void App::open_panel(Panel p) {

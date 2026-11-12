@@ -15,6 +15,7 @@
 #include "deckhand/audio/engine.hpp"
 #include "deckhand/import/import.hpp"
 #include "deckhand/library/library.hpp"
+#include "deckhand/midi/controller.hpp"
 #include "deckhand/log/log.hpp"
 #include "deckhand/services/usb_export.hpp"
 
@@ -22,11 +23,23 @@ using namespace deckhand;
 
 namespace {
 
+#if defined(_WIN32)
+std::string env_or(const char* name, const std::string& fallback) {
+  const char* v = std::getenv(name);
+  return v && *v ? v : fallback;
+}
+std::string home() { return env_or("USERPROFILE", "."); }
+std::string default_data_dir() { return env_or("APPDATA", home()) + "\\DeckHand"; }
+// The source library lives in the roaming profile on Windows.
+std::string source_library_dir() { return env_or("APPDATA", home()) + "\\Pioneer\\rekordbox"; }
+#else
 std::string home() {
   const char* h = std::getenv("HOME");
   return h ? h : ".";
 }
 std::string default_data_dir() { return home() + "/Library/Application Support/DeckHand"; }
+std::string source_library_dir() { return home() + "/Library/Pioneer/rekordbox"; }
+#endif
 
 std::string read_file_trimmed(const std::string& path) {
   std::ifstream f(path);
@@ -51,6 +64,7 @@ int usage() {
                "  export DIR [--playlist ID] [--no-copy 1] [--data DIR]   write a club-player USB export\n"
                "  token list | create NAME SCOPE[,SCOPE...] | revoke ID   [--data DIR]   API access tokens\n"
                "  devices                      list audio outputs\n"
+               "  midi                         list connected MIDI input devices\n"
                "  play FILE  [--seconds N] [--silent 1] [--device NAME]   decode and play through the engine\n");
   return 2;
 }
@@ -62,6 +76,12 @@ int main(int argc, char** argv) {
   const std::string cmd = argv[1];
   if (cmd == "devices") {
     for (const auto& d : Engine::output_devices()) std::printf("%s\n", d.c_str());
+    return 0;
+  }
+  if (cmd == "midi") {
+    auto io = create_midi_io([](const std::string&, const std::uint8_t*, std::size_t) {}, [] {});
+    if (!io) return 1;
+    for (const auto& d : io->devices()) std::printf("%s\n", d.c_str());
     return 0;
   }
   if (cmd == "play" && argc >= 3) {
@@ -108,7 +128,7 @@ int main(int argc, char** argv) {
     Library lib(data + "/library.db");
     if (cmd == "import") {
       ImportOptions o;
-      const std::string src_dir = home() + "/Library/Pioneer/rekordbox";
+      const std::string src_dir = source_library_dir();
       o.source_db = arg_value(argc, argv, "--source", (src_dir + "/master.db").c_str());
       o.analysis_root = arg_value(argc, argv, "--analysis", (src_dir + "/share").c_str());
       o.key = read_file_trimmed(arg_value(argc, argv, "--key-file", (data + "/source-v6.key").c_str()));

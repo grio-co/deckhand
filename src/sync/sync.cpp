@@ -1,6 +1,7 @@
 #include "deckhand/sync/sync.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -43,7 +44,14 @@ const FieldDef kTrackFields[] = {
     {"gain_db", Val::Real}};
 constexpr int kNumTrackFields = static_cast<int>(sizeof kTrackFields / sizeof kTrackFields[0]);
 
+// A Windows path ("C:\x", "C:/x", "\\server\share") stored under the system root '/' stands for itself.
+bool is_windows_absolute(const std::string& p) {
+  return (p.size() >= 3 && std::isalpha(static_cast<unsigned char>(p[0])) && p[1] == ':' && (p[2] == '\\' || p[2] == '/')) ||
+         (p.size() >= 3 && p[0] == '\\' && p[1] == '\\');
+}
+
 std::string join_path(const std::string& root, const std::string& rel) {
+  if (root == "/" && is_windows_absolute(rel)) return rel;
   if (root.empty() || root.back() == '/') return root + rel;
   return root + "/" + rel;
 }

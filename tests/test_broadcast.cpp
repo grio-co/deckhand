@@ -1,8 +1,14 @@
+#if defined(_WIN32)
+#include <process.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -27,6 +33,40 @@ using namespace deckhand::broadcast;
 namespace fs = std::filesystem;
 
 namespace {
+
+// ---- the few places where Winsock and BSD sockets differ ----------------------------------------
+#if defined(_WIN32)
+#if defined(_MSC_VER)
+using ssize_t = SSIZE_T;
+#endif
+struct WinsockInit {
+  WinsockInit() {
+    WSADATA d;
+    WSAStartup(MAKEWORD(2, 2), &d);
+  }
+} g_winsock_init;
+void sock_close(int fd) { ::closesocket(static_cast<SOCKET>(fd)); }
+bool sock_readable(int fd, int ms) {
+  WSAPOLLFD p{static_cast<SOCKET>(fd), POLLRDNORM, 0};
+  return WSAPoll(&p, 1, ms) > 0;
+}
+void set_rcv_timeout(int fd, int ms) {  // Winsock takes a DWORD of milliseconds
+  const DWORD t = static_cast<DWORD>(ms);
+  setsockopt(static_cast<SOCKET>(fd), SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&t), sizeof t);
+}
+long process_id() { return static_cast<long>(_getpid()); }
+#else
+void sock_close(int fd) { ::close(fd); }
+bool sock_readable(int fd, int ms) {
+  pollfd p{fd, POLLIN, 0};
+  return ::poll(&p, 1, ms) > 0;
+}
+void set_rcv_timeout(int fd, int ms) {
+  timeval tv{ms / 1000, (ms % 1000) * 1000};
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+}
+long process_id() { return static_cast<long>(::getpid()); }
+#endif
 
 // Vector for the OBS auth string, computed independently with Python hashlib / openssl.
 const char* kPassword = "supersecretpassword";
@@ -212,7 +252,7 @@ void test_outputs() {
   CHECK(NowPlaying::render("{artist} - {title} [{key} {bpm}] d{deck} {nope} {", t) ==
         "Björk - Jóga [5A 128.0] d2 {nope} {");
 
-  const fs::path dir = fs::temp_directory_path() / ("dh-broadcast-test-" + std::to_string(::getpid()));
+  const fs::path dir = fs::temp_directory_path() / ("dh-broadcast-test-" + std::to_string(process_id()));
   fs::remove_all(dir);
   NowPlayingConfig c;
   c.hold_seconds = 0;
@@ -253,8 +293,7 @@ int dial(std::uint16_t port, int rcv_ms = 3000) {
   a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   a.sin_port = htons(port);
   CHECK(::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0);
-  timeval tv{rcv_ms / 1000, (rcv_ms % 1000) * 1000};
-  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  set_rcv_timeout(fd, rcv_ms);
 #ifdef SO_NOSIGPIPE
   const int one = 1;
   setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
@@ -280,7 +319,7 @@ std::string http_exchange(std::uint16_t port, const std::string& raw) {
     if (n <= 0) break;
     resp.append(buf, static_cast<std::size_t>(n));
   }
-  ::close(fd);
+  sock_close(fd);
   return resp;
 }
 
@@ -327,7 +366,7 @@ void test_http() {
   s.decks[0] = deck("Second", true, 1);
   np.update(s, 1);
   CHECK(read_until(sse, "Second", acc, 3));
-  ::close(sse);
+  sock_close(sse);
 
   // Rejections.
   CHECK(http_exchange(port, "BOGUS\r\n\r\n").rfind("HTTP/1.1 400", 0) == 0);
@@ -350,7 +389,7 @@ class MockObs {
   explicit MockObs(bool with_password) : with_password_(with_password) {
     lfd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     const int one = 1;
-    setsockopt(lfd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(lfd_, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof one);
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -363,7 +402,7 @@ class MockObs {
   ~MockObs() {
     stop_ = true;
     th_.join();
-    ::close(lfd_);
+    sock_close(lfd_);
   }
   std::uint16_t port = 0;
   std::mutex m;
@@ -405,18 +444,16 @@ class MockObs {
 
   void loop() {
     while (!stop_) {
-      pollfd p{lfd_, POLLIN, 0};
-      if (::poll(&p, 1, 50) <= 0) continue;
+      if (!sock_readable(lfd_, 50)) continue;
       const int fd = ::accept(lfd_, nullptr, nullptr);
       if (fd < 0) continue;
-      timeval tv{0, 100000};
-      setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+      set_rcv_timeout(fd, 100);
 #ifdef SO_NOSIGPIPE
       const int one = 1;
       setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
       serve(fd);
-      ::close(fd);
+      sock_close(fd);
     }
   }
 

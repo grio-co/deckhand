@@ -61,10 +61,14 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
   a relaunched UI re-attaches to the running decks. In-process mode remains (`engine.process`).
 - Library sync without a server: per-device change logs in any replicated folder or USB stick,
   merged field by field with convergent playlist ordering ([docs/SYNC.md](docs/SYNC.md)).
+- Windows port: Win32 shell with a Direct3D 11 renderer and DirectWrite text, Media Foundation
+  decoding, WinMM MIDI, Winsock and shared-memory layers, cross-build container and a native
+  build script ([docs/WINDOWS.md](docs/WINDOWS.md)). Tests pass under Wine; not yet run on Windows.
 - Build option `DECKHAND_WITH_API` to leave out the API server where OpenSSL is unavailable.
 - Tests for the library, analysis, API, export, effects, scheduling, languages, skins and streaming.
 
 ### Fixed
+- Windows paths are no longer stored with a leading slash in the library and sync code.
 - The macOS build script no longer bundles a stale core library after a compile error.
 - iOS: the engine no longer overrides the audio session the shell configures.
 

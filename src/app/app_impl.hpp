@@ -272,8 +272,13 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void request_load(int deck, std::int64_t track_id);
   bool record(bool start, std::string& path, std::string& error);
   std::string source_db() const {
+#if defined(_WIN32)
+    const char* base = std::getenv("APPDATA");
+    return base ? std::string(base) + "\\Pioneer\\rekordbox\\master.db" : std::string();
+#else
     const char* home = std::getenv("HOME");
     return home ? std::string(home) + "/Library/Pioneer/rekordbox/master.db" : std::string();
+#endif
   }
 
   // ---- browser state (app.cpp) ---------------------------------------------------

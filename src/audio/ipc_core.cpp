@@ -142,6 +142,11 @@ bool build_block(const std::string& name, BlockKind kind, int slot, std::uint64_
   if (!audio.ext_pcm && audio.pcm.size() < audio.frames * 2) return fail(error, "audio shorter than its frame count");
   const Layout l = layout_for(audio.frames, grid.size(), cues.size());
   Shm shm;
+#if defined(_WIN32)
+  // A segment name lives as long as its creator's handle, and the engine's Shm::remove() cannot drop ours (POSIX lets either
+  // side unlink). This slot's previous block was mapped by the engine many loads ago: let go of its name before reusing it.
+  Shm::remove(name);
+#endif
   if (!Shm::create(name, l.total, shm, error, /*replace=*/false)) return false;
   auto* base = static_cast<std::uint8_t*>(shm.data());
   BlockHeader h = proto;

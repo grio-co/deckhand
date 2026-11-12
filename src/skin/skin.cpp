@@ -997,8 +997,8 @@ ParseResult load_skin(const std::string& path) {
     bool bad = false;
     auto check_file = [&](const std::string& rel) {
       fs::path full = fs::weakly_canonical(root / rel, ec);
-      const std::string rs = root.string() + "/";
-      if (ec || full.string().compare(0, rs.size(), rs) != 0) {
+      const fs::path inside = full.lexically_relative(root);  // separator-independent (Windows uses '\\')
+      if (ec || inside.empty() || inside == "." || *inside.begin() == "..") {
         res.messages.push_back({Message::Severity::Error, 0, "'" + rel + "' resolves outside the skin directory"});
         bad = true;
         return;

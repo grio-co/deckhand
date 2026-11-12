@@ -1,11 +1,15 @@
 // Engine-process IPC tests: lock-free structures (threads and fork), validation of everything the engine maps or
 // receives (fuzzed), and the real deckhand-engine binary driven through RemoteEngine, including a UI killed with
 // SIGKILL, an engine killed with SIGKILL, recording across both and stale-segment cleanup.
+// On Windows the fork / kill / SIGTERM parts do not exist; platform/windows/tests/ipc_test.cpp covers the Windows IPC layer and
+// the engine process (TerminateProcess instead of SIGKILL).
 // Build with -fsanitize=address,undefined to check the engine-side parsers for out-of-bounds reads.
+#if !defined(_WIN32)
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -39,7 +43,7 @@ void note(const char* fmt, auto... a) {
   std::fflush(stdout);
 }
 
-double now_s() { return static_cast<double>(now_ns()) / 1e9; }
+[[maybe_unused]] double now_s() { return static_cast<double>(now_ns()) / 1e9; }
 
 std::unique_ptr<LoadedTrack> sine_track(double seconds, std::uint32_t sr = 44100, std::int64_t id = 77, const char* path = "/music/test tone.wav") {
   auto audio = std::make_shared<TrackAudio>();
@@ -70,11 +74,21 @@ Command cmd(Op op, int deck, float f = 0, int i = 0, double d = 0) {
   return c;
 }
 
+#if defined(_WIN32)
+void* shared_anon(std::size_t n) {  // one process only here (the fork test is POSIX-only)
+  void* p = std::calloc(1, n);
+  CHECK(p != nullptr);
+  return p;
+}
+void shared_free(void* p, std::size_t) { std::free(p); }
+#else
 void* shared_anon(std::size_t n) {
   void* p = mmap(nullptr, n, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
   CHECK(p != MAP_FAILED);
   return p;
 }
+void shared_free(void* p, std::size_t n) { munmap(p, n); }
+#endif
 
 // ================================================================== lock-free structures
 struct Blob {
@@ -190,6 +204,7 @@ void test_spsc_threads() {
   delete st;
 }
 
+#if !defined(_WIN32)
 // Same structures, two processes: a child hammers commands and snapshots, the parent checks them.
 void test_fork_shared() {
   auto* sh = static_cast<Shared*>(shared_anon(sizeof(Shared)));
@@ -248,8 +263,10 @@ void test_fork_shared() {
   WireCommand r;
   CHECK(sh->cmd.pop(r) && r.d == 42);
   note("fork: ring usable again after a producer was killed mid-stream");
-  munmap(sh, sizeof(Shared));
+  shared_free(sh, sizeof(Shared));
 }
+
+#endif  // !_WIN32
 
 // ================================================================== validation
 std::vector<std::uint8_t> block_bytes(const LoadedTrack& t, BlockKind kind = BlockKind::Track) {
@@ -499,10 +516,11 @@ void test_commands_and_wire() {
     std::string err;
     CHECK(!check_shared(sh, sizeof(Shared), err));
   }
-  munmap(sh, sizeof(Shared));
+  shared_free(sh, sizeof(Shared));
   note("garbage segment: rings and snapshots stay in bounds");
 }
 
+#if !defined(_WIN32)
 // ================================================================== two processes, real engine binary
 struct Wav {
   bool valid = false;
@@ -824,6 +842,8 @@ void test_second_instance(const std::string& base) {
   c.shutdown_remote(0);
 }
 
+#endif  // !_WIN32
+
 }  // namespace
 
 int main(int, char** argv) {
@@ -834,9 +854,15 @@ int main(int, char** argv) {
   test_seqlock_threads();
   test_ring_threads();
   test_spsc_threads();
+#if !defined(_WIN32)
   test_fork_shared();
+#endif
   test_blocks();
   test_commands_and_wire();
+#if defined(_WIN32)
+  std::printf("engine ipc ok (portable parts; the fork and kill tests are POSIX-only, see platform/windows/tests/ipc_test.cpp)\n");
+  return 0;
+#else
 
   if (!fs::exists(g_helper)) {
     std::printf("deckhand-engine not built (%s): skipping the two-process tests\n", g_helper.c_str());
@@ -852,4 +878,5 @@ int main(int, char** argv) {
   fs::remove_all(base);
   std::printf("engine ipc ok\n");
   return 0;
+#endif
 }

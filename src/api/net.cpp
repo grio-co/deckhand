@@ -1,19 +1,11 @@
 #include "net.hpp"
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
-#include <poll.h>
-#include <signal.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 
@@ -24,13 +16,8 @@ namespace deckhand::api::net {
 
 namespace {
 void set_nonblock(Fd fd) {
-  int fl = fcntl(fd, F_GETFL, 0);
-  if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-  int one = 1;
-#ifdef SO_NOSIGPIPE
-  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
-#endif
-  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+  set_nonblocking(fd);
+  set_nodelay(fd);
 }
 
 std::string ip_of(const sockaddr_storage& ss) {
@@ -59,15 +46,11 @@ int ms_left(std::chrono::steady_clock::time_point deadline) {
 }  // namespace
 
 void init() {
-  static const bool once = [] {
-    signal(SIGPIPE, SIG_IGN);
-    return true;
-  }();
-  (void)once;
+  ensure_sockets();
 }
 
 void close_fd(Fd fd) {
-  if (fd != kBadFd) ::close(fd);
+  if (fd != kBadFd) close_socket(fd);
 }
 
 bool is_loopback_address(const std::string& a) {
@@ -91,25 +74,27 @@ Fd listen_tcp(const std::string& addr, std::uint16_t port, std::uint16_t* bound,
     if (err) *err = "invalid bind address: " + addr;
     return kBadFd;
   }
-  Fd fd = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+  Fd fd = static_cast<Fd>(::socket(res->ai_family, res->ai_socktype, res->ai_protocol));
   if (fd < 0) {
     freeaddrinfo(res);
     if (err) *err = "socket() failed";
     return kBadFd;
   }
+#if !defined(_WIN32)  // on Windows SO_REUSEADDR would let another process share the port
   int one = 1;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-  if (::bind(fd, res->ai_addr, res->ai_addrlen) != 0 || ::listen(fd, 64) != 0) {
-    if (err) *err = std::string("cannot listen on ") + addr + ": " + std::strerror(errno);
+#endif
+  if (::bind(raw(fd), res->ai_addr, static_cast<SockLen>(res->ai_addrlen)) != 0 || ::listen(raw(fd), 64) != 0) {
+    if (err) *err = std::string("cannot listen on ") + addr + ": " + error_text(last_error());
     freeaddrinfo(res);
-    ::close(fd);
+    close_socket(fd);
     return kBadFd;
   }
   freeaddrinfo(res);
   set_nonblock(fd);
   sockaddr_storage ss{};
-  socklen_t sl = sizeof ss;
-  if (getsockname(fd, reinterpret_cast<sockaddr*>(&ss), &sl) == 0 && bound) {
+  SockLen sl = sizeof ss;
+  if (getsockname(raw(fd), reinterpret_cast<sockaddr*>(&ss), &sl) == 0 && bound) {
     *bound = ss.ss_family == AF_INET ? ntohs(reinterpret_cast<sockaddr_in*>(&ss)->sin_port)
                                      : ntohs(reinterpret_cast<sockaddr_in6*>(&ss)->sin6_port);
   }
@@ -117,12 +102,12 @@ Fd listen_tcp(const std::string& addr, std::uint16_t port, std::uint16_t* bound,
 }
 
 Fd accept_conn(Fd listen, Fd wake, int timeout_ms, std::string* peer_ip) {
-  pollfd p[2] = {{listen, POLLIN, 0}, {wake, POLLIN, 0}};
-  int n = ::poll(p, wake == kBadFd ? 1 : 2, timeout_ms);
-  if (n <= 0 || !(p[0].revents & POLLIN)) return kBadFd;
+  PollItem p[2] = {{listen, kPollIn, 0}, {wake, kPollIn, 0}};
+  int n = poll_items(p, wake == kBadFd ? 1 : 2, timeout_ms);
+  if (n <= 0 || !(p[0].revents & kPollIn)) return kBadFd;
   sockaddr_storage ss{};
-  socklen_t sl = sizeof ss;
-  Fd c = ::accept(listen, reinterpret_cast<sockaddr*>(&ss), &sl);
+  SockLen sl = sizeof ss;
+  Fd c = static_cast<Fd>(::accept(raw(listen), reinterpret_cast<sockaddr*>(&ss), &sl));
   if (c < 0) return kBadFd;
   set_nonblock(c);
   if (peer_ip) *peer_ip = ip_of(ss);
@@ -139,9 +124,9 @@ Fd connect_tcp(const std::string& host, std::uint16_t port, std::string* err) {
     if (err) *err = "resolve failed";
     return kBadFd;
   }
-  Fd fd = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-  if (fd >= 0 && ::connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
-    ::close(fd);
+  Fd fd = static_cast<Fd>(::socket(res->ai_family, res->ai_socktype, res->ai_protocol));
+  if (fd >= 0 && ::connect(raw(fd), res->ai_addr, static_cast<SockLen>(res->ai_addrlen)) != 0) {
+    close_socket(fd);
     fd = kBadFd;
   }
   freeaddrinfo(res);
@@ -153,6 +138,51 @@ Fd connect_tcp(const std::string& host, std::uint16_t port, std::string* err) {
   return fd;
 }
 
+#if defined(_WIN32)
+// Winsock has no pipe(): a connected loopback pair does the same job.
+bool Wake::open() {
+  ensure_sockets();
+  SOCKET l = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (l == INVALID_SOCKET) return false;
+  sockaddr_in a{};
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  int len = sizeof a;
+  SOCKET c = INVALID_SOCKET, s = INVALID_SOCKET;
+  bool ok = ::bind(l, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0 && ::listen(l, 1) == 0 &&
+            getsockname(l, reinterpret_cast<sockaddr*>(&a), &len) == 0;
+  if (ok) {
+    c = ::socket(AF_INET, SOCK_STREAM, 0);
+    ok = c != INVALID_SOCKET && ::connect(c, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0;
+  }
+  if (ok) {
+    s = ::accept(l, nullptr, nullptr);
+    ok = s != INVALID_SOCKET;
+  }
+  ::closesocket(l);
+  if (!ok) {
+    if (c != INVALID_SOCKET) ::closesocket(c);
+    if (s != INVALID_SOCKET) ::closesocket(s);
+    return false;
+  }
+  r = static_cast<Fd>(s);
+  w = static_cast<Fd>(c);
+  set_nonblocking(r);
+  set_nonblocking(w);
+  return true;
+}
+void Wake::signal() {
+  if (w != kBadFd) {
+    char c = 1;
+    (void)sock_send(w, &c, 1);
+  }
+}
+void Wake::drain() {
+  char buf[64];
+  while (r != kBadFd && sock_recv(r, buf, sizeof buf) > 0) {
+  }
+}
+#else
 bool Wake::open() {
   int fds[2];
   if (::pipe(fds) != 0) return false;
@@ -175,6 +205,7 @@ void Wake::drain() {
   while (r != kBadFd && ::read(r, buf, sizeof buf) > 0) {
   }
 }
+#endif
 void Wake::close() {
   close_fd(r);
   close_fd(w);
@@ -235,15 +266,15 @@ Stream::~Stream() {
 
 void Stream::shutdown() {
   Fd f = fd_.load();
-  if (f != kBadFd) ::shutdown(f, SHUT_RDWR);
+  if (f != kBadFd) shutdown_both(f);
 }
 
 int Stream::io_wait(short events, int timeout_ms) {
-  pollfd p{fd_.load(), events, 0};
-  int n = ::poll(&p, 1, timeout_ms);
-  if (n < 0) return errno == EINTR ? 0 : -1;
+  PollItem p{fd_.load(), events, 0};
+  int n = poll_items(&p, 1, timeout_ms);
+  if (n < 0) return would_block(last_error()) ? 0 : -1;
   if (n == 0) return 0;
-  return (p.revents & (POLLERR | POLLNVAL)) ? -1 : 1;
+  return (p.revents & kPollErr) ? -1 : 1;
 }
 
 static bool tls_handshake(Stream& s, SSL* ssl, bool server, int timeout_ms,
@@ -254,8 +285,8 @@ static bool tls_handshake(Stream& s, SSL* ssl, bool server, int timeout_ms,
     if (r == 1) return true;
     int e = SSL_get_error(ssl, r);
     short ev;
-    if (e == SSL_ERROR_WANT_READ) ev = POLLIN;
-    else if (e == SSL_ERROR_WANT_WRITE) ev = POLLOUT;
+    if (e == SSL_ERROR_WANT_READ) ev = kPollIn;
+    else if (e == SSL_ERROR_WANT_WRITE) ev = kPollOut;
     else {
       ERR_clear_error();
       return false;
@@ -271,7 +302,7 @@ static bool tls_handshake(Stream& s, SSL* ssl, bool server, int timeout_ms,
 bool Stream::start_tls_server(TlsContext& ctx, int timeout_ms) {
   SSL* ssl = SSL_new(static_cast<SSL_CTX*>(ctx.handle()));
   if (!ssl) return false;
-  SSL_set_fd(ssl, fd_.load());
+  SSL_set_fd(ssl, static_cast<int>(fd_.load()));
   ssl_ = ssl;
   return tls_handshake(*this, ssl, true, timeout_ms, [](Stream& s, short ev, int t) { return s.io_wait(ev, t); });
 }
@@ -279,7 +310,7 @@ bool Stream::start_tls_server(TlsContext& ctx, int timeout_ms) {
 bool Stream::start_tls_client(TlsContext& ctx, int timeout_ms) {
   SSL* ssl = SSL_new(static_cast<SSL_CTX*>(ctx.handle()));
   if (!ssl) return false;
-  SSL_set_fd(ssl, fd_.load());
+  SSL_set_fd(ssl, static_cast<int>(fd_.load()));
   ssl_ = ssl;
   return tls_handshake(*this, ssl, false, timeout_ms, [](Stream& s, short ev, int t) { return s.io_wait(ev, t); });
 }
@@ -302,12 +333,12 @@ std::string Stream::peer_cert_fingerprint() const {
 
 int Stream::wait_readable(Fd wake, int timeout_ms) {
   if (ssl_ && SSL_pending(static_cast<SSL*>(ssl_)) > 0) return 1;
-  pollfd p[2] = {{fd_.load(), POLLIN, 0}, {wake, POLLIN, 0}};
-  int n = ::poll(p, wake == kBadFd ? 1 : 2, timeout_ms);
-  if (n < 0) return errno == EINTR ? 0 : -1;
+  PollItem p[2] = {{fd_.load(), kPollIn, 0}, {wake, kPollIn, 0}};
+  int n = poll_items(p, wake == kBadFd ? 1 : 2, timeout_ms);
+  if (n < 0) return would_block(last_error()) ? 0 : -1;
   if (n == 0) return 0;
-  if (p[0].revents & (POLLIN | POLLHUP | POLLERR)) return 1;
-  if (wake != kBadFd && (p[1].revents & POLLIN)) return 2;
+  if (p[0].revents & (kPollIn | kPollHup | kPollErr)) return 1;
+  if (wake != kBadFd && (p[1].revents & kPollIn)) return 2;
   return 0;
 }
 
@@ -320,9 +351,9 @@ long Stream::read(void* buf, std::size_t n) {
     ERR_clear_error();
     return (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) ? 0 : -1;
   }
-  ssize_t r = ::recv(fd_.load(), buf, n, 0);
+  long r = sock_recv(fd_.load(), buf, n);
   if (r > 0) return r;
-  if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
+  if (r < 0 && would_block(last_error())) return 0;
   return -1;
 }
 
@@ -330,7 +361,7 @@ bool Stream::write_all(const void* data, std::size_t n, int timeout_ms) {
   const char* p = static_cast<const char*>(data);
   auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   while (n > 0) {
-    short ev = POLLOUT;
+    short ev = kPollOut;
     if (ssl_) {
       SSL* ssl = static_cast<SSL*>(ssl_);
       int r = SSL_write(ssl, p, static_cast<int>(n > 1 << 20 ? 1 << 20 : n));
@@ -341,22 +372,16 @@ bool Stream::write_all(const void* data, std::size_t n, int timeout_ms) {
       }
       int e = SSL_get_error(ssl, r);
       ERR_clear_error();
-      if (e == SSL_ERROR_WANT_READ) ev = POLLIN;
+      if (e == SSL_ERROR_WANT_READ) ev = kPollIn;
       else if (e != SSL_ERROR_WANT_WRITE) return false;
     } else {
-      ssize_t r = ::send(fd_.load(), p, n,
-#ifdef MSG_NOSIGNAL
-                         MSG_NOSIGNAL
-#else
-                         0
-#endif
-      );
+      long r = sock_send(fd_.load(), p, n);
       if (r > 0) {
         p += r;
         n -= static_cast<std::size_t>(r);
         continue;
       }
-      if (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return false;
+      if (r < 0 && !would_block(last_error())) return false;
     }
     int left = ms_left(deadline);
     if (left == 0 || io_wait(ev, left) < 0) return false;

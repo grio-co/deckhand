@@ -1,18 +1,17 @@
 #pragma once
 // Internal: the only place that touches sockets and OpenSSL. Everything else in the module
-// talks to these wrappers, so a Winsock port only has to replace net.cpp.
+// talks to these wrappers; sockport.hpp hides the Winsock / BSD differences.
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
 
+#include "sockport.hpp"
+
 namespace deckhand::api::net {
 
-using Fd = int;
-constexpr Fd kBadFd = -1;
-
-void init();  // process-wide setup (ignores SIGPIPE)
+void init();  // process-wide setup (ignores SIGPIPE; starts Winsock on Windows)
 void close_fd(Fd fd);
 bool is_loopback_address(const std::string& addr);
 // Binds and listens (non-blocking). Returns kBadFd with *err on failure.
@@ -66,7 +65,7 @@ class Stream {
   void shutdown();  // thread-safe; the owner still closes via the destructor
 
  private:
-  int io_wait(short events, int timeout_ms);
+  int io_wait(short events, int timeout_ms);  // events: sockport kPollIn / kPollOut
   std::atomic<Fd> fd_;
   void* ssl_ = nullptr;
 };

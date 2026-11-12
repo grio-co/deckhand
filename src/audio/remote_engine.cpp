@@ -304,6 +304,9 @@ void RemoteEngine::shutdown_remote(int fade_ms) {
     if (!process_alive(l->pid)) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
+  // On Windows a block's name lives as long as our handle to it (the engine's Shm::remove cannot drop it): release them.
+  if (!process_alive(l->pid))
+    for (int i = 0; i < kBlockSlots; ++i) Shm::remove(names_->block(i));
   std::lock_guard<std::mutex> lock(link_mutex_);
   link_.reset();
 }

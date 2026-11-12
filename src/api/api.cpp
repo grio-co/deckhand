@@ -1,23 +1,22 @@
 // api: authentication primitives (scopes, token store, rate limiting). The HTTP/WebSocket
 // transport lives in server.cpp.
-#include <arpa/inet.h>
-#include <fcntl.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
 #include "deckhand/api/auth.hpp"
 #include "deckhand/api/json.hpp"
+#include "fileio.hpp"
+#include "sockport.hpp"
 
 namespace deckhand::api {
 
@@ -173,7 +172,8 @@ bool TokenStore::load(std::string* error) {
   if (path_.empty()) return true;
   std::ifstream f(path_, std::ios::binary);
   if (!f) {
-    if (access(path_.c_str(), F_OK) != 0) return true;  // first run
+    std::error_code ec;
+    if (!std::filesystem::exists(path_, ec)) return true;  // first run
     load_failed_ = true;
     if (error) *error = "cannot read " + path_;
     return false;
@@ -240,26 +240,7 @@ bool TokenStore::save_locked(std::string* error) const {
   }
   root.set("tokens", std::move(arr));
   const std::string data = root.dump();
-  const std::string tmp = path_ + ".tmp";
-  int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-  if (fd < 0) {
-    if (error) *error = "cannot write " + tmp;
-    return false;
-  }
-  fchmod(fd, 0600);
-  bool ok = true;
-  const char* p = data.data();
-  std::size_t left = data.size();
-  while (left > 0) {
-    ssize_t n = ::write(fd, p, left);
-    if (n <= 0) { ok = false; break; }
-    p += n;
-    left -= static_cast<std::size_t>(n);
-  }
-  ok = ok && fsync(fd) == 0;
-  ::close(fd);
-  if (!ok || std::rename(tmp.c_str(), path_.c_str()) != 0) {
-    ::unlink(tmp.c_str());
+  if (!write_file_atomic(path_, data, true)) {
     if (error) *error = "cannot save " + path_;
     return false;
   }

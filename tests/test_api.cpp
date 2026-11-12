@@ -1,5 +1,7 @@
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 #include <chrono>
 #include <cstdio>
@@ -143,7 +145,11 @@ void test_token_store(const std::string& dir) {
   CHECK(ts.create("stage", {"read", "control:deck:1"}, 0, {"127.0.0.0/8"}, &c, &err));
   CHECK(c.secret.size() == 3 + 64 && c.secret.rfind("dh_", 0) == 0);
   struct stat st;
+#if defined(_WIN32)
+  CHECK(stat(path.c_str(), &st) == 0);  // POSIX mode bits do not exist here: the file gets an owner-only ACL instead
+#else
   CHECK(stat(path.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+#endif
   std::string disk = read_all(path);
   CHECK(disk.find(c.secret) == std::string::npos);                         // secret is never stored
   CHECK(disk.find(sha256_hex(c.secret)) != std::string::npos);             // only its hash
@@ -734,7 +740,11 @@ void test_server(const std::string& dir) {
     CHECK(!generate_self_signed(cert, key, {"bad host!"}, &err));
     CHECK(generate_self_signed(cert, key, {"deckhand.local", "192.168.9.9"}, &err));
     struct stat st;
+#if defined(_WIN32)
+    CHECK(stat(key.c_str(), &st) == 0);
+#else
     CHECK(stat(key.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+#endif
     std::string pem = read_all(cert);
     CHECK(pem.find("BEGIN CERTIFICATE") != std::string::npos && read_all(key).find("PRIVATE KEY") != std::string::npos);
     std::string fp;

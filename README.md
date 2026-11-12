@@ -35,6 +35,8 @@ full control API.
 - Controllers: declarative mapping files, any matching MIDI device; DDJ-FLX4 mapping included.
 - Linux: builds and passes its tests in an Ubuntu container and renders under a virtual
   display ([docs/LINUX.md](docs/LINUX.md)); not yet run on a real Linux machine.
+- Windows: cross-compiles and passes its tests under Wine, and renders correctly there
+  ([docs/WINDOWS.md](docs/WINDOWS.md)); not yet built or run on a real Windows machine.
 - Portable mode: put a file named `portable` beside the app and all data stays next to it.
 
 - Skins: the whole UI is drawn from declarative skin files ([docs/SKINS.md](docs/SKINS.md));
