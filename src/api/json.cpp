@@ -1,5 +1,7 @@
 #include "deckhand/api/json.hpp"
 
+#include <locale>
+#include <sstream>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -207,12 +209,12 @@ class JsonParser {
         case 'r': out += '\r'; break;
         case 't': out += '\t'; break;
         case 'u': {
-          std::uint32_t cp;
+          std::uint32_t cp = 0;
           if (!hex4(cp)) return false;
           if (cp >= 0xD800 && cp <= 0xDBFF) {
             if (e_ - p_ < 6 || p_[0] != '\\' || p_[1] != 'u') return fail("unpaired surrogate");
             p_ += 2;
-            std::uint32_t lo;
+            std::uint32_t lo = 0;
             if (!hex4(lo)) return false;
             if (lo < 0xDC00 || lo > 0xDFFF) return fail("unpaired surrogate");
             cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
@@ -255,9 +257,13 @@ class JsonParser {
       auto r = std::from_chars(s, q, v);
       if (r.ec == std::errc() && r.ptr == q) { out = Json(v); return true; }
     }
+    // Floating-point std::from_chars is missing on older Apple systems; the token is already
+    // validated against the JSON grammar, so parse it with a stream fixed to the classic locale.
     double d = 0;
-    auto r = std::from_chars(s, q, d);
-    if (r.ec != std::errc() || r.ptr != q || !std::isfinite(d)) return fail("number out of range");
+    std::istringstream in(std::string(s, q));
+    in.imbue(std::locale::classic());
+    in >> d;
+    if (in.fail() || !std::isfinite(d)) return fail("number out of range");
     out = Json(d);
     return true;
   }
