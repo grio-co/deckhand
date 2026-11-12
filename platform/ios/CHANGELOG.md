@@ -1,5 +1,6 @@
 # iOS changelog
 ## Unreleased
+- Merged skin-driven core: DECKHAND_WITH_API=OFF, new libs linked, skins/lang bundled (controllers were not being bundled before); Bluetooth buttons moved bottom-left
 - Bluetooth: native MIDI pairing sheet and audio route picker overlay; AirPlay allowed in the audio session
 - Swift/UIKit shell: Metal draw-list renderer, CoreText rasteriser, multi-touch, keyboard, safe areas.
 - AVAudioSession, CoreMIDI, document picker + bookmarks, background audio.
