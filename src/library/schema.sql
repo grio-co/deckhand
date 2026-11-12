@@ -28,6 +28,7 @@ CREATE TABLE beatgrids (
   position INTEGER NOT NULL,     -- ordinal of the tempo section
   first_beat_ms REAL NOT NULL,
   bpm REAL NOT NULL,
+  bar_beat INTEGER NOT NULL DEFAULT 1,  -- 1..4: position of the first beat within its bar
   PRIMARY KEY (track_id, position)
 );
 

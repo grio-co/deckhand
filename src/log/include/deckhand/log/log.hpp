@@ -1,6 +1,7 @@
 #pragma once
 // Four public levels plus a hidden TRACE (symbol tracing, enabled only by explicit flag).
 // The audio thread must never log directly; it posts to a lock-free ring buffer.
+#include <string>
 #include <string_view>
 
 namespace deckhand::log {
@@ -10,7 +11,10 @@ enum class Level { Error = 0, Warn = 1, Info = 2, Debug = 3, Trace = 4 };
 void set_level(Level);
 Level level();
 bool enabled(Level);
+// Also append log lines to this file (empty path disables).
+void set_file(const std::string& path);
 void write(Level, std::string_view message);
+void writef(Level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 
 constexpr std::string_view name(Level l) {
   switch (l) {
@@ -24,3 +28,9 @@ constexpr std::string_view name(Level l) {
 }
 
 }  // namespace deckhand::log
+
+#define DH_LOG(lvl, ...)                                                        \
+  do {                                                                          \
+    if (::deckhand::log::enabled(::deckhand::log::Level::lvl))                  \
+      ::deckhand::log::writef(::deckhand::log::Level::lvl, __VA_ARGS__);        \
+  } while (0)

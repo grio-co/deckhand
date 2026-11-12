@@ -3,33 +3,37 @@
 Living list; milestones match [ROADMAP.md](ROADMAP.md). Tick items as they land and mirror
 them in [CHANGELOG.md](CHANGELOG.md).
 
-## Groundwork
-- [x] Repository, CMake skeleton, module layout, licence
-- [x] Draft library schema
-- [ ] Test data (fake source library, royalty-free tracks)
-- [ ] Choose test framework (Catch2 or doctest)
-- [ ] CI on macOS / Windows / Linux (after the Mac version is solid)
+## Now: first hardware test
+- [ ] Run docs/TESTING-FLX4.md on a real DDJ-FLX4; calibrate jog `ticks_per_rev`
+- [ ] Confirm master / headphone level knob behaviour and output channel order
+- [ ] Read controls' initial positions at connect (needs a documented method)
 
-## M1 Import + library
-- [ ] Library storage layer (SQLite) from `docs/SCHEMA.sql`, with migrations
-- [ ] Portable mode path layer (root + relative path, relink tool)
-- [ ] Read-only importer for the source DJ library (works on a copy)
-- [ ] `deckhandctl import` / `list`
+## Done
+- [x] Repository, CMake skeleton, module layout, licence, schema
+- [x] M1 Library storage and read-only importer, `deckhandctl`
+- [x] Audio engine (in-process), decoding, waveforms, tempo detection
+- [x] Generic controller mappings + DDJ-FLX4 mapping (untested on hardware)
+- [x] macOS shell, core-drawn UI, signed app bundle, portable mode
 
-## M2 UI shell
-- [ ] GPU backend decision (WebGPU/Dawn vs native Metal/D3D12/Vulkan)
-- [ ] gfx toolkit: renderer, text, layout, widgets
-- [ ] Skin engine + built-in default skin
-- [ ] i18n modules (`.dhlang`)
-- [ ] Browser, playlists, search
+## Next
+- [ ] Engine in its own process (survives a UI crash)
+- [ ] Key lock / time-stretch; quantise; slip mode
+- [ ] Pad FX, sampler, keyboard and key-shift pad modes; beat FX section
+- [ ] Playlist editing; relink missing tracks; tag editing; sort by column
+- [ ] Audio device chooser and latency setting in the UI; four-deck layout
+- [ ] Skin engine and built-in skin (replaces the layout drawn in code)
+- [ ] Language packs (`.dhlang`)
+- [ ] REST + WebSocket API with scheduled commands
+- [ ] Recording, history log
+- [ ] OBS integration
+- [ ] Full analysis: variable tempo, downbeats, key
+- [ ] CDJ USB export (offline-verified), then the CDJ-3000 test with a reference export
+- [ ] Windows and Linux shells; CI on all three; vendored dependencies for portable builds
+- [ ] iOS app (in progress in `platform/ios`)
+- [ ] Cloud sync
 
-## M3 Audio engine
-- [ ] Separate engine process + API protocol, recording, history log
-
-## Later
-- [ ] M4 DDJ-FLX4 · M5 effects/mixer · M6 OBS streaming · M7 analysis · M8 CDJ export
-- [ ] M9 CDJ-3000 test (needs reference USB export from the owner) · M10 cloud sync
-- [ ] Windows and Linux shells (after the Mac version is solid)
-
-## Open questions
-- GPU backend; Swift/C++ interface design; packaging and updates
+## Known limits of the current build
+- Tracks are decoded fully into memory; tempo changes pitch.
+- Tempo detection assumes a steady tempo and does not find the downbeat.
+- HID controllers and MIDI learn are not supported yet.
+- Built against the host's Homebrew SQLCipher, so the app runs on this macOS version and newer.
