@@ -1,0 +1,47 @@
+name: DeckHand
+options: { bundleIdPrefix: co.grio, deploymentTarget: { iOS: "17.0" }, createIntermediateGroups: true }
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    ONLY_ACTIVE_ARCH: NO
+    ARCHS: arm64
+    CODE_SIGN_STYLE: Manual
+targets:
+  DeckHand:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    resources:
+      - { path: ../../controllers, type: folder, buildPhase: resources }
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: co.grio.deckhand
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging-Header.h
+        HEADER_SEARCH_PATHS: [../../src/app/include]
+        OTHER_LDFLAGS: [-ldh_app, -ldh_midi, -ldh_import, -ldh_library, -ldh_audio, -ldh_gfx, -ldh_log, -ldh_platform, -ldh_miniaudio, -lsqlite3, -lc++, -framework, AudioToolbox, -framework, CoreMIDI, -framework, CoreAudio, -framework, CoreFoundation]
+        "LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]": $(SRCROOT)/build/core-sim
+        "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]": $(SRCROOT)/build/core-device
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Info.plist
+      configs:
+        Debug:
+          CODE_SIGN_IDENTITY[sdk=iphoneos*]: "Apple Development: Grioghar Thomas-Baldwin (7QK88B7T66)"
+          CODE_SIGN_IDENTITY[sdk=iphonesimulator*]: "-"
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: DeckHand
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
+        UIBackgroundModes: [audio]
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSBluetoothAlwaysUsageDescription: DeckHand connects to Bluetooth MIDI controllers.
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
