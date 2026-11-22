@@ -5,10 +5,11 @@ final class CoreBridge {
     private(set) var app: OpaquePointer!
 
     init(dataDir: String, resourceDir: String) {
-        var platform = dh_platform(user: Unmanaged.passUnretained(self).toOpaque()) { _, utf8, px, weight, out in
+        // BT pairing has its own buttons in the shell; no folder picker / export targets on iOS yet (nil = core default).
+        var platform = dh_platform(user: Unmanaged.passUnretained(self).toOpaque(), rasterise_text: { _, utf8, px, weight, out in
             guard let utf8, let out else { return false }
             return TextRasteriser.rasterise(String(cString: utf8), pixelSize: CGFloat(px), bold: weight != 0, into: out)
-        }
+        }, show_bluetooth_midi: nil, choose_folder: nil, list_export_targets: nil)
         app = dataDir.withCString { d in
             resourceDir.withCString { r in
                 // The shell owns the AVAudioSession (manage_audio false); the core opens the route.
