@@ -520,6 +520,126 @@ in abs B0 04 tempo deck=1
     CHECK(std::fabs(k.last().f) < 1e-4f);
   }
 
+  // ---- effect unit assignment, master cue, colour-fx LED, learn choices ----
+  {
+    Rig r(make(R"(
+in button 94 10 fx_assign unit=1 target=deck1
+in button 94 11 fx_assign unit=1 target=deck2
+in button 95 10 fx_assign unit=1 target=master
+in button 94 63 fx_select unit=assigned slot=1 effect=echo
+in button 94 47 fx_on unit=assigned slot=1
+in button 94 4B fx_time unit=1 slot=1 dir=1
+in abs 94 02 fx_wet unit=assigned slot=1
+in button 94 70 master_cue
+in button 94 71 fx_on unit=2 slot=1
+out 94 47 fx_on unit=assigned slot=1
+out 94 10 fx_assign unit=1 target=deck1
+out 94 11 fx_assign unit=1 target=deck2
+out 94 70 master_cue
+out 94 72 color_fx deck=1
+out 94 73 color_fx deck=1 effect=crush
+)", "FxRig"), "FxRig");
+    Sink& k = r.sink;
+    const auto fx_cmds = [&](Op op, int deck) {
+      int n = 0;
+      for (const Command& c : k.commands) n += c.op == op && c.deck == deck;
+      return n;
+    };
+    r.send(0x94, 0x63, 0x7F);  // unit 1 starts on master
+    CHECK(k.last().op == Op::FxSelect && k.last().deck == kFxMaster && static_cast<int>(k.last().d) == int(EffectKind::Echo));
+    r.send(0x94, 0x47, 0x7F);
+    CHECK(k.last().op == Op::FxEnable && k.last().deck == kFxMaster && k.last().f == 1.0f);
+    r.send(0x94, 0x4B, 0x7F);  // time longer: carried over later
+    const float beats = k.last().f;
+    r.send(0x94, 0x10, 0x7F);  // assign to deck 1 while on
+    // old target switched off first, then the effect and time arrive on deck 1
+    int off_at = -1, sel_at = -1;
+    for (std::size_t i = 0; i < k.commands.size(); ++i) {
+      const Command& c = k.commands[i];
+      if (c.op == Op::FxEnable && c.deck == kFxMaster && c.f == 0.0f) off_at = static_cast<int>(i);
+      if (c.op == Op::FxSelect && c.deck == 0) sel_at = static_cast<int>(i);
+    }
+    CHECK(off_at >= 0 && sel_at > off_at);
+    CHECK(static_cast<int>(k.commands[sel_at].d) == int(EffectKind::Echo));
+    CHECK(fx_cmds(Op::FxTime, 0) == 1 && fx_cmds(Op::FxWet, 0) == 1);
+    bool carried = false;
+    for (const Command& c : k.commands) carried |= c.op == Op::FxTime && c.deck == 0 && c.f == beats;
+    CHECK(carried);
+    k.commands.clear();
+    r.send(0x94, 0x47, 0x7F);  // ON now addresses deck 1 (it was left off)
+    CHECK(k.commands.size() == 1 && k.last().op == Op::FxEnable && k.last().deck == 0 && k.last().f == 1.0f);
+    r.send(0x94, 0x10, 0x7F);  // same target again: nothing
+    r.send(0x94, 0x10, 0x00);  // releases never assign
+    CHECK(k.commands.size() == 1);
+    r.send(0x94, 0x11, 0x7F);  // deck 2: deck 1 is switched off
+    CHECK(k.commands[1].op == Op::FxEnable && k.commands[1].deck == 0 && k.commands[1].f == 0.0f);
+    r.send(0x94, 0x02, 0x40);
+    CHECK(k.last().op == Op::FxWet && k.last().deck == 1);
+    r.send(0x94, 0x71, 0x7F);  // unit 2 is still on master
+    CHECK(k.last().op == Op::FxEnable && k.last().deck == kFxMaster);
+
+    // LEDs: assignment, assigned fx_on, master cue, colour effect
+    DeckView dv[kMaxDecks];
+    MixerView mx;
+    mx.head_mix = 0.25f;
+    dv[1].fx[0].on = true;
+    r.hub->tick(dv, kMaxDecks, &mx, nullptr, 0, 0.0);
+    CHECK(r.io.has(0x94, 0x11, 0x7F) && r.io.has(0x94, 0x10, 0x00));
+    CHECK(r.io.has(0x94, 0x47, 0x7F));
+    CHECK(r.io.has(0x94, 0x70, 0x00) && r.io.has(0x94, 0x72, 0x00) && r.io.has(0x94, 0x73, 0x00));
+    dv[0].color_fx = int(ColorFx::DubEcho);
+    r.hub->tick(dv, kMaxDecks, &mx, nullptr, 0, 1.0);
+    CHECK(r.io.has(0x94, 0x72, 0x7F) && r.io.has(0x94, 0x73, 0x00));
+    dv[0].color_fx = int(ColorFx::Crush);
+    r.hub->tick(dv, kMaxDecks, &mx, nullptr, 0, 2.0);
+    CHECK(r.io.has(0x94, 0x73, 0x7F));
+
+    // master cue: remember head mix, go to master, restore
+    k.commands.clear();
+    r.send(0x94, 0x70, 0x7F);
+    CHECK(k.last().op == Op::HeadMix && k.last().f == 1.0f);
+    r.hub->tick(dv, kMaxDecks, &mx, nullptr, 0, 3.0);
+    CHECK(r.io.has(0x94, 0x70, 0x7F));
+    r.send(0x94, 0x70, 0x00);  // release does nothing
+    CHECK(k.commands.size() == 1);
+    r.send(0x94, 0x70, 0x7F);
+    CHECK(k.last().op == Op::HeadMix && k.last().f == 0.25f && k.commands.size() == 2);
+    r.hub->tick(dv, kMaxDecks, &mx, nullptr, 0, 4.0);
+    CHECK(r.io.sent.back()[2] == 0x00);
+  }
+  {  // bad arguments and the reserved mic action
+    Mapping bm;
+    std::string err;
+    CHECK(!parse_mapping("name \"x\"\nmatch \"x\"\nin button 90 01 fx_assign target=deck1\n", bm, err));
+    CHECK(!parse_mapping("name \"x\"\nmatch \"x\"\nin button 90 01 fx_assign unit=1 target=deck9\n", bm, err));
+    CHECK(!parse_mapping("name \"x\"\nmatch \"x\"\nin button 90 01 fx_on unit=9 slot=1\n", bm, err));
+    CHECK(!parse_mapping("name \"x\"\nmatch \"x\"\nin abs14 B6 05 25 mic_level\n", bm, err) &&
+          err.find("microphone") != std::string::npos);
+    CHECK(parse_mapping("name \"x\"\nmatch \"x\"\nout 90 01 master_cue\nout 90 02 fx_assign unit=2 target=deck2\n", bm, err));
+  }
+  {
+    Sink k;
+    ControllerHub h(k, {});
+    for (int decks : {2, 4}) {
+      const std::vector<LearnChoice> choices = learn_choices(decks);
+      CHECK(choices.size() > 50);
+      for (const LearnChoice& c : choices) {
+        const bool ok = !c.label.empty() && !c.group.empty() && h.learn_begin(c.action);
+        if (!ok) std::fprintf(stderr, "bad learn choice: %s / %s (%s)\n", c.group.c_str(), c.label.c_str(), c.action.c_str());
+        CHECK(ok);
+      }
+    }
+    h.learn_cancel();
+    bool play = false, cue_master = false, assign = false;
+    for (const LearnChoice& c : learn_choices())
+      play |= c.group == "Deck 1" && c.label == "Play" && c.action == "play deck=1";
+    for (const LearnChoice& c : learn_choices()) {
+      cue_master |= c.action == "master_cue";
+      assign |= c.action == "fx_assign unit=1 target=deck2";
+    }
+    CHECK(play && cue_master && assign);
+  }
+
   // ---- MIDI learn on a device without a mapping ----
   {
     Rig r(make("", "Never Matches"), "Mystery Controller");

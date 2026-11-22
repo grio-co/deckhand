@@ -55,20 +55,29 @@ Expected for each: pads act as described, and the mode button lights. Report whi
 - Report any SHIFT combination that does something unexpected.
 
 ## 5. Effects section
-- Beat FX FX SELECT steps the master effect (SHIFT + press steps back); BEAT left / right shorten /
-  lengthen the time; ON/OFF toggles it on the master output; LEVEL/DEPTH turns the wet amount.
-- Move the FX channel switch (1, 2, 1&2): ON/OFF must work in all three positions (position 2 sends on
-  a different channel). Report if it only works in some. The switch itself does not change routing.
+- Beat FX FX SELECT steps the effect (SHIFT + press steps back); BEAT left / right shorten /
+  lengthen the time; ON/OFF toggles it on the assigned channel; LEVEL/DEPTH turns the wet amount.
+  DeckHand starts with the beat FX unit on the master bus until the switch is moved once.
+- **Beat FX channel switch (to confirm on hardware).** The list we have does not say which note is which
+  position. The mapping assumes 94 10 = CH1 (deck 1), 94 11 = CH2 (deck 2), 95 10 and 95 11 = CH1&CH2 (master).
+  Move the switch through 1, 2, 1&2 with an effect on: the effect should stop on the old channel and
+  the new channel should get the same effect, wet and time (switched off; press ON again). Report which
+  position moves the effect to which channel and which notes the log shows (wrong guesses: swap the
+  `fx_assign` lines in the file). ON/OFF must work in all three positions (position 2 sends 95 47).
+- MASTER CUE: press, the headphones should switch to the master mix (head mix full master); press again
+  restores the previous head mix. The LED note is assumed to be 96 63 too: report if it stays dark.
+  Moving the headphone mix knob afterwards takes over. SHIFT + MASTER CUE and MIC LEVEL are not mapped.
 - **LEVEL/DEPTH** is the one control whose published status byte and channel column disagree. If the
   knob does nothing, look at the log for the control change it sends (B4 or B5, number 02/22) and report it.
 - SMART CFX button: steps the colour effect the CFX knobs drive (both decks); SHIFT steps back. Report
-  what the CFX knob then does. Not mapped: Smart Fader, MIC level, MASTER CUE, mono/stereo switch.
+  what the CFX knob then does. Its LED (assumed 96 00, lit while a non-default colour effect is on deck 1)
+  is unconfirmed. Not mapped: Smart Fader, MIC level (the engine has no mic input yet), mono/stereo switch.
 
 ## 6. LEDs
 PLAY and CUE, SYNC, headphone CUE, hot cue pads, beat loop and beat jump pads, mode buttons, pad FX pads
 (while an effect is on), sampler pads (while playing), keyboard / key shift pads, IN / OUT, level
-meters, track-loaded lights. Not driven: FX ON/OFF (the list describes blink / lit only in a note),
-SMART CFX, SMART FADER. Report each LED that stays dark, stays lit, or is the wrong colour.
+meters, track-loaded lights, MASTER CUE and SMART CFX (both guessed notes). Not driven: FX ON/OFF (the
+list describes blink / lit only in a note), SMART FADER. Report each LED that stays dark, stays lit, or is the wrong colour.
 
 ## Please report
 The log file (`deckhand.log`), and for anything wrong: what you did, what happened, what you expected.

@@ -31,7 +31,11 @@ void write(Level l, std::string_view m) {
   const std::time_t t = system_clock::to_time_t(now);
   const int ms = static_cast<int>(duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000);
   std::tm tm{};
+#if defined(_WIN32)
+  localtime_s(&tm, &t);
+#else
   localtime_r(&t, &tm);
+#endif
   char stamp[32];
   std::strftime(stamp, sizeof stamp, "%H:%M:%S", &tm);
   std::lock_guard<std::mutex> lock(g_mutex);

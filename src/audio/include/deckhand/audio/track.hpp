@@ -17,6 +17,11 @@ struct TrackAudio {
   std::uint64_t frames = 0;
   std::vector<WavePoint> wave;  // wave_rate points per second
   double wave_rate = 150.0;
+  // Audio that lives elsewhere (a shared-memory block mapped from another process): when set, `pcm` is empty and
+  // `ext_hold` keeps the mapping alive. Read samples through data().
+  const float* ext_pcm = nullptr;
+  std::shared_ptr<const void> ext_hold;
+  const float* data() const { return ext_pcm ? ext_pcm : pcm.data(); }
 };
 
 struct FileTags {

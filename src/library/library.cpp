@@ -17,7 +17,14 @@ const char* const kSchema =
 // Portable layout: every track lives under a root; root 1 is the filesystem root.
 constexpr std::int64_t kSystemRoot = 1;
 
+// A Windows path ("C:\x", "C:/x", "\\server\share") stored under the system root '/' stands for itself.
+bool is_windows_absolute(const std::string& p) {
+  return (p.size() >= 3 && std::isalpha(static_cast<unsigned char>(p[0])) && p[1] == ':' && (p[2] == '\\' || p[2] == '/')) ||
+         (p.size() >= 3 && p[0] == '\\' && p[1] == '\\');
+}
+
 std::string join_path(const std::string& root, const std::string& rel) {
+  if (root == "/" && is_windows_absolute(rel)) return rel;
   if (root.empty() || root.back() == '/') return root + rel;
   return root + "/" + rel;
 }
@@ -26,7 +33,7 @@ std::string rel_of(const std::string& abs) { return abs.size() > 1 && abs[0] == 
 
 std::string extension_of(const std::string& path) {
   const auto dot = path.find_last_of('.');
-  const auto slash = path.find_last_of('/');
+  const auto slash = path.find_last_of("/\\");
   if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) return {};
   std::string ext = path.substr(dot + 1);
   std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });

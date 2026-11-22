@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Placeholder icon: two platters on a dark tile. -->
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="#1b1f2a"/>
+  <circle cx="92" cy="128" r="64" fill="#2c3345"/>
+  <circle cx="92" cy="128" r="46" fill="none" stroke="#4a5470" stroke-width="3"/>
+  <circle cx="92" cy="128" r="28" fill="none" stroke="#4a5470" stroke-width="3"/>
+  <circle cx="92" cy="128" r="10" fill="#f2a63b"/>
+  <circle cx="176" cy="128" r="40" fill="#2c3345"/>
+  <circle cx="176" cy="128" r="26" fill="none" stroke="#4a5470" stroke-width="3"/>
+  <circle cx="176" cy="128" r="8" fill="#3cc4a8"/>
+  <rect x="64" y="200" width="128" height="10" rx="5" fill="#4a5470"/>
+  <rect x="116" y="194" width="24" height="22" rx="5" fill="#f2a63b"/>
+</svg>

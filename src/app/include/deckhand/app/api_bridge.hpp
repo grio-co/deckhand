@@ -12,7 +12,7 @@ namespace deckhand {
 class ApiHost {
  public:
   virtual ~ApiHost() = default;
-  virtual Engine& api_engine() = 0;
+  virtual IEngine& api_engine() = 0;
   virtual bool api_load(int deck, std::int64_t track_id, std::string& error) = 0;
   virtual void api_add_file(const std::string& path, int deck) = 0;  // deck -1 = just add
   virtual bool api_export(const std::string& destination, std::int64_t playlist_id, std::string& error) = 0;

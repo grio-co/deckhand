@@ -333,7 +333,11 @@ std::string analyze_dir(int id) {
 std::string today() {
   const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
   std::tm tm{};
+#if defined(_WIN32)
+  localtime_s(&tm, &now);
+#else
   localtime_r(&now, &tm);
+#endif
   char buf[16];
   std::strftime(buf, sizeof buf, "%Y-%m-%d", &tm);
   return buf;

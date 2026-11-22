@@ -23,8 +23,10 @@ typedef struct {
 
 typedef enum { DH_TEX_A8 = 1, DH_TEX_RGBA8 = 2 } dh_tex_format;
 
-/* Update a region of a texture; create it at tex_w x tex_h if the id is new.
-   For A8 textures the shader output is vertex colour with alpha multiplied by the texel. */
+/* Update a region of a texture; create it at tex_w x tex_h if the id is new. Id 1 is the glyph atlas (A8);
+   the core assigns ids from 2 up to the images it uploads (RGBA8, straight alpha, sampled bilinearly).
+   For A8 textures the shader output is vertex colour with alpha multiplied by the texel; for RGBA8 textures
+   it is vertex colour times the texel (white vertices draw the image unchanged). */
 typedef struct {
   uint32_t id;
   uint32_t tex_w, tex_h;
@@ -52,6 +54,22 @@ typedef struct {
   void* user;
   bool (*rasterise_text)(void* user, const char* utf8, float px_size, int weight /*0 regular, 1 bold*/,
                          dh_bitmap* out);
+
+  /* ---- Optional members, added after the first release. A shell that zero-initialises the struct and leaves
+     them NULL gets the default behaviour; new members are only ever appended. ---- */
+
+  /* Open the system's Bluetooth MIDI pairing UI. NULL = the platform has none: the core hides its button. */
+  void (*show_bluetooth_midi)(void* user);
+
+  /* Let the user pick a folder (modal is fine; called on the UI thread from within dh_app_frame). Write the
+     UTF-8 path, NUL-terminated, into out_path[cap] and return true; false = cancelled. `title` is a prompt in
+     the active language. NULL = the core shows no "Choose..." buttons and the user types the path. */
+  bool (*choose_folder)(void* user, const char* title, char* out_path, uint32_t cap);
+
+  /* Where "Export to USB" can write: removable drives and the like. Write the folder paths, one per line
+     ('\n'-separated, UTF-8, NUL-terminated), into out[cap]; return true if the list is authoritative (it may
+     be empty) or false to let the core fall back to its own scan of /Volumes, /media, /run/media and /mnt. */
+  bool (*list_export_targets)(void* user, char* out, uint32_t cap);
 } dh_platform;
 
 typedef struct {

@@ -72,6 +72,22 @@ class DrawList {
   const std::vector<std::uint32_t>& indices() const { return indices_; }
   const std::vector<DrawCmd>& commands() const { return commands_; }
 
+  // ---- RGBA images (skin sprites). Texture ids start at 2; id 1 is the glyph atlas. ----
+  // The pixels are copied; the shell receives them as one full-texture upload on the next frame.
+  std::uint32_t add_image(int width, int height, std::vector<std::uint8_t> rgba);
+  void remove_image(std::uint32_t id);  // the shell is told to destroy the texture on the next frame
+  struct ImageUpload {
+    std::uint32_t id;
+    int width, height;
+    const std::uint8_t* pixels;  // valid until the image is removed
+  };
+  std::vector<ImageUpload> take_image_uploads();            // images added since the last call
+  std::vector<std::uint32_t> take_image_releases();         // images removed since the last call
+  // Draws part of an image (u/v in 0..1) into a rectangle (points), tinted by `tint` (white = unchanged),
+  // optionally rotated about the rectangle's centre by `radians` (clockwise on screen).
+  void image(std::uint32_t id, float x, float y, float w, float h, float u0, float v0, float u1, float v1,
+             Color tint = 0xFFFFFFFFu, float radians = 0);
+
   // Atlas (8-bit alpha). Dirty rows must be uploaded by the shell, then cleared.
   const std::uint8_t* atlas() const { return atlas_.data(); }
   bool atlas_dirty(int& y0, int& y1) const;
@@ -87,6 +103,16 @@ class DrawList {
   void quad(float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, Color c);
   void reset_atlas();
   void new_command();
+  void use_texture(std::uint32_t id);
+
+  struct Stored {
+    int width = 0, height = 0;
+    std::vector<std::uint8_t> rgba;
+    bool pending = true;
+  };
+  std::unordered_map<std::uint32_t, Stored> images_;
+  std::vector<std::uint32_t> released_;
+  std::uint32_t next_image_ = 2, cur_texture_ = 1;
 
   TextRasterizer rasterizer_;
   std::vector<Vertex> vertices_;

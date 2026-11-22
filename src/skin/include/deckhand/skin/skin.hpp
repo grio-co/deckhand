@@ -228,7 +228,11 @@ struct Layout {
 
 // width/height are the window's physical pixel size; scale is the backing scale (2 on Retina). Skin
 // lengths are logical points and are multiplied by `scale`.
-Layout solve_layout(const Skin& skin, size_t window_index, float width, float height, float scale);
+// `hidden_nodes` (optional, indexed by Skin::nodes) marks nodes whose `show=` condition is false: inside a row,
+// column or grid they take no space and no gap (they are still emitted, with an empty rectangle, so the widget
+// list keeps one entry per node). Anywhere else the flag is ignored.
+Layout solve_layout(const Skin& skin, size_t window_index, float width, float height, float scale,
+                    const std::vector<char>* hidden_nodes = nullptr);
 // Topmost interactive widget at (x, y) in window pixels, or -1; honours the window shape.
 int hit_test(const Layout& layout, float x, float y);
 

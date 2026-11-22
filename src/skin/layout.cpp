@@ -14,6 +14,10 @@ struct Ctx {
   const Skin& sk;
   float scale;
   Layout& out;
+  const std::vector<char>* hidden = nullptr;  // by node index: take no space in a row, column or grid
+  bool is_hidden(int node) const {
+    return hidden && static_cast<size_t>(node) < hidden->size() && (*hidden)[static_cast<size_t>(node)];
+  }
 };
 
 Style make_style(const Skin& sk, const StyleSpec& base, const StyleSpec* over, float scale) {
@@ -109,8 +113,24 @@ float px_or(const Length& l, float parent_size, float scale, float fallback) {
 }
 
 void flow(Ctx& c, const Node& n, int me, const Rect& content, bool horiz) {
-  const size_t count = n.children.size();
-  if (count == 0) return;
+  // Hidden children (show= false) keep no space and no gap; they are still emitted, collapsed to nothing.
+  std::vector<int> kids;
+  for (int ch : n.children)
+    if (!c.is_hidden(ch)) kids.push_back(ch);
+  const size_t count = kids.size();
+  std::vector<Rect> slots(count);
+  // Children are emitted in their written order whatever is hidden, so widget indices never move.
+  const auto emit_all = [&] {
+    size_t vi = 0;
+    for (int ch : n.children) {
+      if (c.is_hidden(ch)) place(c, ch, Rect{content.x, content.y, 0, 0}, me, true);
+      else place(c, ch, slots[vi++], me, true);
+    }
+  };
+  if (count == 0) {
+    emit_all();
+    return;
+  }
   const float s = c.scale;
   const float gap = n.gap * s;
   const float cmain = horiz ? content.w : content.h;
@@ -119,7 +139,7 @@ void flow(Ctx& c, const Node& n, int me, const Rect& content, bool horiz) {
   std::vector<Item> items(count);
   float fixed_total = 0;
   for (size_t i = 0; i < count; ++i) {
-    const Node& k = c.sk.nodes[n.children[i]];
+    const Node& k = c.sk.nodes[kids[i]];
     const Length& L = horiz ? k.w : k.h;
     const float mm = horiz ? (k.margin[0] + k.margin[2]) * s : (k.margin[1] + k.margin[3]) * s;
     Item& it = items[i];
@@ -175,7 +195,7 @@ void flow(Ctx& c, const Node& n, int me, const Rect& content, bool horiz) {
   }
   float pos = start;
   for (size_t i = 0; i < count; ++i) {
-    const Node& k = c.sk.nodes[n.children[i]];
+    const Node& k = c.sk.nodes[kids[i]];
     const Length& CL = horiz ? k.h : k.w;
     const float cm = horiz ? (k.margin[1] + k.margin[3]) * s : (k.margin[0] + k.margin[2]) * s;
     float cross = ccross;
@@ -184,11 +204,11 @@ void flow(Ctx& c, const Node& n, int me, const Rect& content, bool horiz) {
     float cpos = 0;
     if (n.align == Align::Center) cpos = (ccross - cross) / 2;
     else if (n.align == Align::End) cpos = ccross - cross;
-    Rect slot = horiz ? Rect{content.x + pos, content.y + cpos, items[i].size, cross}
-                      : Rect{content.x + cpos, content.y + pos, cross, items[i].size};
-    place(c, n.children[i], slot, me, true);
+    slots[i] = horiz ? Rect{content.x + pos, content.y + cpos, items[i].size, cross}
+                     : Rect{content.x + cpos, content.y + pos, cross, items[i].size};
     pos += items[i].size + between;
   }
+  emit_all();
 }
 
 Rect anchored(const Node& k, const Rect& content, float scale, Anchor def) {
@@ -213,8 +233,22 @@ Rect anchored(const Node& k, const Rect& content, float scale, Anchor def) {
 }
 
 void grid(Ctx& c, const Node& n, int me, const Rect& content) {
-  const size_t count = n.children.size();
-  if (count == 0) return;
+  std::vector<int> kids;  // hidden children take no cell
+  for (int ch : n.children)
+    if (!c.is_hidden(ch)) kids.push_back(ch);
+  const size_t count = kids.size();
+  std::vector<Rect> slots(count);
+  const auto emit_all = [&] {
+    size_t vi = 0;
+    for (int ch : n.children) {
+      if (c.is_hidden(ch)) place(c, ch, Rect{content.x, content.y, 0, 0}, me, true);
+      else place(c, ch, slots[vi++], me, true);
+    }
+  };
+  if (count == 0) {
+    emit_all();
+    return;
+  }
   const float gap = n.gap * c.scale;
   const int cols = n.cols > 0 ? std::min(n.cols, 64) : static_cast<int>(std::min<size_t>(count, 64));
   constexpr int kRowCap = 64;
@@ -229,7 +263,7 @@ void grid(Ctx& c, const Node& n, int me, const Rect& content) {
   };
   int cur = 0;
   for (size_t i = 0; i < count; ++i) {
-    const Node& k = c.sk.nodes[n.children[i]];
+    const Node& k = c.sk.nodes[kids[i]];
     int cs = std::min(k.colspan, cols), rs = std::min(k.rowspan, kRowCap);
     int col = 0, row = 0;
     if (k.col >= 0 && k.row >= 0) { col = std::min(k.col, cols - cs); row = std::min(k.row, kRowCap - rs); }
@@ -249,9 +283,9 @@ void grid(Ctx& c, const Node& n, int me, const Rect& content) {
   const float ch = std::max(0.0f, (content.h - gap * (rows - 1)) / rows);
   for (size_t i = 0; i < count; ++i) {
     const Cell& q = cells[i];
-    Rect slot{content.x + q.col * (cw + gap), content.y + q.row * (ch + gap), cw * q.cs + gap * (q.cs - 1), ch * q.rs + gap * (q.rs - 1)};
-    place(c, n.children[i], slot, me, true);
+    slots[i] = Rect{content.x + q.col * (cw + gap), content.y + q.row * (ch + gap), cw * q.cs + gap * (q.cs - 1), ch * q.rs + gap * (q.rs - 1)};
   }
+  emit_all();
 }
 
 void place(Ctx& c, int node, const Rect& slot, int parent, bool parent_flow) {
@@ -320,7 +354,8 @@ bool in_polygon(const std::vector<Point>& poly, float x, float y) {
 
 }  // namespace
 
-Layout solve_layout(const Skin& skin, size_t window_index, float width, float height, float scale) {
+Layout solve_layout(const Skin& skin, size_t window_index, float width, float height, float scale,
+                    const std::vector<char>* hidden_nodes) {
   Layout out;
   try {
     if (window_index >= skin.windows.size()) {
@@ -338,7 +373,7 @@ Layout solve_layout(const Skin& skin, size_t window_index, float width, float he
     if (!w.shape.empty())
       if (const Shape* sh = skin.find_shape(w.shape)) out.shape = shape_polygon(skin, *sh, width, height, scale);
     if (width < w.min_w * scale || height < w.min_h * scale) out.warnings.push_back("window smaller than the skin's minimum size");
-    Ctx c{skin, scale, out};
+    Ctx c{skin, scale, out, hidden_nodes};
     if (w.root >= 0) place(c, w.root, Rect{0, 0, width, height}, -1, false);
     // final safety: nothing outside the window
     for (auto& rw : out.widgets) {

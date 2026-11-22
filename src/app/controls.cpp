@@ -222,7 +222,7 @@ std::vector<ControlInfo> list_controls() {
   return out;
 }
 
-bool build_control(const Engine& engine, std::string_view name, bool has_value, double value, std::vector<Command>& out,
+bool build_control(const IEngine& engine, std::string_view name, bool has_value, double value, std::vector<Command>& out,
                    std::string& error) {
   Parsed p;
   if (!parse(name, p, error)) return false;
@@ -327,14 +327,14 @@ bool build_control(const Engine& engine, std::string_view name, bool has_value, 
   return false;
 }
 
-bool apply_control(Engine& engine, std::string_view name, bool has_value, double value, std::string& error) {
+bool apply_control(IEngine& engine, std::string_view name, bool has_value, double value, std::string& error) {
   std::vector<Command> commands;
   if (!build_control(engine, name, has_value, value, commands, error)) return false;
   for (const Command& c : commands) engine.send(c);
   return true;
 }
 
-bool read_control(const Engine& engine, std::string_view name, double& value) {
+bool read_control(const IEngine& engine, std::string_view name, double& value) {
   Parsed p;
   std::string error;
   if (!parse(name, p, error)) return false;

@@ -117,14 +117,49 @@ inline void read_frame(const float* pcm, std::int64_t frames, double pos, float&
 
 // On iOS the shell owns the audio session (category, activation, routing); the engine must
 // leave it alone, or the system's default play-and-record session is forced on the app.
-ma_result init_context(ma_context* ctx) {
+ma_result init_context(ma_context* ctx, bool null_backend = false) {
   ma_context_config config = ma_context_config_init();
+  if (null_backend) {
+    const ma_backend only_null[] = {ma_backend_null};
+    return ma_context_init(only_null, 1, &config, ctx);
+  }
 #if defined(__APPLE__) && TARGET_OS_IPHONE
   config.coreaudio.sessionCategory = ma_ios_session_category_none;
   config.coreaudio.noAudioSessionActivate = MA_TRUE;
   config.coreaudio.noAudioSessionDeactivate = MA_TRUE;
 #endif
   return ma_context_init(nullptr, 0, &config, ctx);
+}
+
+void probe_callback(ma_device*, void*, const void*, ma_uint32) {}
+
+// True if the output the engine would pick for `hint` can be opened right now (opened and closed, never started).
+bool real_output_opens(const std::string& hint_in) {
+  ma_context ctx;
+  if (init_context(&ctx) != MA_SUCCESS) return false;
+  ma_device_info* infos = nullptr;
+  ma_uint32 count = 0;
+  ma_context_get_devices(&ctx, &infos, &count, nullptr, nullptr);
+  const ma_device_id* id = nullptr;
+  std::string hint = hint_in;
+  std::transform(hint.begin(), hint.end(), hint.begin(), [](unsigned char c) { return std::tolower(c); });
+  if (!hint.empty()) {
+    for (ma_uint32 i = 0; i < count && !id; ++i) {
+      std::string n = infos[i].name;
+      std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return std::tolower(c); });
+      if (n.find(hint) != std::string::npos) id = &infos[i].id;
+    }
+  }
+  ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
+  cfg.playback.pDeviceID = id;
+  cfg.playback.format = ma_format_f32;
+  cfg.playback.channels = 2;
+  cfg.dataCallback = &probe_callback;
+  ma_device dev;
+  const bool ok = ma_device_init(&ctx, &cfg, &dev) == MA_SUCCESS;
+  if (ok) ma_device_uninit(&dev);
+  ma_context_uninit(&ctx);
+  return ok;
 }
 
 std::string lower(std::string s) {
@@ -240,6 +275,7 @@ struct Engine::Impl {
   ma_device dev{};
   bool dev_ok = false;
   std::string dev_name;
+  bool fallback = false;  // running on miniaudio's null device because no real output could be opened
 
   std::uint32_t sr = 44100;
   int channels = 2;
@@ -1141,11 +1177,11 @@ struct Engine::Impl {
         d.st_live = false;
       }
       float l = 0, r = 0;
-      if (d.kl_w < 1.0f) read_frame(a.pcm.data(), total, d.pos, l, r);
+      if (d.kl_w < 1.0f) read_frame(a.data(), total, d.pos, l, r);
       if (d.xf_left > 0) {
         if (d.kl_w < 1.0f) {
           float ol, orr;
-          read_frame(a.pcm.data(), total, d.xf_pos, ol, orr);
+          read_frame(a.data(), total, d.xf_pos, ol, orr);
           const float t = static_cast<float>(d.xf_left) / 128.0f;
           l = l * (1.0f - t) + ol * t;
           r = r * (1.0f - t) + orr * t;
@@ -1155,7 +1191,7 @@ struct Engine::Impl {
       }
       if (d.kl_w > 0.0f) {
         float sl, sr_;
-        d.st.next(a.pcm.data(), total, ratio, d.pos, std::fabs(d.speed) * ratio, pitch, sl, sr_);
+        d.st.next(a.data(), total, ratio, d.pos, std::fabs(d.speed) * ratio, pitch, sl, sr_);
         if (d.kl_w < 1.0f) {
           l = l * (1.0f - d.kl_w) + sl * d.kl_w;
           r = r * (1.0f - d.kl_w) + sr_ * d.kl_w;
@@ -1272,12 +1308,12 @@ struct Engine::Impl {
           break;
         }
         float l, r;
-        read_frame(a.pcm.data(), total, s.pos, l, r);
+        read_frame(a.data(), total, s.pos, l, r);
         master[i * 2] += l * s.env * g;
         master[i * 2 + 1] += r * s.env * g;
         if (s.tail_left > 0) {
           float tl, tr;
-          read_frame(a.pcm.data(), total, s.tail_pos, tl, tr);
+          read_frame(a.data(), total, s.tail_pos, tl, tr);
           const float tg = s.tail_gain * static_cast<float>(s.tail_left) / 96.0f * g;
           master[i * 2] += tl * tg;
           master[i * 2 + 1] += tr * tg;
@@ -1510,10 +1546,12 @@ std::vector<std::string> Engine::output_devices() {
   return names;
 }
 
-bool Engine::start(const OutputConfig& config, std::string& error) {
-  stop();
+bool Engine::start(const OutputConfig& requested, std::string& error) {
   Impl& s = *impl_;
-  if (init_context(&s.ctx) != MA_SUCCESS) {
+  // Opens the device `config` names (stops a running stream first).
+  const auto open = [&](const OutputConfig& config, std::string& error) -> bool {
+  stop();
+  if (init_context(&s.ctx, config.null_backend) != MA_SUCCESS) {
     error = "could not initialise the audio system";
     return false;
   }
@@ -1548,7 +1586,7 @@ bool Engine::start(const OutputConfig& config, std::string& error) {
   ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
   cfg.playback.pDeviceID = id;
   cfg.playback.format = ma_format_f32;
-  cfg.playback.channels = native_channels >= 4 ? std::min<ma_uint32>(native_channels, 8) : 2;
+  cfg.playback.channels = native_channels >= 4 && !config.null_backend ? std::min<ma_uint32>(native_channels, 8) : 2;
   cfg.sampleRate = 0;  // use the device's own rate
   cfg.periodSizeInFrames = config.period_frames;
   cfg.performanceProfile = ma_performance_profile_low_latency;
@@ -1581,6 +1619,33 @@ bool Engine::start(const OutputConfig& config, std::string& error) {
          s.sr, s.dev.playback.internalPeriodSizeInFrames, s.phones_ch >= 0 ? "on" : "off (stereo device)",
          s.dev.playback.converter.isPassthrough ? "yes" : "no (converted)");
   return true;
+  };
+
+  if (requested.null_backend) {
+    s.fallback = false;
+    return open(requested, error);
+  }
+  // Already on the null device: leave it running (no restart, no gap) unless a real output opens now.
+  if (s.fallback && !real_output_opens(requested.device_hint)) {
+    error = "No audio output";
+    return false;
+  }
+  s.fallback = false;
+  if (open(requested, error)) return true;
+  // No usable output (no sound card, or the sound server is gone): keep the engine, UI and API alive on the
+  // null backend and report the failure; the caller's periodic device check retries the real device.
+  const std::string reason = error;
+  OutputConfig quiet = requested;
+  quiet.null_backend = true;
+  quiet.device_hint.clear();
+  std::string ignored;
+  if (open(quiet, ignored)) {
+    s.fallback = true;
+    s.dev_name = "No audio output";
+    DH_LOG(Warn, "audio: %s; running on the null output until a device appears", reason.c_str());
+  }
+  error = "No audio output";
+  return false;
 }
 
 void Engine::stop() {
@@ -1589,9 +1654,10 @@ void Engine::stop() {
   if (s.ctx_ok) ma_context_uninit(&s.ctx);
   s.dev_ok = s.ctx_ok = false;
   s.timing_on = false;
+  s.fallback = false;
 }
 
-bool Engine::running() const { return impl_->dev_ok; }
+bool Engine::running() const { return impl_->dev_ok && !impl_->fallback; }  // false on the null fallback: callers retry
 std::string Engine::device_name() const { return impl_->dev_name; }
 int Engine::output_channels() const { return impl_->channels; }
 std::uint32_t Engine::sample_rate() const { return impl_->sr; }

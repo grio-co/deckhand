@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=DeckHand
+GenericName=DJ software
+Comment=Mix and perform with two or four decks and a controller
+Exec=deckhand %F
+Icon=deckhand
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=DJ;mixer;turntable;decks;music;
+MimeType=audio/mpeg;audio/flac;audio/x-flac;audio/wav;audio/x-wav;audio/aac;audio/mp4;audio/x-aiff;audio/ogg;audio/opus;
+StartupWMClass=DeckHand

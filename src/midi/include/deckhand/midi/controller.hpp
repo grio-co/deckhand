@@ -41,12 +41,15 @@ enum class Action : std::uint8_t {
   KeyShiftPad,  // pad: set the key shift (default from the pad number)
   PadFx,        // pad: momentary effect (on while held)
   Modifier,     // held button that changes what rules with when=<name> do
+  FxAssign,     // unit=N target=deck1..4|master: routes effect unit N to that channel
+  MasterCue,    // headphone monitoring of the master (toggle; remembers and restores the head mix)
 };
 
 enum class LedState : std::uint8_t {
   Playing, Cue, Sync, Pfl, Loop, LoopIn, HotCue, Loaded, PadMode, Level,
   // appended
   KeyLock, Quantize, Slip, Reverse, FxOn, SamplerPlaying, LoopBeats, KeyShift, Modifier,
+  FxAssign, MasterCue, ColorFx,  // FxAssign: unit N is assigned to target; ColorFx: effect selected (default: any but filter)
 };
 
 struct InRule {
@@ -71,6 +74,8 @@ struct InRule {
   int when = -1;                  // modifier index the rule needs; -1 = none
   bool when_not = false;
   int modifier = -1;              // action modifier: which one it holds
+  int fx_unit = -1;               // effect unit (0-based) whose assignment the effect actions follow; -1 = deck= / unit=master
+  int fx_target = -1;             // fx_assign: 0..3 deck, kFxMaster
 };
 
 struct OutRule {
@@ -83,6 +88,7 @@ struct OutRule {
   float amount = 1, value = 0;
   bool has_value = false, master_unit = false;
   int effect = -1, offset = 0, modifier = -1;
+  int fx_unit = -1, fx_target = -1;  // fx_on: follow unit N's assignment; fx_assign: lit while unit N is on target
 };
 
 struct Mapping {
@@ -112,6 +118,17 @@ bool save_user_mapping(const std::string& device, const std::vector<std::string>
                        std::string* error = nullptr);
 // Loads every *.dhmap in the given folders; later folders override earlier ones by name.
 std::vector<Mapping> load_mappings(const std::vector<std::string>& folders);
+
+// Effect units a mapping can assign (unit=1..kFxUnits). Unit N starts out on the master bus.
+constexpr int kFxUnits = 4;
+
+// One entry for a MIDI-learn picker: label "Play" in group "Deck 1" (English; the app translates groups).
+struct LearnChoice {
+  std::string label;   // e.g. "Play", "Hot cue 3"
+  std::string action;  // text for ControllerHub::learn_begin, e.g. "play deck=1"
+  std::string group;   // e.g. "Deck 1", "Mixer", "Effect unit 1"
+};
+std::vector<LearnChoice> learn_choices(int decks = 2);
 
 // ---- where controller input goes -----------------------------------------------------
 class ControlSink {
@@ -189,7 +206,9 @@ class ControllerHub {
   void value(Active& a, std::size_t idx, const InRule& r, float v);
   void delta(Active& a, const InRule& r, int steps);
   bool engine_value(const InRule& r, float& e) const;
-  FxSlotView& fx_slot(bool master, int deck, int slot);
+  FxSlotView& fx_slot(int target, int slot);        // target: 0..3 deck, kFxMaster
+  int fx_target(const InRule& r) const;              // channel an effect rule addresses right now
+  void fx_assign(int unit, int target);              // switch off on the old target, carry the settings over
   bool learn_feed(const std::string& device, std::uint8_t status, std::uint8_t d1, std::uint8_t d2);
   void learn_finish();
 
@@ -200,6 +219,9 @@ class ControllerHub {
   MidiIO* io_ = nullptr;
   mutable std::mutex mutex_;
   std::vector<Active> active_;
+  int fx_assigned_[kFxUnits] = {kFxMaster, kFxMaster, kFxMaster, kFxMaster};
+  bool master_cue_ = false;   // master_cue is on (head mix forced to master)
+  float master_cue_saved_ = 0.5f;
 };
 
 }  // namespace deckhand

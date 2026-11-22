@@ -19,6 +19,10 @@ full control API.
 - Mixer and effects: trim, three-band EQ, filter and five other colour effects, faders,
   crossfader, master, separate headphone cue bus; three effect slots per channel and on the
   master (14 beat effects); 16-slot sampler.
+- Crash isolation: the audio engine is a separate process that owns the sound device,
+  recorder and controllers. If the UI crashes the music keeps playing, and the UI re-attaches.
+- Library sync between machines through any folder your cloud drive or a USB stick replicates
+  ([docs/SYNC.md](docs/SYNC.md)); set `sync.folder` (no settings screen for it yet).
 - Recording of the master output to 24-bit WAV (the file stays playable if the app is killed).
 - USB export for club players: database, analysis files and audio, from the app, the command
   line or the API. Written from public format documentation and verified by a read-back parser;
@@ -29,6 +33,10 @@ full control API.
   ([docs/STREAMING.md](docs/STREAMING.md)); tested against a mock, not yet a real OBS.
 - Languages: English, German, French, Spanish and Japanese packs; switch from the top bar.
 - Controllers: declarative mapping files, any matching MIDI device; DDJ-FLX4 mapping included.
+- Linux: builds and passes its tests in an Ubuntu container and renders under a virtual
+  display ([docs/LINUX.md](docs/LINUX.md)); not yet run on a real Linux machine.
+- Windows: cross-compiles and passes its tests under Wine, and renders correctly there
+  ([docs/WINDOWS.md](docs/WINDOWS.md)); not yet built or run on a real Windows machine.
 - Portable mode: put a file named `portable` beside the app and all data stays next to it.
 
 - Skins: the whole UI is drawn from declarative skin files ([docs/SKINS.md](docs/SKINS.md));
@@ -36,7 +44,7 @@ full control API.
 - Panels for settings, sampler, MIDI learn and track details.
 
 ## Goals
-- **Stable.** The audio path never blocks; the engine is designed to run as its own process.
+- **Stable.** The audio path never blocks; the engine runs as its own process.
 - **Skinnable.** Winamp-style themes, from familiar to exotic. A skin is declarative data, never code.
 - **Portable.** Run it from a USB stick.
 - **Compatible.** Export playlists and analysis to CDJ-3000 USB drives.
@@ -62,5 +70,7 @@ The script needs a code-signing identity: set `DECKHAND_SIGN_IDENTITY` or put it
 
 ## Licence
 MIT. See [LICENSE](LICENSE). Bundled third-party code: miniaudio (public domain / MIT-0).
+The Linux build links dynamically to FFmpeg, Pango/Cairo (LGPL) and SDL3 (zlib); see
+[docs/LINUX.md](docs/LINUX.md).
 DeckHand is an independent project, not affiliated with or endorsed by any DJ hardware or
 software vendor. Product names are used only to state compatibility.

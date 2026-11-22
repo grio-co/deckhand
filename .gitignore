@@ -4,3 +4,4 @@ build/
 .signing.local
 .claude/
 build-*/
+build-windows*/

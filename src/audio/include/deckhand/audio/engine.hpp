@@ -28,6 +28,7 @@ struct GridSection {
 struct LoadedTrack {
   std::shared_ptr<const TrackAudio> audio;
   std::int64_t track_id = 0;
+  std::string path;                 // source file; the engine process keeps it so a restarted UI can rebuild its decks
   double bpm = 0;
   std::vector<GridSection> grid;    // sorted by first_beat_frame
   std::vector<double> memory_cues;  // frames, sorted
@@ -103,6 +104,7 @@ enum class Op : std::uint8_t {
   SchedInsert,     // i = payload slot handed over by Engine::schedule
   SchedCancel,     // d = schedule id
   SchedCancelAll,
+  Count,           // number of ops; not a command
 };
 
 enum class ColorFx : std::uint8_t { Filter = 0, Noise, DubEcho, Crush, Pitch, Space, Count };
@@ -267,9 +269,54 @@ struct OutputConfig {
   int master_channel = 0;   // first channel of the master pair (0-based)
   int phones_channel = 2;   // first channel of the headphone pair; ignored if the device is stereo
   std::uint32_t period_frames = 256;
+  bool follow_controller = false;  // separate engine process: re-pick the device when a controller with its own audio appears
+  bool null_backend = false;       // tests: miniaudio's null device (paced like a real one, produces no sound)
 };
 
-class Engine {
+// The engine as the application sees it. Implemented by the in-process Engine below and by RemoteEngine
+// (deckhand/audio/remote_engine.hpp), a proxy for the engine running in its own process.
+class IEngine {
+ public:
+  virtual ~IEngine() = default;
+
+  virtual bool start(const OutputConfig& config, std::string& error) = 0;
+  virtual void stop() = 0;
+  virtual bool running() const = 0;
+  virtual std::string device_name() const = 0;
+  virtual int output_channels() const = 0;
+  virtual std::uint32_t sample_rate() const = 0;
+  virtual std::vector<std::string> devices() = 0;  // playback devices currently present
+
+  virtual void send(const Command& c) = 0;
+  virtual void load(int deck, std::unique_ptr<LoadedTrack> track) = 0;
+  virtual DeckView deck(int index) const = 0;
+  virtual MixerView mixer() const = 0;
+  virtual SamplerView sampler(int slot) const = 0;
+  virtual void sampler_load(int slot, std::unique_ptr<LoadedSample> sample) = 0;
+
+  virtual bool record_open(const std::string& path, bool pre_clip, std::string& error) = 0;
+  virtual void record_stop() = 0;
+  virtual void record_close() = 0;
+  virtual RecorderStatus recorder_status() const = 0;
+  virtual std::string recorder_path() const { return {}; }  // file being written, when known
+
+  virtual void stream_enable(bool on, bool pre_clip = false) = 0;
+  virtual std::size_t stream_read(float* interleaved_stereo, std::size_t max_frames) = 0;
+  virtual std::uint64_t stream_dropped_frames() const = 0;
+
+  virtual std::uint64_t clock_frames() const = 0;
+  virtual double clock_seconds() const = 0;
+  virtual std::uint64_t clock_at_wall(std::chrono::steady_clock::time_point t) const = 0;
+  virtual std::uint64_t schedule(const Command& c, const Schedule& when) = 0;
+  virtual bool cancel(std::uint64_t id) = 0;
+  virtual std::size_t scheduled_count() const = 0;
+  virtual void cancel_all() = 0;
+
+  virtual bool poll(EngineEvent& out) = 0;
+  virtual void collect_garbage() = 0;
+};
+
+class Engine final : public IEngine {
  public:
   Engine();
   ~Engine();
@@ -277,60 +324,61 @@ class Engine {
   Engine& operator=(const Engine&) = delete;
 
   // Opens the output device and starts the callback. Returns false and sets error on failure.
-  bool start(const OutputConfig& config, std::string& error);
-  void stop();
-  bool running() const;
-  std::string device_name() const;
-  int output_channels() const;
-  std::uint32_t sample_rate() const;
+  bool start(const OutputConfig& config, std::string& error) override;
+  void stop() override;
+  bool running() const override;
+  std::string device_name() const override;
+  int output_channels() const override;
+  std::uint32_t sample_rate() const override;
   // Names of the playback devices currently present.
   static std::vector<std::string> output_devices();
+  std::vector<std::string> devices() override { return output_devices(); }
 
   // Thread-safe for any number of non-real-time callers.
-  void send(const Command& c);
-  void load(int deck, std::unique_ptr<LoadedTrack> track);
+  void send(const Command& c) override;
+  void load(int deck, std::unique_ptr<LoadedTrack> track) override;
 
-  DeckView deck(int index) const;
-  MixerView mixer() const;
-  SamplerView sampler(int slot) const;
+  DeckView deck(int index) const override;
+  MixerView mixer() const override;
+  SamplerView sampler(int slot) const override;
 
   // Sampler: hand a sample to a slot (non-real-time caller).
-  void sampler_load(int slot, std::unique_ptr<LoadedSample> sample);
+  void sampler_load(int slot, std::unique_ptr<LoadedSample> sample) override;
 
   // Recording of the master bus to 24-bit WAV (RF64 beyond 4 GB; the header is refreshed about once a
   // second, so a crash still leaves a playable file). record_open opens the file and the writer thread and
   // starts recording (Op::RecStart is sent for you). Op::RecStop / record_stop ends it; the writer then
   // finalises the file. record_close waits for that and releases the writer (call before opening again).
-  bool record_open(const std::string& path, bool pre_clip, std::string& error);
-  void record_stop();
-  void record_close();
-  RecorderStatus recorder_status() const;
+  bool record_open(const std::string& path, bool pre_clip, std::string& error) override;
+  void record_stop() override;
+  void record_close() override;
+  RecorderStatus recorder_status() const override;
 
   // Stream bus: a second master tap for the broadcast module. Enable with Op::StreamEnable (or
   // stream_enable), then pull interleaved stereo float frames from one non-real-time thread.
-  void stream_enable(bool on, bool pre_clip = false);
-  std::size_t stream_read(float* interleaved_stereo, std::size_t max_frames);
-  std::uint64_t stream_dropped_frames() const;
+  void stream_enable(bool on, bool pre_clip = false) override;
+  std::size_t stream_read(float* interleaved_stereo, std::size_t max_frames) override;
+  std::uint64_t stream_dropped_frames() const override;
 
   // ---- engine clock and sample-accurate scheduling ----
   // Output frames rendered so far (monotonic, any thread; advances once per callback).
-  std::uint64_t clock_frames() const;
-  double clock_seconds() const;
+  std::uint64_t clock_frames() const override;
+  double clock_seconds() const override;
   // Estimated engine frame being rendered at wall time `t` (extrapolated from the device callback timing; error is
   // about one callback jitter; add the device output latency yourself). Offline: just clock_frames().
-  std::uint64_t clock_at_wall(std::chrono::steady_clock::time_point t) const;
+  std::uint64_t clock_at_wall(std::chrono::steady_clock::time_point t) const override;
   // Run `c` on the exact output sample given by `when`. Returns an id (> 0), or 0 when rejected: queue / table
   // pool full, Load / SamplerLoad (pointer commands), internal Ops, bad deck, or relative beats <= 0.
   // Beat / deck kinds are resolved on the audio thread when the entry is accepted (ClockFrame in the past runs at
   // the start of the next callback). Capacity 1024 live entries; beyond that the entry is dropped (event).
-  std::uint64_t schedule(const Command& c, const Schedule& when);
-  bool cancel(std::uint64_t id);      // true if it was still pending when called (no event is emitted)
-  std::size_t scheduled_count() const;  // pending entries, including ones still in the command queue
-  void cancel_all();
+  std::uint64_t schedule(const Command& c, const Schedule& when) override;
+  bool cancel(std::uint64_t id) override;      // true if it was still pending when called (no event is emitted)
+  std::size_t scheduled_count() const override;  // pending entries, including ones still in the command queue
+  void cancel_all() override;
 
   // Call regularly from one non-real-time thread: drains events and frees retired tracks.
-  bool poll(EngineEvent& out);
-  void collect_garbage();
+  bool poll(EngineEvent& out) override;
+  void collect_garbage() override;
 
   // Offline rendering without a device (tests, tools). Interleaved float output.
   void configure_offline(std::uint32_t sample_rate, int channels);

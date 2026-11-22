@@ -16,6 +16,7 @@
   <key>NSDesktopFolderUsageDescription</key><string>DeckHand plays audio files you choose from your Desktop.</string>
   <key>NSDocumentsFolderUsageDescription</key><string>DeckHand plays audio files you choose from your Documents folder.</string>
   <key>NSDownloadsFolderUsageDescription</key><string>DeckHand plays audio files you choose from your Downloads folder.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>DeckHand uses Bluetooth to connect Bluetooth MIDI controllers you pair with it.</string>
   <key>NSRemovableVolumesUsageDescription</key><string>DeckHand plays audio files stored on removable drives.</string>
   <key>CFBundleDocumentTypes</key>
   <array>

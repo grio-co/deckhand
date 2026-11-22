@@ -22,6 +22,7 @@
 #include "deckhand/app/controls.hpp"
 #include "deckhand/app/stream_bridge.hpp"
 #include "deckhand/audio/engine.hpp"
+#include "deckhand/audio/remote_engine.hpp"
 #include "deckhand/gfx/draw.hpp"
 #include "deckhand/i18n/i18n.hpp"
 #include "deckhand/import/import.hpp"
@@ -30,6 +31,7 @@
 #include "deckhand/midi/controller.hpp"
 #include "deckhand/services/track_analysis.hpp"
 #include "deckhand/services/usb_export.hpp"
+#include "hub_api.hpp"
 #include "skin_view.hpp"
 
 namespace deckhand {
@@ -86,7 +88,7 @@ struct DeckInfo {
 };
 
 struct Job {
-  enum Kind { Load, AddFile, Import, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample } kind = Load;
+  enum Kind { Load, Reattach, AddFile, Import, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample, Sync, SyncInfo, RestoreSamples } kind = Load;
   int deck = -1;
   std::int64_t track_id = 0;
   std::string path;
@@ -126,6 +128,18 @@ struct SkinEntry {
   std::string name, path;  // name = file or folder stem
 };
 
+// What the settings panel shows about library sync. Written by the loader thread (it owns the SyncEngine's
+// library connection), read by the UI thread; guarded by App::state_mutex_.
+struct SyncSummary {
+  bool running = false;        // a sync job is queued or running
+  bool known = false;          // a status has been read at least once
+  std::int64_t last_ms = 0;    // last completed sync (0 = never)
+  bool last_ok = true;
+  std::string error;           // last failure
+  int sent = -1, received = -1;  // changes of the last sync run in this session (-1 = unknown)
+  int other_devices = 0;       // devices seen in the folder besides this one
+};
+
 // A single-line text field shared by the overlays: the focused one receives typed text.
 struct Field {
   std::string text;
@@ -159,9 +173,9 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   const dh_frame* frame();
 
   // ApiHost (called from API threads)
-  Engine& api_engine() override { return engine_; }
+  IEngine& api_engine() override { return *engine_; }
   bool api_load(int deck, std::int64_t track_id, std::string& error) override {
-    if (engine_.deck(deck).playing) {
+    if (engine_->deck(deck).playing) {
       error = "deck is playing; stop it before loading";
       return false;
     }
@@ -172,7 +186,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
     Job j;
     j.kind = Job::AddFile;
     j.path = path;
-    j.deck = deck >= 0 && !engine_.deck(deck).playing ? deck : -1;
+    j.deck = deck >= 0 && !engine_->deck(deck).playing ? deck : -1;
     post(j);
   }
   bool api_export(const std::string& destination, std::int64_t playlist_id, std::string& error) override {
@@ -210,7 +224,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   }
 
   // ControlSink (called from the controller thread)
-  void command(const Command& c) override { engine_.send(c); }
+  void command(const Command& c) override { engine_->send(c); }
   void browse(int steps) override;
   void browse_press() override;
   void load_selected(int deck) override;
@@ -234,10 +248,20 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
     }
     job_cv_.notify_one();
   }
+  void post_kind(Job::Kind k) {
+    Job j;
+    j.kind = k;
+    post(std::move(j));
+  }
   void loader_main();
   void control_main();
   void run_job(Library& lib, const Job& j);
-  void load_track(Library& lib, int deck, std::int64_t track_id);
+  void sync_job(Library& lib, bool run);
+  void restore_sampler(Library& lib, bool reload);
+  void load_track(Library& lib, int deck, std::int64_t track_id, bool attach_only = false);
+  void setup_engine(const std::vector<std::string>& mapping_folders);
+  void start_signal_watch();
+  void stop_signal_watch();
   void start_audio();
   void restart_audio();
   void set_status(const std::string& s) {
@@ -248,8 +272,13 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void request_load(int deck, std::int64_t track_id);
   bool record(bool start, std::string& path, std::string& error);
   std::string source_db() const {
+#if defined(_WIN32)
+    const char* base = std::getenv("APPDATA");
+    return base ? std::string(base) + "\\Pioneer\\rekordbox\\master.db" : std::string();
+#else
     const char* home = std::getenv("HOME");
     return home ? std::string(home) + "/Library/Pioneer/rekordbox/master.db" : std::string();
+#endif
   }
 
   // ---- browser state (app.cpp) ---------------------------------------------------
@@ -305,6 +334,10 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void learn_pick(const std::string& action);
   void save_setting(const std::string& key, const std::string& value) { lib_->set_setting(key, value); }
   bool field_key(dh_key key);
+  void draw_sync_section(float x, float& y, float rw);
+  void draw_controller_section(float x, float& y, float rw);
+  bool choose_folder(const std::string& title, std::string& out);
+  static std::string host_name();
 
   // ---- legacy code-drawn fallback (app_legacy.cpp) ---------------------------------------
   void draw_legacy();
@@ -317,12 +350,16 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::string T(std::string_view id, const i18n::Args& args) const { return i18n_.tr(id, args); }
   static std::string deck_letter(int deck) { return std::string(1, static_cast<char>('A' + deck)); }
 
+  dh_platform platform_{};  // the shell's callbacks (optional members may be NULL)
   std::string data_dir_, resource_dir_;
   i18n::Catalog i18n_;
   std::unique_ptr<Library> lib_;
-  Engine engine_;
-  std::unique_ptr<ControllerHub> hub_;
+  std::unique_ptr<IEngine> engine_;       // in-process Engine or RemoteEngine (engine.process setting)
+  RemoteEngine* remote_ = nullptr;        // engine_ when it runs in its own process
+  std::unique_ptr<ControllerHub> local_hub_;  // in-process mode only; otherwise the hub lives in the engine process
   std::unique_ptr<MidiIO> midi_;
+  std::unique_ptr<HubApi> hub_;
+  std::thread signal_thread_;
   std::unique_ptr<ApiBridge> api_;
   std::unique_ptr<StreamBridge> stream_;
   gfx::DrawList dl_;
@@ -340,7 +377,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::mutex audio_mutex_;  // serialises engine start/stop (UI thread and control thread)
   std::mutex state_mutex_;  // guards the members below, shared with the worker threads
   DeckInfo decks_[kMaxDecks];
-  std::string status_, audio_label_, audio_choice_, audio_pref_;
+  std::string status_, audio_label_, audio_choice_, audio_pref_, last_audio_error_;
   std::uint32_t audio_period_ = 256;
   bool importing_ = false, exporting_ = false;
   std::atomic<bool> rows_dirty_{true};
@@ -397,9 +434,10 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   Panel panel_ = Panel::None;
   Rect panel_rect_;
   std::vector<std::string> export_targets_;
+  bool export_other_ = false;  // the last entry of the export menu is "Other folder..." (needs choose_folder)
   Field* focus_ = nullptr;  // focused overlay field
   Field f_period_, f_port_, f_obs_host_, f_obs_port_, f_obs_source_, f_search_learn_;
-  Field f_title_, f_artist_, f_key_, f_rating_, f_relink_, f_relink_old_;
+  Field f_title_, f_artist_, f_key_, f_rating_, f_relink_, f_relink_old_, f_sync_folder_, f_sync_name_;
   Field* last_focus_ = nullptr;
   std::map<std::string, std::string> sv_;  // settings shown in the settings panel
   int tag_rating_ = 0;
@@ -411,16 +449,19 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::string relink_old_;
   bool confirm_remove_ = false;
   struct LearnEntry {
-    std::string label, action;
+    std::string label, action, group;  // label = "Deck 1 > Play" (group name translated), group = header text
   };
   std::vector<LearnEntry> learn_list_;
-  std::string learn_action_, learn_line_, learn_note_;
+  std::string learn_action_, learn_label_, learn_line_, learn_note_;
   bool learn_saved_ = false;
   int sampler_drop_ = -1;
   Rect sampler_slot_rect_[kSamplerSlots];
   std::string sampler_names_[kSamplerSlots];  // guarded by state_mutex_
 
+  SyncSummary sync_;  // guarded by state_mutex_
   std::vector<dh_draw_cmd> cmds_out_;
+  std::vector<dh_tex_upload> uploads_out_;
+  std::vector<std::uint32_t> releases_out_;
   dh_tex_upload upload_{};
   dh_frame frame_{};
 };

@@ -1,5 +1,6 @@
 // Importer for the "v6" DJ library database: an encrypted SQLite file.
 // Works only on a private copy of the source; the original is never opened.
+#include <cctype>
 #include <filesystem>
 #include <stdexcept>
 #include <unordered_map>
@@ -93,7 +94,9 @@ ImportStats import_library_v6(Library& lib, const ImportOptions& o) {
     const std::string source_id = tracks.text(0);
     NewTrack t;
     t.path = tracks.text(1);
-    if (t.path.empty() || t.path[0] != '/') continue;  // streaming-service entries have no local file
+    // Streaming-service entries have no local file. Local paths are "/Users/x/a.mp3" (macOS) or "C:/Users/x/a.mp3" (Windows).
+    const bool drive = t.path.size() >= 3 && std::isalpha(static_cast<unsigned char>(t.path[0])) && t.path[1] == ':' && (t.path[2] == '/' || t.path[2] == '\\');
+    if (t.path.empty() || (t.path[0] != '/' && !drive)) continue;
     t.title = tracks.text(2);
     t.artist = tracks.text(3);
     t.album = tracks.text(4);

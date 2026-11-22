@@ -14,7 +14,13 @@ bool enabled(Level);
 // Also append log lines to this file (empty path disables).
 void set_file(const std::string& path);
 void write(Level, std::string_view message);
+#if defined(__MINGW32__)
+void writef(Level, const char* fmt, ...) __attribute__((format(__MINGW_PRINTF_FORMAT, 2, 3)));
+#elif defined(__GNUC__) || defined(__clang__)
 void writef(Level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+#else
+void writef(Level, const char* fmt, ...);
+#endif
 
 constexpr std::string_view name(Level l) {
   switch (l) {
