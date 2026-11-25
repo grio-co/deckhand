@@ -41,6 +41,8 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [x] Controllers: effect unit assignment, master cue, learn choices by name
 
 ## Next
+- [ ] Library at 100k tracks: a full refresh builds every row (~0.2-0.3 s, measured with tools/bench_library.cpp; case-insensitive
+      indexes gained ~15-30% only and slowed inserts, so not adopted). Real fix: a lazy/windowed row source for the track table.
 - [ ] Embedding (docs/EMBEDDING.md): test input and audio inside Rig; Rig side wires `DeckHandKit` (Rig session)
 - [ ] Linux: rerun the container build against the skin-driven UI; fall back to no audio device
       cleanly; audio-route change notifications; test on a real machine (audio, MIDI, Wayland)
