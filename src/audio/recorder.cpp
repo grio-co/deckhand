@@ -6,6 +6,10 @@
 #include <cstring>
 #include <vector>
 
+#if defined(_MSC_VER)
+#define fseeko _fseeki64  // MSVC's 64-bit seek; MinGW and POSIX have fseeko
+#endif
+
 namespace deckhand {
 namespace {
 

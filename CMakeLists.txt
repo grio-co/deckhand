@@ -11,6 +11,7 @@ option(DECKHAND_WITH_SQLCIPHER "Link SQLCipher (needed to import encrypted sourc
 enable_testing()
 if(MSVC)
   add_compile_options(/W4 /utf-8 /permissive- /Zc:__cplusplus /EHsc /wd4100 /wd4244 /wd4267 /wd4127)
+  add_link_options(/MANIFEST:NO)  # our .rc files carry the manifest; the linker's own would be a duplicate (CVT1100)
 else()
   add_compile_options(-Wall -Wextra)
 endif()

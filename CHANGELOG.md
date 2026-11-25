@@ -6,6 +6,7 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Windows: first fixes for the Visual Studio (MSVC) build found on a real PC (atomic store, 64-bit seek, duplicate manifest); not yet rebuilt there
 - Library search uses an FTS5 trigram index (schema 3); falls back to the LIKE scan for 1-2 character terms or an SQLite without FTS5
 - `Library::track_ids()`; the track table holds ids and loads only visible rows (large libraries refresh in tens of ms)
 - Embedding on macOS: `DeckHandKit` Swift package (inline view, pop-out window, helper path and folders set by the host),

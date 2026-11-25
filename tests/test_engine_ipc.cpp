@@ -51,7 +51,7 @@ std::unique_ptr<LoadedTrack> sine_track(double seconds, std::uint32_t sr = 44100
   audio->frames = static_cast<std::uint64_t>(seconds * sr);
   audio->pcm.resize(audio->frames * 2);
   for (std::uint64_t i = 0; i < audio->frames; ++i)
-    audio->pcm[i * 2] = audio->pcm[i * 2 + 1] = 0.25f * static_cast<float>(std::sin(2 * M_PI * 220.0 * static_cast<double>(i) / sr));
+    audio->pcm[i * 2] = audio->pcm[i * 2 + 1] = 0.25f * static_cast<float>(std::sin(2 * 3.14159265358979323846 * 220.0 * static_cast<double>(i) / sr));
   auto t = std::make_unique<LoadedTrack>();
   t->audio = audio;
   t->track_id = id;

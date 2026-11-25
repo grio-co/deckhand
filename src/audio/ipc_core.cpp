@@ -1,6 +1,7 @@
 // Platform-neutral parts of the engine IPC: shared-segment layout checks, track blocks (build and validate),
 // command validation and socket framing. Everything that crosses the process boundary is validated here.
 #include <algorithm>
+#include <atomic>
 #include <new>
 
 #include "deckhand/audio/ipc.hpp"
@@ -177,7 +178,7 @@ bool build_block(const std::string& name, BlockKind kind, int slot, std::uint64_
     std::memcpy(base + l.grid + i * sizeof g, &g, sizeof g);
   }
   if (!cues.empty()) std::memcpy(base + l.cues, cues.data(), cues.size() * sizeof(double));
-  __atomic_store_n(&reinterpret_cast<BlockHeader*>(base)->sealed, kBlockSealed, __ATOMIC_RELEASE);
+  std::atomic_ref(reinterpret_cast<BlockHeader*>(base)->sealed).store(kBlockSealed, std::memory_order_release);
   return true;  // ~Shm unmaps; the named object stays for the engine
 }
 }  // namespace
