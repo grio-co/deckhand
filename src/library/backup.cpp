@@ -59,6 +59,25 @@ LibraryBackup inspect(const std::string& path) {
   return b;
 }
 
+// Copies hold whatever the library holds, the sync passphrase included: readable by the owner only. Errors are
+// ignored because some filesystems (a FAT stick) have no permissions.
+void owner_only(const fs::path& p, bool directory) {
+  std::error_code ec;
+  fs::permissions(p, directory ? fs::perms::owner_all : fs::perms::owner_read | fs::perms::owner_write, ec);
+}
+
+std::string setting_in(const std::string& db_path, const char* key) {
+  Db db;
+  db.open(db_path);
+  {
+    Stmt t(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'");
+    if (!t.step()) return {};
+  }
+  Stmt s(db, "SELECT value FROM settings WHERE key=?");
+  s.bind(1, key);
+  return s.step() ? s.text(0) : std::string();
+}
+
 // SQLite's online backup: a consistent copy that includes the write-ahead log, written in one transaction.
 void copy_database(Db& from, Db& to) {
   sqlite3_backup* b = sqlite3_backup_init(to.handle(), "main", from.handle(), "main");
@@ -101,6 +120,7 @@ std::string backup_library(const std::string& db_path, const std::string& reason
   const fs::path db = utf8_path(db_path);
   if (!fs::is_regular_file(db)) throw std::runtime_error("no library at " + db_path);
   fs::create_directories(backup_dir(db));
+  owner_only(backup_dir(db), true);
   fs::path dst;
   do {
     dst = backup_dir(db) / utf8_path(utf8(db.stem()) + "-" + stamp() + "-" + reason + ".db");
@@ -112,6 +132,7 @@ std::string backup_library(const std::string& db_path, const std::string& reason
       Db from, to;
       from.open(db_path);
       to.open(utf8(part));
+      owner_only(part, false);
       copy_database(from, to);
       to.exec("PRAGMA journal_mode=DELETE");  // one self-contained file
     }
@@ -156,6 +177,7 @@ std::string restore_library(const std::string& db_path, const std::string& backu
     throw std::runtime_error("that file is the library itself");
 
   std::string saved;
+  std::string passphrase;  // of the library being replaced
   bool damaged = false;
   if (fs::exists(db)) {
     try {
@@ -178,6 +200,7 @@ std::string restore_library(const std::string& db_path, const std::string& backu
       }
       if (!alone) throw std::runtime_error("the library is in use: quit DeckHand first");
       saved = backup_library(db_path, "before-restore");
+      passphrase = setting_in(db_path, "sync.password");
     } else {
       saved = db_path + ".damaged-" + stamp();
       for (const char* suffix : {"", "-wal", "-shm"}) {
@@ -186,10 +209,33 @@ std::string restore_library(const std::string& db_path, const std::string& backu
       }
     }
   }
-  Db from, to;
-  from.open(backup_path);
-  to.open(db_path);
-  copy_database(from, to);
+  // A copy from before the sync passphrase was set must not bring back writing the sync folder unencrypted, so the
+  // current passphrase stays. It is added to a staged copy so that the library changes in one step. (Schema 1 had no
+  // settings, and no sync.)
+  std::string source = backup_path;
+  fs::path staged;
+  if (!passphrase.empty() && src.schema_version >= 2) {
+    fs::create_directories(backup_dir(db));
+    staged = backup_dir(db) / utf8_path("restore-" + stamp() + ".part");
+    source = utf8(staged);
+    Db from, to;
+    from.open(backup_path);
+    to.open(source);
+    owner_only(staged, false);
+    copy_database(from, to);
+    Stmt s(to, "INSERT OR REPLACE INTO settings(key, value) VALUES ('sync.password', ?)");
+    s.bind(1, passphrase).run();
+  }
+  {
+    Db from, to;
+    from.open(source);
+    to.open(db_path);
+    copy_database(from, to);
+  }
+  if (!staged.empty()) {
+    std::error_code ec;
+    fs::remove(staged, ec);
+  }
   DH_LOG(Info, "library restored from %s", backup_path.c_str());
   return saved;
 }

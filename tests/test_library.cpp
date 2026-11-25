@@ -81,6 +81,21 @@ static void test_backups() {
   for (const auto& b : library_backups(db)) (b.reason == "upgrade" ? upgrades : others)++;
   CHECK(upgrades == kUpgradeBackupsKept && others == static_cast<int>(count) - 1);
 
+  // The sync passphrase set since the copy was made survives a restore, and only the owner can read the copies.
+  {
+    Library lib(db);
+    lib.set_setting("sync.password", "secret words");
+  }
+  const std::string before = restore_library(db, one);
+  {
+    Library lib(db);
+    CHECK(lib.track_count() == 1 && lib.setting("sync.password") == "secret words");
+  }
+  CHECK(library_backups(db).front().path == before);
+#ifndef _WIN32
+  CHECK((fs::status(before).permissions() & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+#endif
+
   // A file that is no library is refused and changes nothing.
   const std::string junk = (dir / "junk.db").string();
   std::ofstream(junk) << "not a database, but long enough to be read as a header ........................................";
