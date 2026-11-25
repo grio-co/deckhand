@@ -1,6 +1,7 @@
 // DeckHand macOS shell: window, menu and lifecycle. All behaviour lives in the C++ core.
 import AppKit
 import MetalKit
+import CDeckHand
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
   private var window: NSWindow!

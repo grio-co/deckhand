@@ -1,0 +1,12 @@
+{
+  "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/Sources/DeckHandKit/DeckHandSession.swift" : {
+    "abi-baseline-json" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/DeckHandKit-t.build/Objects-normal/arm64/DeckHandKit.abi.json",
+    "const-values" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/DeckHandKit-t.build/Objects-normal/arm64/DeckHandKit-primary.swiftconstvalues",
+    "dependencies" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/DeckHandKit-t.build/Objects-normal/arm64/DeckHandKit-primary.d",
+    "diagnostics" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/DeckHandKit-t.build/Objects-normal/arm64/DeckHandKit-primary.dia",
+    "objc-header" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/DeckHandKit-t.build/Objects-normal/arm64/DeckHandKit-Swift.h",
+    "swiftdoc" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/DeckHandKit-t.build/Objects-normal/arm64/DeckHandKit.swiftdoc",
+    "swiftmodule" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/DeckHandKit-t.build/Objects-normal/arm64/DeckHandKit.swiftmodule",
+    "swiftsourceinfo" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/DeckHandKit-t.build/Objects-normal/arm64/DeckHandKit.swiftsourceinfo"
+  }
+}

@@ -1,0 +1,4 @@
+module CDeckHand {
+  header "CDeckHand.h"
+  export *
+}

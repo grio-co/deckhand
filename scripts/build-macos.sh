@@ -37,8 +37,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/controllers"
 
 # shellcheck disable=SC2046
 swiftc -O -swift-version 5 \
-  -import-objc-header "$ROOT/platform/macos/Shell/Bridging.h" -I "$ROOT/src/app/include" \
-  "$ROOT"/platform/macos/Shell/*.swift \
+  -Xcc -fmodule-map-file="$ROOT/platform/macos/DeckHandKit/Sources/CDeckHand/include/module.modulemap" \
+  -I "$ROOT/platform/macos/DeckHandKit/Sources/CDeckHand/include" \
+  "$ROOT"/platform/macos/DeckHandKit/Sources/DeckHandKit/*.swift "$ROOT"/platform/macos/Shell/main.swift \
   -o "$APP/Contents/MacOS/DeckHand" \
   -L "$BUILD" -ldh_app -ldh_sync -ldh_services -ldh_broadcast -ldh_api -ldh_skin -ldh_i18n -ldh_export -ldh_analysis -ldh_midi -ldh_import \
   -ldh_library -ldh_audio -ldh_gfx -ldh_log -ldh_platform -ldh_miniaudio \

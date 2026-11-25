@@ -5,3 +5,4 @@ build/
 .claude/
 build-*/
 build-windows*/
+platform/macos/DeckHandKit/Package.swift

@@ -154,6 +154,8 @@ void App::setup_engine(const std::vector<std::string>& mapping_folders) {
     o.data_dir = data_dir_;
     o.resource_dir = resource_dir_;
     o.log_level = static_cast<int>(log::level());
+    // A host that embeds DeckHand in another executable says where the helper is (default: beside the executable).
+    if (const char* h = std::getenv("DECKHAND_ENGINE_HELPER"); h && *h) o.helper_path = h;
     auto remote = std::make_unique<RemoteEngine>(o);
     std::string error;
     if (remote->connect(error)) {

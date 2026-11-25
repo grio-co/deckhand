@@ -1,0 +1,15 @@
+Target dependency graph (5 targets)
+Target 'AllExcludingTests' in project 'Aggregate'
+➜ Explicit dependency on target 'DeckHandKit-product' in project 'DeckHandKit'
+➜ Explicit dependency on target 'EmbedHostExample-product' in project 'DeckHandKit'
+➜ Explicit dependency on target 'DeckHandKit' in project 'DeckHandKit'
+➜ Explicit dependency on target 'CDeckHand' in project 'DeckHandKit'
+Target 'EmbedHostExample-product' in project 'DeckHandKit'
+➜ Explicit dependency on target 'CDeckHand' in project 'DeckHandKit'
+➜ Explicit dependency on target 'DeckHandKit' in project 'DeckHandKit'
+Target 'DeckHandKit-product' in project 'DeckHandKit'
+➜ Explicit dependency on target 'DeckHandKit' in project 'DeckHandKit'
+➜ Explicit dependency on target 'CDeckHand' in project 'DeckHandKit'
+Target 'DeckHandKit' in project 'DeckHandKit'
+➜ Explicit dependency on target 'CDeckHand' in project 'DeckHandKit'
+Target 'CDeckHand' in project 'DeckHandKit' (no dependencies)

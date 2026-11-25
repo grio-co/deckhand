@@ -6,6 +6,8 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Embedding on macOS: `DeckHandKit` Swift package (inline view, pop-out window, helper path and folders set by the host),
+  `scripts/build-embed.sh`, `DECKHAND_ENGINE_HELPER` override; the standalone app builds from the same sources (docs/EMBEDDING.md)
 - macOS application: Swift shell (window, Metal renderer, CoreText text, input, drag and drop)
   over the C++ core; build, bundle and signing script.
 - Audio engine: four decks, varispeed playback with scratch and nudge, cue and hot cues, loops,

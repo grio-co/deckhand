@@ -1,0 +1,16 @@
+{
+  "" : {
+    "const-values" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/EmbedHostExample-p.build/Objects-normal/arm64/EmbedHostExample-primary.swiftconstvalues",
+    "dependencies" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/EmbedHostExample-p.build/Objects-normal/arm64/EmbedHostExample-primary.d",
+    "diagnostics" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/EmbedHostExample-p.build/Objects-normal/arm64/EmbedHostExample-primary.dia",
+    "emit-module-dependencies" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/EmbedHostExample-p.build/Objects-normal/arm64/EmbedHostExample-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/EmbedHostExample-p.build/Objects-normal/arm64/EmbedHostExample-primary-emit-module.dia",
+    "pch" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/EmbedHostExample-p.build/Objects-normal/arm64/EmbedHostExample-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/EmbedHostExample-p.build/Objects-normal/arm64/EmbedHostExample-primary.swiftdeps"
+  },
+  "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/Sources/EmbedHostExample/main.swift" : {
+    "index-unit-output-path" : "/DeckHandKit.build/Release/EmbedHostExample-p.build/Objects-normal/arm64/main.o",
+    "llvm-bc" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/EmbedHostExample-p.build/Objects-normal/arm64/main.bc",
+    "object" : "/Users/grio/rekordbox-but-better/platform/macos/DeckHandKit/.build/out/Intermediates.noindex/DeckHandKit.build/Release/EmbedHostExample-p.build/Objects-normal/arm64/main.o"
+  }
+}
