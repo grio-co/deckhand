@@ -14,9 +14,10 @@ By hand (add `--data DIR` for a non-default data folder):
 refuses while the library is open, and refuses files that are not a sound DeckHand library or come from a newer
 DeckHand. Opening a restored older copy upgrades it again (after another copy).
 
+A restore does not undo changes that already synced: at the next sync DeckHand reads them back ([SYNC.md](SYNC.md)).
+
 Copies contain everything in the library, including the folder-sync passphrase (stored there unencrypted), so they
 are readable by their owner only. `restore` keeps the passphrase of the library it replaces, so that an older copy
 does not bring back unencrypted sync; a damaged library's passphrase cannot be kept, so check Settings afterwards.
 
-Only `library.db` is covered: not settings files outside it, API tokens or audio files. How a restore interacts with
-folder sync ([SYNC.md](SYNC.md)) has not been tested. There is no screen for this in the app yet.
+Only `library.db` is covered: not settings files outside it, API tokens or audio files. There is no screen for this in the app yet.
