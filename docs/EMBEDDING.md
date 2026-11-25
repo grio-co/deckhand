@@ -31,7 +31,8 @@ let session = DeckHandSession(configuration: .init(
 - **Example host:** `swift run EmbedHostExample` in the package folder (env `DECKHAND_DATA`, `DECKHAND_RESOURCES`,
   `DECKHAND_ENGINE_HELPER`).
 
-Verified: package builds; standalone app still builds and signs from the same sources; the example host starts the core
-with a host-chosen data folder and launches the helper from the given path; the helper exits with the host.
-Not verified: the inline view and pop-out visually (the window did not come to the front in my run), input and audio
-inside a real host, signing/notarising a host that bundles the helper.
+Verified: package builds; standalone app still builds and signs from the same sources; the example host shows DeckHand
+inline, pops it out into its own window, and docks it back (window-only screenshots of each state; the docked image is
+byte-identical in size to the first); the core uses the host's data folder and launches the helper from the given path;
+the helper exits with the host. Self-check: `DECKHAND_SNAPSHOT=<dir> swift run EmbedHostExample` (saves the three states).
+Not verified: mouse/keyboard and audio inside a real host (Rig), signing/notarising a host that bundles the helper.

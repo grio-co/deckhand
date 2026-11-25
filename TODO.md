@@ -41,7 +41,7 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [x] Controllers: effect unit assignment, master cue, learn choices by name
 
 ## Next
-- [ ] Embedding (docs/EMBEDDING.md): check inline view and pop-out by eye inside Rig; Rig side wires `DeckHandKit` (Rig session)
+- [ ] Embedding (docs/EMBEDDING.md): test input and audio inside Rig; Rig side wires `DeckHandKit` (Rig session)
 - [ ] Linux: rerun the container build against the skin-driven UI; fall back to no audio device
       cleanly; audio-route change notifications; test on a real machine (audio, MIDI, Wayland)
 - [ ] Windows: build and test on the real PC (MSVC build, WASAPI audio, MIDI, Media Foundation

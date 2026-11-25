@@ -43,6 +43,31 @@ final class App: NSObject, NSApplicationDelegate {
     window.center(); window.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
     print("started")
+    // Self-check without touching the desktop: DECKHAND_SNAPSHOT=<dir> saves the host window, pops out, saves, docks, saves.
+    if let dir = ProcessInfo.processInfo.environment["DECKHAND_SNAPSHOT"] {
+      func shot(_ w: NSWindow?, _ name: String) {
+        guard let w else { print("no window for \(name)"); return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        p.arguments = ["-x", "-o", "-l", String(w.windowNumber), dir + "/" + name + ".png"]  // this window only
+        try? p.run(); p.waitUntilExit()
+        print("saved \(name) status \(p.terminationStatus)")
+      }
+      let popWindow = { NSApp.windows.first { $0 !== self.window && $0.contentView === s.view } }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+        shot(self.window, "1-inline")
+        s.popOut()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+          shot(popWindow(), "2-popped")
+          shot(self.window, "2-host-while-popped")
+          s.dock()
+          DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            shot(self.window, "3-docked")
+            NSApp.terminate(nil)
+          }
+        }
+      }
+    }
   }
   func applicationWillTerminate(_ n: Notification) { session?.shutdown() }
 }
