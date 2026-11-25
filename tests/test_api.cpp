@@ -540,10 +540,13 @@ void exercise_ws(ApiServer& s, std::uint16_t port, bool tls, Tokens& t) {
   CHECK(r["result"]["s"].as_string().size() == 70000);
 
   // protocol violations each end with the right close code
-  auto expect_close = [&](const std::string& bytes, int code) {
+  // cut_off: the server may close before it has read all of a huge frame; on Windows loopback (small socket
+  // buffers) the client's send then fails part-way. The close frame and its code are still required below.
+  auto expect_close = [&](const std::string& bytes, int code, bool cut_off = false) {
     Conn c;
     CHECK(ws_connect(c, port, t.reader, tls));
-    CHECK(c.c.send(bytes));
+    const bool sent = c.c.send(bytes);
+    CHECK(sent || cut_off);
     Frame fr;
     CHECK(read_frame(c, &fr) && fr.op == 8 && close_code(fr) == code);
     CHECK(c.fill(2000) < 0);
@@ -557,7 +560,7 @@ void exercise_ws(ApiServer& s, std::uint16_t port, bool tls, Tokens& t) {
   expect_close(std::string(1, static_cast<char>(0xC1)) + std::string(1, static_cast<char>(0x80)) + "abcd", 1002);  // RSV1
   expect_close(ws_frame(3, ""), 1002);                                // reserved opcode
   expect_close(ws_big_header(10ull << 20), 1009);                     // announced size over the limit, never sent
-  expect_close(ws_frame(1, std::string(300 * 1024, 'x')), 1009);      // oversize message
+  expect_close(ws_frame(1, std::string(300 * 1024, 'x')), 1009, true);      // oversize message
   expect_close(ws_frame(1, "a", false) + ws_frame(1, "b"), 1002);     // new data frame inside a fragmented message
   expect_close(ws_frame(8, std::string("\x03\xe8", 2) + "bye"), 1000);  // clean close is echoed
   expect_close(ws_frame(8, std::string("\x03\xe5", 2)), 1002);        // 1005 must not appear on the wire
