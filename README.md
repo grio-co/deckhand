@@ -21,6 +21,7 @@ full control API.
   master (14 beat effects); 16-slot sampler.
 - Crash isolation: the audio engine is a separate process that owns the sound device,
   recorder and controllers. If the UI crashes the music keeps playing, and the UI re-attaches.
+- Library backups: copied before any upgrade; back up and restore with `deckhandctl` ([docs/BACKUP.md](docs/BACKUP.md)).
 - Library sync between machines through any folder your cloud drive or a USB stick replicates
   ([docs/SYNC.md](docs/SYNC.md)); set `sync.folder` (no settings screen for it yet).
 - Recording of the master output to 24-bit WAV (the file stays playable if the app is killed).
