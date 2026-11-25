@@ -96,6 +96,36 @@ void Library::migrate() {
     tx.commit();
     DH_LOG(Info, "library migrated to schema %d", 2);
   }
+  if (version < 3) {
+    // Substring search index (FTS5 trigram, case-insensitive) kept in step with `tracks` by triggers. Optional: an
+    // SQLite build without FTS5 keeps working with the LIKE scan.
+    try {
+      Transaction tx(db_);
+      db_.exec(
+          "CREATE VIRTUAL TABLE tracks_fts USING fts5(title, artist, album, rel_path, content='tracks', content_rowid='id',"
+          " tokenize='trigram');"
+          "CREATE TRIGGER tracks_fts_ai AFTER INSERT ON tracks BEGIN"
+          " INSERT INTO tracks_fts(rowid, title, artist, album, rel_path) VALUES (new.id, new.title, new.artist, new.album, new.rel_path);"
+          " END;"
+          "CREATE TRIGGER tracks_fts_ad AFTER DELETE ON tracks BEGIN"
+          " INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, rel_path) VALUES ('delete', old.id, old.title, old.artist, old.album, old.rel_path);"
+          " END;"
+          "CREATE TRIGGER tracks_fts_au AFTER UPDATE OF title, artist, album, rel_path ON tracks BEGIN"
+          " INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, rel_path) VALUES ('delete', old.id, old.title, old.artist, old.album, old.rel_path);"
+          " INSERT INTO tracks_fts(rowid, title, artist, album, rel_path) VALUES (new.id, new.title, new.artist, new.album, new.rel_path);"
+          " END;"
+          "INSERT INTO tracks_fts(tracks_fts) VALUES ('rebuild');"
+          "UPDATE schema_version SET version = 3;");
+      tx.commit();
+      DH_LOG(Info, "library migrated to schema %d (search index built)", 3);
+    } catch (const std::exception& e) {
+      DH_LOG(Warn, "search index unavailable (%s); searching without it", e.what());
+    }
+  }
+  {
+    Stmt s(db_, "SELECT 1 FROM sqlite_master WHERE name='tracks_fts'");
+    fts_ = s.step();
+  }
 }
 
 std::int64_t Library::track_count() {
@@ -123,11 +153,12 @@ std::vector<PlaylistNode> Library::playlists() {
 
 namespace {
 // SELECT body shared by tracks() and track_ids(); `columns` is what to read. Roots are joined only when rows are read.
-std::string track_query(const char* columns, bool join_roots, std::int64_t playlist_id, SortKey sort, bool descending) {
+std::string track_query(const char* columns, bool join_roots, bool fts, std::int64_t playlist_id, SortKey sort, bool descending) {
   std::string sql = std::string("SELECT ") + columns + " FROM tracks t";
   if (join_roots) sql += " JOIN library_roots r ON r.id = t.root_id";
   if (playlist_id) sql += " JOIN playlist_tracks p ON p.track_id = t.id AND p.playlist_id = ?1";
-  sql += " WHERE (?2 = '' OR t.title LIKE ?3 OR t.artist LIKE ?3 OR t.album LIKE ?3 OR t.rel_path LIKE ?3)";
+  if (fts) sql += " WHERE (?2 = '' OR t.id IN (SELECT rowid FROM tracks_fts WHERE tracks_fts MATCH ?3))";
+  else sql += " WHERE (?2 = '' OR t.title LIKE ?3 OR t.artist LIKE ?3 OR t.album LIKE ?3 OR t.rel_path LIKE ?3)";
   const char* column = nullptr;
   switch (sort) {
     case SortKey::Default: break;
@@ -150,13 +181,27 @@ std::string track_query(const char* columns, bool join_roots, std::int64_t playl
 }
 }  // namespace
 
+bool Library::use_fts(const std::string& search) const {
+  if (!fts_) return false;
+  std::size_t chars = 0;
+  for (unsigned char c : search) chars += (c & 0xC0) != 0x80;  // code points, not bytes
+  return chars >= 3;  // the trigram index cannot answer shorter terms
+}
+
+std::string Library::search_pattern(const std::string& search) const {
+  if (!use_fts(search)) return "%" + search + "%";
+  std::string q = "\"";  // one quoted phrase: every character literal, matched as a substring
+  for (char c : search) q += c == '"' ? std::string("\"\"") : std::string(1, c);
+  return q + "\"";
+}
+
 std::vector<TrackRow> Library::tracks(std::int64_t playlist_id, const std::string& search, SortKey sort,
                                       bool descending) {
-  const std::string sql = track_query(kTrackColumns, true, playlist_id, sort, descending);
+  const std::string sql = track_query(kTrackColumns, true, use_fts(search), playlist_id, sort, descending);
   Stmt s(db_, sql.c_str());
   if (playlist_id) s.bind(1, playlist_id);
   s.bind(2, search);
-  s.bind(3, "%" + search + "%");
+  s.bind(3, search_pattern(search));
   std::vector<TrackRow> out;
   while (s.step()) out.push_back(read_track(s));
   return out;
@@ -164,11 +209,11 @@ std::vector<TrackRow> Library::tracks(std::int64_t playlist_id, const std::strin
 
 std::vector<std::int64_t> Library::track_ids(std::int64_t playlist_id, const std::string& search, SortKey sort,
                                              bool descending) {
-  const std::string sql = track_query("t.id", false, playlist_id, sort, descending);
+  const std::string sql = track_query("t.id", false, use_fts(search), playlist_id, sort, descending);
   Stmt s(db_, sql.c_str());
   if (playlist_id) s.bind(1, playlist_id);
   s.bind(2, search);
-  s.bind(3, "%" + search + "%");
+  s.bind(3, search_pattern(search));
   std::vector<std::int64_t> out;
   if (playlist_id == 0 && search.empty()) out.reserve(static_cast<std::size_t>(track_count()));
   while (s.step()) out.push_back(s.i64(0));

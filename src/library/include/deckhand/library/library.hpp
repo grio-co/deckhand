@@ -134,6 +134,9 @@ class Library {
 
  private:
   void migrate();
+  bool use_fts(const std::string& search) const;
+  std::string search_pattern(const std::string& search) const;
+  bool fts_ = false;  // tracks_fts (FTS5 trigram) exists: substring search of 3+ characters uses it
   Db db_;
 };
 

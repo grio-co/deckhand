@@ -46,6 +46,11 @@ int main() {
     }
     CHECK(lib.track_ids(0, "alp", SortKey::Default).size() == 1 && lib.track_ids(0, "alp")[0] == a);
     CHECK(lib.track_ids(0, "nomatch").empty());
+    CHECK(lib.track_ids(0, "AlPh").size() == 1);           // case-insensitive, 4 chars: index path
+    CHECK(lib.track_ids(0, "al").size() == 1);             // 2 chars: LIKE path
+    CHECK(lib.track_ids(0, "mp3").size() == 1);            // matches the file name
+    CHECK(lib.track_ids(0, "a\"b").empty());               // quote characters are literal
+    CHECK(lib.track_ids(0, "100%").empty());               // so are LIKE wildcards
 
     // Playlists and folders.
     const auto folder = lib.create_playlist(0, "Sets", true);
@@ -87,6 +92,7 @@ int main() {
     e.rating = 4;
     lib.edit_track(a, e);
     CHECK(lib.track(a)->title == "Alpha (Edit)" && lib.track(a)->rating == 4 && lib.track(a)->artist == "Zed");
+    CHECK(lib.track_ids(0, "(Edit)").size() == 1 && lib.track_ids(0, "alpha (e").size() == 1);  // index follows the edit
     lib.set_key(a, "8A");
     CHECK(lib.track(a)->key == "8A");
     CHECK(!lib.gain_db(a));
@@ -111,6 +117,7 @@ int main() {
 
     // Removing a track keeps playlists dense and history readable.
     lib.remove_track(a);
+    CHECK(lib.track_ids(0, "alpha").empty());  // and the delete
     CHECK((lib.playlist_track_ids(list) == std::vector<std::int64_t>{c}));
     hist = lib.history(session);
     CHECK(hist.size() == 2 && hist[0].track_id == 0);

@@ -9,6 +9,7 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [ ] Read controls' initial positions at connect (needs a documented method)
 
 ## Done
+- [x] Library search through an FTS5 trigram index (schema 3, triggers keep it current; LIKE scan below 3 characters or without FTS5): 100k tracks ~200 ms -> ~17 ms
 - [x] Track table keeps ids and fetches only the visible rows: 100k-track refresh 0.2-0.3 s -> 10-50 ms (tools/bench_library.cpp)
 - [x] Repository, CMake skeleton, module layout, licence, schema
 - [x] M1 Library storage and read-only importer, `deckhandctl`
@@ -42,7 +43,6 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [x] Controllers: effect unit assignment, master cue, learn choices by name
 
 ## Next
-- [ ] Library search at 100k tracks still scans four columns with LIKE (~0.2 s per keystroke); needs an index (FTS) or debounce
 - [ ] Embedding (docs/EMBEDDING.md): test input and audio inside Rig; Rig side wires `DeckHandKit` (Rig session)
 - [ ] Linux: rerun the container build against the skin-driven UI; fall back to no audio device
       cleanly; audio-route change notifications; test on a real machine (audio, MIDI, Wayland)
