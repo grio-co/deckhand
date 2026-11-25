@@ -81,6 +81,10 @@ class Library {
   // playlist_id 0 = whole collection. search matches title / artist / album.
   std::vector<TrackRow> tracks(std::int64_t playlist_id, const std::string& search,
                                SortKey sort = SortKey::Default, bool descending = false);
+  // Same ordering and filtering as tracks(), but ids only (no row building): for large libraries the track table
+  // keeps the ids and fetches just the rows on screen with track().
+  std::vector<std::int64_t> track_ids(std::int64_t playlist_id, const std::string& search, SortKey sort = SortKey::Default,
+                                      bool descending = false);
   std::optional<TrackRow> track(std::int64_t id);
   std::vector<Cue> cues(std::int64_t track_id);
   std::vector<BeatSection> beatgrid(std::int64_t track_id);

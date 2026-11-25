@@ -336,7 +336,7 @@ void App::do_action(const ui::Target& t) {
     std::int64_t id = 0;
     {
       std::lock_guard<std::mutex> lock(browse_mutex_);
-      if (sel_ >= 0 && sel_ < static_cast<int>(rows_.size())) id = rows_[static_cast<std::size_t>(sel_)].id;
+      if (sel_ >= 0 && sel_ < static_cast<int>(rows_.size())) id = rows_.id(static_cast<std::size_t>(sel_));
     }
     if (id) request_load(t.deck, id);
   } else if (n == "add_to" || n == "edit_track") {
@@ -344,7 +344,7 @@ void App::do_action(const ui::Target& t) {
     {
       std::lock_guard<std::mutex> lock(browse_mutex_);
       have = sel_ >= 0 && sel_ < static_cast<int>(rows_.size());
-      if (have) edit_track_ = rows_[static_cast<std::size_t>(sel_)].id;
+      if (have) edit_track_ = rows_.id(static_cast<std::size_t>(sel_));
     }
     if (have) open_panel(n == "add_to" ? Panel::AddTo : Panel::Tags);
   } else if (n == "remove" || n.compare(0, 9, "playlist_") == 0) {
@@ -775,7 +775,7 @@ void App::draw_tracks(const Rect& table, const ui::Theme& th, const std::string&
     dl_.rect(body.x + body.w - 5, bar_y, 4, bar_h, th.line);
   }
   if (load_deck >= 0 && sel_ >= 0 && sel_ < static_cast<int>(rows_.size())) {
-    request_load(load_deck, rows_[static_cast<std::size_t>(sel_)].id);  // does not touch browse state
+    request_load(load_deck, rows_.id(static_cast<std::size_t>(sel_)));  // does not touch browse state
   }
 }
 

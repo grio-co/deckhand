@@ -385,7 +385,43 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
 
   std::mutex browse_mutex_;  // guards the browse state, shared with the controller thread
   std::vector<TreeItem> tree_;
-  std::vector<TrackRow> rows_;
+  // The track table: all ids, rows fetched lazily for the part on screen (so a 100k library does not build 100k rows
+  // per refresh). id() touches no database and is safe under browse_mutex_ from any thread; operator[] reads the
+  // library and is for the UI thread only.
+  class TrackList {
+   public:
+    void set(Library* lib, std::vector<std::int64_t> ids) {
+      lib_ = lib;
+      ids_ = std::move(ids);
+      cache_.clear();
+      lo_ = 0;
+    }
+    std::size_t size() const { return ids_.size(); }
+    bool empty() const { return ids_.empty(); }
+    std::int64_t id(std::size_t i) const { return ids_[i]; }
+    const TrackRow& operator[](std::size_t i) {
+      if (i < lo_ || i >= lo_ + cache_.size()) {
+        lo_ = i > 32 ? i - 32 : 0;
+        const std::size_t hi = std::min(ids_.size(), lo_ + 160);
+        cache_.clear();
+        for (std::size_t k = lo_; k < hi; ++k) {
+          std::optional<TrackRow> row = lib_ ? lib_->track(ids_[k]) : std::nullopt;
+          if (!row) {
+            row.emplace();  // removed meanwhile: keep the slot, the table is rebuilt on the next refresh
+            row->id = ids_[k];
+          }
+          cache_.push_back(std::move(*row));
+        }
+      }
+      return cache_[i - lo_];
+    }
+
+   private:
+    Library* lib_ = nullptr;
+    std::vector<std::int64_t> ids_;
+    std::vector<TrackRow> cache_;  // rows [lo_, lo_ + cache_.size())
+    std::size_t lo_ = 0;
+  } rows_;
   TreeItem::Kind view_ = TreeItem::Collection;  // what the track table shows
   std::int64_t playlist_id_ = 0;                // playlist or history session, by view_
   int tree_sel_ = 0;                            // index into tree_

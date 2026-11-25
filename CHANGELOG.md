@@ -6,6 +6,7 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- `Library::track_ids()`; the track table holds ids and loads only visible rows (large libraries refresh in tens of ms)
 - Embedding on macOS: `DeckHandKit` Swift package (inline view, pop-out window, helper path and folders set by the host),
   `scripts/build-embed.sh`, `DECKHAND_ENGINE_HELPER` override; the standalone app builds from the same sources (docs/EMBEDDING.md)
 - macOS application: Swift shell (window, Metal renderer, CoreText text, input, drag and drop)

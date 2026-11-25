@@ -35,6 +35,18 @@ int main() {
     rows = lib.tracks(0, "", SortKey::Default, false);
     CHECK(rows[0].id == c);  // artist Xi first
 
+    // track_ids() is tracks() without building rows: same order and filtering for every sort and a search.
+    for (SortKey k : {SortKey::Default, SortKey::Title, SortKey::Artist, SortKey::Bpm, SortKey::Key}) {
+      for (bool desc : {false, true}) {
+        const auto full = lib.tracks(0, "", k, desc);
+        const auto ids = lib.track_ids(0, "", k, desc);
+        CHECK(ids.size() == full.size());
+        for (std::size_t i = 0; i < ids.size(); ++i) CHECK(ids[i] == full[i].id);
+      }
+    }
+    CHECK(lib.track_ids(0, "alp", SortKey::Default).size() == 1 && lib.track_ids(0, "alp")[0] == a);
+    CHECK(lib.track_ids(0, "nomatch").empty());
+
     // Playlists and folders.
     const auto folder = lib.create_playlist(0, "Sets", true);
     const auto list = lib.create_playlist(folder, "Friday", false);

@@ -121,10 +121,11 @@ std::vector<PlaylistNode> Library::playlists() {
   return out;
 }
 
-std::vector<TrackRow> Library::tracks(std::int64_t playlist_id, const std::string& search, SortKey sort,
-                                      bool descending) {
-  std::string sql = std::string("SELECT ") + kTrackColumns +
-                    " FROM tracks t JOIN library_roots r ON r.id = t.root_id";
+namespace {
+// SELECT body shared by tracks() and track_ids(); `columns` is what to read. Roots are joined only when rows are read.
+std::string track_query(const char* columns, bool join_roots, std::int64_t playlist_id, SortKey sort, bool descending) {
+  std::string sql = std::string("SELECT ") + columns + " FROM tracks t";
+  if (join_roots) sql += " JOIN library_roots r ON r.id = t.root_id";
   if (playlist_id) sql += " JOIN playlist_tracks p ON p.track_id = t.id AND p.playlist_id = ?1";
   sql += " WHERE (?2 = '' OR t.title LIKE ?3 OR t.artist LIKE ?3 OR t.album LIKE ?3 OR t.rel_path LIKE ?3)";
   const char* column = nullptr;
@@ -145,12 +146,32 @@ std::vector<TrackRow> Library::tracks(std::int64_t playlist_id, const std::strin
   } else {
     sql += playlist_id ? " ORDER BY p.position" : " ORDER BY t.artist COLLATE NOCASE, t.title COLLATE NOCASE";
   }
+  return sql;
+}
+}  // namespace
+
+std::vector<TrackRow> Library::tracks(std::int64_t playlist_id, const std::string& search, SortKey sort,
+                                      bool descending) {
+  const std::string sql = track_query(kTrackColumns, true, playlist_id, sort, descending);
   Stmt s(db_, sql.c_str());
   if (playlist_id) s.bind(1, playlist_id);
   s.bind(2, search);
   s.bind(3, "%" + search + "%");
   std::vector<TrackRow> out;
   while (s.step()) out.push_back(read_track(s));
+  return out;
+}
+
+std::vector<std::int64_t> Library::track_ids(std::int64_t playlist_id, const std::string& search, SortKey sort,
+                                             bool descending) {
+  const std::string sql = track_query("t.id", false, playlist_id, sort, descending);
+  Stmt s(db_, sql.c_str());
+  if (playlist_id) s.bind(1, playlist_id);
+  s.bind(2, search);
+  s.bind(3, "%" + search + "%");
+  std::vector<std::int64_t> out;
+  if (playlist_id == 0 && search.empty()) out.reserve(static_cast<std::size_t>(track_count()));
+  while (s.step()) out.push_back(s.i64(0));
   return out;
 }
 

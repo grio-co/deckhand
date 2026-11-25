@@ -802,7 +802,7 @@ void App::load_selected(int deck) {
   {
     std::lock_guard<std::mutex> lock(browse_mutex_);
     if (rows_dirty_ || sel_ < 0 || sel_ >= static_cast<int>(rows_.size())) return;
-    id = rows_[static_cast<std::size_t>(sel_)].id;
+    id = rows_.id(static_cast<std::size_t>(sel_));
   }
   request_load(deck, id);
 }
@@ -891,7 +891,7 @@ void App::key(dh_key key, std::uint32_t mods) {
       case DH_KEY_RIGHT:
         if ((mods & (DH_MOD_SHIFT | DH_MOD_COMMAND)) && have) {
           load_deck = key == DH_KEY_LEFT ? 0 : 1;
-          load_id = rows_[static_cast<std::size_t>(sel_)].id;
+          load_id = rows_.id(static_cast<std::size_t>(sel_));
         }
         break;
       case DH_KEY_ENTER:
@@ -899,7 +899,7 @@ void App::key(dh_key key, std::uint32_t mods) {
           search_focus_ = false;
         } else if (have) {
           load_deck = engine_->deck(0).playing ? 1 : 0;
-          load_id = rows_[static_cast<std::size_t>(sel_)].id;
+          load_id = rows_.id(static_cast<std::size_t>(sel_));
         }
         break;
       case DH_KEY_ESCAPE:
@@ -1013,12 +1013,13 @@ void App::refresh_rows() {
     playlist_id_ = 0;
   }
   if (view_ == TreeItem::HistorySession) {
-    rows_.clear();
+    std::vector<std::int64_t> ids;
     for (const HistoryEntry& e : lib_->history(playlist_id_)) {
-      if (auto row = lib_->track(e.track_id)) rows_.push_back(std::move(*row));
+      if (lib_->track(e.track_id)) ids.push_back(e.track_id);
     }
+    rows_.set(lib_.get(), std::move(ids));
   } else {
-    rows_ = lib_->tracks(view_ == TreeItem::Playlist ? playlist_id_ : 0, search_, sort_, sort_desc_);
+    rows_.set(lib_.get(), lib_->track_ids(view_ == TreeItem::Playlist ? playlist_id_ : 0, search_, sort_, sort_desc_));
   }
   sel_ = rows_.empty() ? 0 : std::clamp(sel_, 0, static_cast<int>(rows_.size()) - 1);
 }

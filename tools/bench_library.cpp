@@ -17,6 +17,9 @@ int main(int,char**argv){
   if (fresh) { Transaction tx(lib.db());
     for (int i = 0; i < 100000; i++) { NewTrack t; t.path = "/music/d" + std::to_string(i % 500) + "/f" + std::to_string(i) + ".mp3"; t.title = "Title " + std::to_string((i * 7919) % 100000); t.artist = "Artist " + std::to_string((i * 104729) % 3000); t.album = "Album " + std::to_string(i % 4000); t.bpm = 80 + i % 100; t.key = "8A"; lib.upsert_track(t); }
     tx.commit(); }
+  printf("ids only (default) %.0f | ids title %.0f | ids search %.0f ms\n",
+   best([&]{lib.track_ids(0,"",SortKey::Default);}), best([&]{lib.track_ids(0,"",SortKey::Title);}),
+   best([&]{lib.track_ids(0,"title 99",SortKey::Default);}));
   printf("default %.0f | title %.0f | bpm %.0f | artist-desc %.0f | search %.0f | playlist-free-search(x) %.0f ms\n",
    best([&]{lib.tracks(0,"",SortKey::Default);}), best([&]{lib.tracks(0,"",SortKey::Title);}),
    best([&]{lib.tracks(0,"",SortKey::Bpm);}), best([&]{lib.tracks(0,"",SortKey::Artist,true);}),
