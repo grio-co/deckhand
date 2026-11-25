@@ -6,6 +6,8 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Library sync keeps what it had published when a library is restored from an older backup; the source-library
+  import no longer starts by itself without its key file
 - Library sync: optional passphrase encryption of the sync folder (AES-256-GCM, scrypt; Settings, Library sync);
   logs compact by themselves past 64 files, dropping the details of items deleted over 180 days ago
 - Windows: first fixes for the Visual Studio (MSVC) build found on a real PC (atomic store, 64-bit seek, duplicate manifest); not yet rebuilt there

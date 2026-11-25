@@ -899,6 +899,69 @@ void test_tombstone_cleanup() {
   CHECK(title_of(a, 2) == "Doomed" && count(a, "SELECT count(*) FROM tracks WHERE artist = 'Gone Artist' AND bpm = 120") == 1);
 }
 
+void restore_backup(Dev& d, const std::string& backup) {
+  d.stop();
+  for (const char* suffix : {"", "-wal", "-shm"}) fs::remove(d.dir + "/library.db" + suffix);
+  fs::copy_file(backup, d.dir + "/library.db");
+  d.start();
+}
+std::string take_backup(Dev& d) {
+  d.stop();
+  const std::string to = d.dir + "/backup.db";
+  fs::copy_file(d.dir + "/library.db", to, fs::copy_options::overwrite_existing);
+  d.start();
+  return to;
+}
+
+void test_restored_backup() {
+  Scenario s("restore");
+  Dev& a = s.add("A");
+  Dev& b = s.add("B");
+  add_track(a, 1, "One");
+  add_track(a, 2, "Two");
+  sync_all(s);
+  const std::string backup = take_backup(a);
+  adv();
+  edit_title(a, tid(a, 1), "After backup");
+  const auto later = a.lib->create_playlist(0, "Later", false);
+  a.lib->add_to_playlist(later, tid(a, 1));
+  sync_all(s);
+  adv();
+  restore_backup(a, backup);
+  // A new playlist before the next sync must not take the identity of the one made after the backup.
+  const auto fresh = a.lib->create_playlist(0, "Fresh", false);
+  a.lib->add_to_playlist(fresh, tid(a, 2));
+  // Compacting straight away must not lose what only the newer files held.
+  CHECK(a.eng->compact().ok);
+  Dev& c = s.add("C");
+  sync_all(s);
+  expect_equal(s);
+  CHECK(title_of(a, 1) == "After backup" && title_of(c, 1) == "After backup");
+  CHECK(c.lib->playlist_track_ids(playlist_named(c, "Later")).size() == 1);
+  CHECK(c.lib->playlist_track_ids(playlist_named(c, "Fresh")).size() == 1);
+
+  // A backup from before encryption was turned on: nothing is written until the passphrase is back.
+  if (!SyncEngine::encryption_available()) return;
+  Scenario e("restore_crypt");
+  Dev& d = e.add("D");
+  add_track(d, 3, "Three");
+  sync_all(e);
+  const std::string plain = take_backup(d);
+  restart(d, "correct horse");
+  adv();
+  edit_title(d, tid(d, 3), "Hidden");
+  sync(d);
+  d.stop();
+  d.pass.clear();
+  restore_backup(d, plain);
+  adv();
+  const int files = e.files_in_folder();
+  CHECK(!d.eng->sync_once().ok && e.files_in_folder() == files);
+  restart(d, "correct horse");
+  sync(d);
+  CHECK(title_of(d, 3) == "Hidden" && !folder_contains(e.folder, "Hidden"));
+}
+
 void test_auto_compaction() {
   Scenario s("autocompact");
   Dev& a = s.add("A");
@@ -993,6 +1056,7 @@ int main() {
   test_encrypted_format();
   test_tombstone_cleanup();
   test_auto_compaction();
+  test_restored_backup();
   test_big_library();
   std::error_code ec;
   fs::remove_all(fs::temp_directory_path() / ("dh_sync_fp_" + std::to_string(run_id())), ec);

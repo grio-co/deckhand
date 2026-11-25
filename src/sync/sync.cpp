@@ -566,7 +566,11 @@ struct SyncEngine::Impl {
       hlc_ctr = s.ctr;
     }
   }
-  std::string new_eid() { return dev + ":" + hex_of(++eid_ctr); }
+  // Never below the clock: a library restored from an older backup must not hand out an id it already used.
+  std::string new_eid() {
+    eid_ctr = std::max<std::uint64_t>(eid_ctr + 1, static_cast<std::uint64_t>(std::max<std::int64_t>(0, now())));
+    return dev + ":" + hex_of(eid_ctr);
+  }
 
   // Emit a local register if the live value differs from what the merged state says.
   // `force` emits it regardless: used when an entity comes back, because other devices may have pruned its fields.
@@ -1232,7 +1236,9 @@ struct SyncEngine::Impl {
     ParsedFile pf;
   };
 
-  void read_remote(std::vector<Incoming>& out, std::unordered_set<std::string>& present, SyncResult& r) {
+  // Other devices' unread files, or with own_from > 0 this device's own files from that sequence number on.
+  void read_remote(std::vector<Incoming>& out, std::unordered_set<std::string>& present, SyncResult& r,
+                   std::uint64_t own_from = 0) {
     std::error_code ec;
     const fs::path root = root_dir();
     if (!fs::is_directory(root, ec)) return;
@@ -1245,7 +1251,7 @@ struct SyncEngine::Impl {
       std::error_code e2;
       if (!d->is_directory(e2)) continue;
       const std::string device = d->path().filename().string();
-      if (device == dev || device.empty() || device[0] == '.') continue;
+      if ((device == dev) != (own_from > 0) || device.empty() || device[0] == '.') continue;
       struct F {
         std::uint64_t seq;
         bool snap;
@@ -1257,7 +1263,7 @@ struct SyncEngine::Impl {
         std::uint64_t seq;
         bool snap;
         const std::string name = f->path().filename().string();
-        if (!parse_name(name, seq, snap)) continue;
+        if (!parse_name(name, seq, snap) || seq < own_from) continue;
         std::error_code e3;
         const auto sz = fs::file_size(f->path(), e3);
         if (e3) continue;
@@ -1313,6 +1319,41 @@ struct SyncEngine::Impl {
         out.push_back(in);
       }
     }
+  }
+
+  // This device's directory holding files its library does not know it wrote means the library is older than they
+  // are (restored from a backup, or interrupted mid-write). They are merged back before anything is written, so
+  // that nothing already published is lost to a later compaction.
+  void recover_own(SyncResult& r) {
+    const std::uint64_t newest = scan_max_seq(own_dir());
+    if (newest < next_seq) return;
+    std::vector<Incoming> in;
+    std::unordered_set<std::string> present;
+    read_remote(in, present, r, next_seq);
+    Transaction tx(db);
+    int recovered = 0;
+    for (const auto& f : in) {
+      if (unusable(f.pf) || f.pf.unsupported)
+        throw std::runtime_error(
+            "this library is older than what it wrote to the sync folder, and those files cannot be read: " +
+            (f.pf.unsupported ? f.pf.problem
+                              : std::string("set the passphrase they were written with (nothing was written)")));
+      if (!f.pf.complete) r.warnings.push_back(f.dev + "/" + f.name + ": " + f.pf.problem);
+      for (const auto& rec : f.pf.regs) {
+        if (State::idx(rec.kind) < 0 || rec.field.empty()) continue;
+        if (rec.kind == 'G' && !setting_allowed(rec.eid, cfg.settings_allow)) continue;
+        observe(rec.st);
+        if (st.merge(rec.kind, rec.eid, rec.field, rec.st, rec.v)) ++recovered;
+      }
+    }
+    next_seq = newest + 1;
+    materialize();
+    flush_regs();
+    save_meta();
+    tx.commit();
+    if (recovered > 0)
+      r.warnings.push_back(std::to_string(recovered) + " changes read back from this library's own sync files");
+    r.records_applied += recovered;
   }
 
   // ---- apply ------------------------------------------------------------------------------------------------------
@@ -1726,6 +1767,7 @@ struct SyncEngine::Impl {
       run_capture(r);
       fault("capture.done");
       const std::string mode = prepare_encryption();
+      recover_own(r);
       if (!mode.empty()) {  // encryption turned on, off or re-keyed: replace every file this device has written
         if (own_file_count() > 0) write_snapshot(r);
         else write_pending(r);
@@ -1750,6 +1792,7 @@ struct SyncEngine::Impl {
     return guarded([&](SyncResult& r) {
       run_capture(r);
       const std::string mode = prepare_encryption();
+      recover_own(r);
       write_snapshot(r);
       if (!mode.empty()) commit_mode(mode);
     });

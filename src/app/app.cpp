@@ -109,7 +109,9 @@ App::App(const dh_platform& platform, const dh_config& config)
     j.kind = Job::Sync;
     post(j);
   }
-  if (lib_->track_count() == 0 && import_v6_available() && std::filesystem::exists(source_db())) {
+  // Import by itself only when it can succeed: without the key file the user gets the message when they ask for it.
+  if (lib_->track_count() == 0 && import_v6_available() && std::filesystem::exists(source_db()) &&
+      std::filesystem::exists(data_dir_ + "/source-v6.key")) {
     Job j;
     j.kind = Job::Import;
     post(j);

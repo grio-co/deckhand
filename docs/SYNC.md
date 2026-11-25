@@ -107,6 +107,11 @@ result is the same on every device.
   details of anything deleted more than 180 days earlier, in that device's snapshot and database. The deletion
   itself (one small tombstone) is kept indefinitely, so a device that was away for a long time still learns of it.
 
+Restoring a library backup: at the next sync DeckHand reads back what that library had written since the backup,
+then the other devices' changes. A restore therefore does not undo changes that already synced; edits made after the
+restore win. If encryption was set up or changed after the backup, enter the current passphrase first. A backup from
+before sync was set up joins as a new device, and its playlists appear next to the synced ones.
+
 Not provided: removing tombstones altogether (that needs every device to confirm it has seen the deletion), and
 syncing the audio files themselves.
 
