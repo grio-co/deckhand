@@ -6,3 +6,4 @@ build/
 build-*/
 build-windows*/
 platform/macos/DeckHandKit/Package.swift
+platform/macos/DeckHandKit/.build/
