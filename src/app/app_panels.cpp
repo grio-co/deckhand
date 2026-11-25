@@ -3,6 +3,10 @@
 // They take the raw pointer (ov_) because the main UI is blocked while one is open.
 #include "app_impl.hpp"
 
+#include <cctype>
+#include <cstdlib>
+#include <cstring>
+
 namespace deckhand {
 
 namespace {
