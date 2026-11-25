@@ -47,6 +47,7 @@ inline bool would_block(int e) { return e == WSAEWOULDBLOCK || e == WSAEINTR; }
 inline std::string error_text(int e) { return "error " + std::to_string(e); }
 inline void close_socket(Fd f) { ::closesocket(raw(f)); }
 inline void shutdown_both(Fd f) { ::shutdown(raw(f), SD_BOTH); }
+inline void shutdown_write(Fd f) { ::shutdown(raw(f), SD_SEND); }
 inline void set_nonblocking(Fd f) {
   u_long one = 1;
   ioctlsocket(raw(f), FIONBIO, &one);
@@ -96,6 +97,7 @@ inline bool would_block(int e) { return e == EAGAIN || e == EWOULDBLOCK || e == 
 inline std::string error_text(int e) { return std::strerror(e); }
 inline void close_socket(Fd f) { ::close(f); }
 inline void shutdown_both(Fd f) { ::shutdown(f, SHUT_RDWR); }
+inline void shutdown_write(Fd f) { ::shutdown(f, SHUT_WR); }
 inline void set_nonblocking(Fd f) {
   int fl = fcntl(f, F_GETFL, 0);
   if (fl >= 0) fcntl(f, F_SETFL, fl | O_NONBLOCK);
