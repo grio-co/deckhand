@@ -1,5 +1,7 @@
 #include "format.hpp"
 
+#include "crypto.hpp"
+
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -19,6 +21,7 @@ namespace {
 
 constexpr char kMagic[4] = {'D', 'H', 'L', 'G'};
 constexpr std::uint32_t kMaxFrame = 16u << 20;
+constexpr std::size_t kBatchBytes = 1u << 20;  // encrypted files: registers per sealed record
 
 const std::uint32_t* crc_table() {
   static std::uint32_t table[256];
@@ -110,6 +113,7 @@ bool decode_header(const std::string& payload, FileHeader& h) {
   h.device_name = r.str();
   h.seq = r.varint();
   h.created_ms = r.zigzag();
+  if (r.ok && r.p < r.e) h.salt = r.str();
   return r.ok && !h.device_id.empty();
 }
 
@@ -130,6 +134,32 @@ bool decode_reg(const std::string& payload, RegRec& rec) {
     default: return false;
   }
   return r.ok && !rec.st.dev.empty();
+}
+
+// Authenticated with each sealed record: the file prefix and header, the record's position and whether it ends the file.
+std::string batch_aad(const std::string& prefix, std::uint32_t index, bool last) {
+  std::string a = prefix;
+  put_u32(a, index);
+  a.push_back(last ? 1 : 0);
+  return a;
+}
+
+// Registers inside an opened batch: ordinary framed records.
+void read_batch(const std::string& plain, ParsedFile& f) {
+  const auto* d = reinterpret_cast<const unsigned char*>(plain.data());
+  std::size_t pos = 0;
+  while (plain.size() - pos >= 4) {
+    const std::uint32_t len = get_u32(d + pos);
+    if (len < 1 || len > kMaxFrame || plain.size() - pos < 4u + len + 4u) break;
+    const unsigned char* body = d + pos + 4;
+    if (crc32(body, len) != get_u32(body + len)) break;
+    RegRec r;
+    if (body[0] == kRecReg && decode_reg(std::string(reinterpret_cast<const char*>(body + 1), len - 1), r))
+      f.regs.push_back(std::move(r));
+    else
+      ++f.unknown_records;
+    pos += 4u + len + 4u;
+  }
 }
 
 }  // namespace
@@ -163,21 +193,44 @@ std::string Hash128::hex() const {
   return buf;
 }
 
-FileWriter::FileWriter(const FileHeader& h) {
+FileWriter::FileWriter(const FileHeader& h, const Sealer* sealer) {
   buf_.append(kMagic, 4);
   buf_.push_back(static_cast<char>(kFormatVersion));
   buf_.push_back(static_cast<char>(h.kind));
-  buf_.push_back(static_cast<char>(0));  // flags: no encrypted payloads written by this version
+  buf_.push_back(static_cast<char>(sealer ? kFlagEncrypted : 0));
   buf_.push_back(static_cast<char>(0));
   std::string p;
   put_str(p, h.device_id);
   put_str(p, h.device_name);
   put_varint(p, h.seq);
   put_zigzag(p, h.created_ms);
+  if (sealer) {
+    put_str(p, sealer->salt);
+    key_ = sealer->key;
+    aad_ = buf_ + p;
+  }
   frame(kRecHeader, p);
+  records_ = 0;  // the header is not counted
+}
+
+void FileWriter::seal_batch(bool last) {
+  std::string nonce, sealed;
+  if (!random_bytes(nonce, kNonceLen) || !seal(key_, nonce, batch_aad(aad_, batches_, last), batch_, sealed)) {
+    failed_ = true;
+  } else {
+    std::string p;
+    p.push_back(static_cast<char>(kCipherAes256Gcm));
+    p.push_back(last ? 1 : 0);
+    put_str(p, nonce);
+    p += sealed;
+    frame(kRecEncrypted, p);
+  }
+  ++batches_;
+  batch_.clear();
 }
 
 void FileWriter::frame(std::uint8_t type, const std::string& payload) {
+  ++records_;
   put_u32(buf_, static_cast<std::uint32_t>(payload.size() + 1));
   const std::size_t start = buf_.size();
   buf_.push_back(static_cast<char>(type));
@@ -200,13 +253,24 @@ void FileWriter::add(const RegRec& r) {
     case Val::Real: put_f64(p, r.v.d); break;
     case Val::Text: put_str(p, r.v.s); break;
   }
-  frame(kRecReg, p);
   ++count_;
+  if (key_.empty()) {
+    frame(kRecReg, p);
+    return;
+  }
+  put_u32(batch_, static_cast<std::uint32_t>(p.size() + 1));
+  const std::size_t start = batch_.size();
+  batch_.push_back(static_cast<char>(kRecReg));
+  batch_ += p;
+  put_u32(batch_, crc32(batch_.data() + start, batch_.size() - start));
+  if (batch_.size() >= kBatchBytes) seal_batch(false);
 }
 
 std::string FileWriter::finish() {
+  if (!key_.empty()) seal_batch(true);  // always written, so even an empty file is authenticated
+  if (failed_) return {};
   std::string p;
-  put_varint(p, count_);
+  put_varint(p, records_);
   put_u32(p, crc32(buf_.data(), buf_.size()));
   frame(kRecTrailer, p);
   return std::move(buf_);
@@ -222,7 +286,7 @@ bool parse_header(const std::string& s, FileHeader& out) {
   return decode_header(std::string(reinterpret_cast<const char*>(d + 13), len - 1), out);
 }
 
-ParsedFile parse_file(const std::string& bytes) {
+ParsedFile parse_file(const std::string& bytes, const KeyFor& key_for) {
   ParsedFile f;
   if (bytes.size() < 8 || std::memcmp(bytes.data(), kMagic, 4) != 0) {
     f.problem = "not a DeckHand sync file";
@@ -234,7 +298,11 @@ ParsedFile parse_file(const std::string& bytes) {
     f.problem = "written by a newer DeckHand (format version " + std::to_string(d[4]) + ")";
     return f;
   }
-  const bool may_encrypt = (d[6] & kFlagMayBeEncrypted) != 0;
+  f.encrypted = (d[6] & kFlagEncrypted) != 0;
+  std::string aad_prefix;
+  std::size_t records = 0;  // after the header, as counted by the trailer
+  std::uint32_t batch = 0;
+  bool sealed_end = false;
   std::size_t pos = 8;
   while (pos < bytes.size()) {
     if (bytes.size() - pos < 4) { f.problem = "truncated record"; break; }
@@ -248,12 +316,15 @@ ParsedFile parse_file(const std::string& bytes) {
       if (!decode_header(payload, f.header)) { f.problem = "bad header"; break; }
       f.header.kind = d[5];
       f.header_ok = true;
+      aad_prefix = bytes.substr(0, 8) + payload;
     } else if (!f.header_ok) {
       f.problem = "missing header";
       break;
     } else if (type == kRecReg) {
+      ++records;
       RegRec r;
-      if (decode_reg(payload, r)) {
+      // A plain register inside an encrypted file was not written by a holder of the key: ignore it.
+      if (!f.encrypted && decode_reg(payload, r)) {
         f.regs.push_back(std::move(r));
       } else {
         ++f.unknown_records;  // well-framed but unreadable: skip, keep going
@@ -263,13 +334,34 @@ ParsedFile parse_file(const std::string& bytes) {
       const std::uint64_t n = r.varint();
       if (!r.ok || r.e - r.p < 4) { f.problem = "bad trailer"; break; }
       const std::uint32_t crc = get_u32(r.p);
-      if (n != f.regs.size() + f.unknown_records) { f.problem = "record count mismatch"; break; }
+      if (n != records) { f.problem = "record count mismatch"; break; }
       if (crc != crc32(d, pos)) { f.problem = "file checksum mismatch"; break; }
+      if (f.encrypted && !sealed_end && !f.locked) { f.problem = "encrypted data is incomplete"; break; }
       f.complete = true;
       return f;
-    } else if (type == kRecEncrypted && may_encrypt) {
-      ++f.encrypted_records;  // reserved hook: payload decryption is not implemented in this version
+    } else if (type == kRecEncrypted && f.encrypted) {
+      ++records;
+      ++f.encrypted_records;
+      if (!f.locked && !sealed_end) {
+        Reader r(payload);
+        const std::uint8_t cipher = r.u8();
+        const bool last = r.u8() != 0;
+        const std::string nonce = r.str();
+        const std::string* key = r.ok && cipher == kCipherAes256Gcm && key_for ? key_for(f.header.salt) : nullptr;
+        std::string plain;
+        if (key && unseal(*key, nonce, batch_aad(aad_prefix, batch, last),
+                          std::string(reinterpret_cast<const char*>(r.p), static_cast<std::size_t>(r.e - r.p)), plain)) {
+          read_batch(plain, f);
+          ++f.opened_batches;
+          sealed_end = last;
+        } else {
+          f.locked = true;
+          f.problem = key ? "cannot decrypt (different passphrase, or damaged)" : "encrypted, and no key for it";
+        }
+        ++batch;
+      }
     } else {
+      ++records;
       ++f.unknown_records;
     }
     pos += 4u + len + 4u;

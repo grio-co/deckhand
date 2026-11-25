@@ -39,6 +39,24 @@ sync reports "sync folder is not available" and nothing is changed; DeckHand nev
 Library on a stick (portable): run DeckHand with the library database on the stick and the music on the stick; no
 sync folder is needed for that. To also follow your other computers, point the stick's DeckHand at the cloud folder.
 
+## Encryption
+
+Enter the same passphrase on every device (Settings, Library sync). DeckHand then encrypts what it writes into the
+folder and accepts only encrypted files from other devices.
+
+- Turning it on replaces the files that device had written. Other devices that were already syncing stop with "this
+  sync folder is encrypted" until they get the passphrase, and write nothing meanwhile.
+- A passphrase that does not open the folder is rejected the first time, before anything is written.
+- Changing it: enter the new one on every device. Until then, devices skip each other's files and say so; nothing
+  is lost. Clearing it everywhere writes plain files again.
+- There is no recovery. The passphrase only protects the folder: forgetting it costs nothing on a device that has
+  the library, so set a new one on every device.
+- Protected: titles, cues, playlists, history, settings and file paths. Visible to whoever can read the folder:
+  device names, random device ids, file sizes and times.
+- The passphrase is stored in each device's local library database. It is never synced and the API cannot read it.
+- The cloud provider may keep earlier, unencrypted versions of files in its own history or trash.
+- Builds without OpenSSL (currently iOS) cannot use or read an encrypted folder.
+
 Do not copy a library database file from one computer to another and then sync both: the copy shares the original's
 device identity. Start the second computer with an empty library and let sync fill it.
 
@@ -84,11 +102,13 @@ result is the same on every device.
   and its undamaged part is used; when the complete file arrives it replaces the partial result. It never corrupts
   your library.
 - Files from a newer DeckHand format are skipped with a warning. Unknown record types are ignored.
-- Compaction (`compact()`) replaces a device's log files with one snapshot of its own state, which keeps the folder
-  small and lets a new device join quickly. Deletions are kept as small tombstones indefinitely.
+- Compaction replaces a device's log files with one snapshot of its own state, which keeps the folder small and
+  lets a new device join quickly. It happens by itself once a device has more than 64 files. It also drops the
+  details of anything deleted more than 180 days earlier, in that device's snapshot and database. The deletion
+  itself (one small tombstone) is kept indefinitely, so a device that was away for a long time still learns of it.
 
-Not provided yet: encryption of the folder contents (see the format appendix for the planned hook), garbage
-collection of tombstones, and syncing the audio files themselves.
+Not provided: removing tombstones altogether (that needs every device to confirm it has seen the deletion), and
+syncing the audio files themselves.
 
 While a sync runs, nothing else may use the library database connection; the caller runs it from one worker and
 keeps other threads off the library connection until it returns.
@@ -169,11 +189,18 @@ Reading a device directory: use the newest complete snapshot, plus all logs with
 that snapshot's sequence are covered and ignored. A snapshot holds the registers the device itself authored that
 are still winning in its view, so the union of all devices' snapshots and logs equals the full state.
 
-Encryption hook: a writer that supports encryption sets flag bit 0 and wraps register records in type `0x20`
-records: `u8 cipher_id, str nonce, bytes ciphertext`, the ciphertext being a sequence of ordinary framed records
-sealed with an authenticated cipher keyed from a user passphrase (key derivation parameters would go in an
-extended header record). This version never writes them and reports and skips them when read; the header, trailer
-and checksums stay in the clear so a device without the key can still tell a file is complete.
+Encrypted files set flag bit 0. Their header record carries one more field, `str salt` (16 random bytes), and their
+registers are in `0x20` records instead of `0x02`: `u8 cipher_id (1 = AES-256-GCM), u8 last, str nonce (12 bytes),
+ciphertext followed by the 16 byte tag`. The plaintext is a sequence of ordinary framed register records, about 1 MiB
+per `0x20` record; the final one has `last` = 1 and is present even when empty. The key is scrypt(passphrase, salt,
+N = 32768, r = 8, p = 1, 32 bytes). Authenticated data: the 8 file bytes, the header payload, the record's index in
+the file (u32, from 0) and the `last` byte. Plain register records in an encrypted file are ignored. Headers,
+trailers and checksums stay in the clear, so a device without the key can still tell a file is complete; it does not
+mark such a file as read. A device joins the salt of encrypted files already in the folder that its passphrase opens.
+The trailer's record count is the number of records between header and trailer.
+
+Pruned tombstones: compaction keeps, for an entity deleted before the retention period, only `_del` (plus `parent`
+for a playlist and `pl` for an entry). A writer that brings an entity back therefore writes all its fields again.
 
 Local state: the sync module keeps its own tables in the library database (`sync_meta`, `sync_reg`, `sync_map`,
 `sync_track`, `sync_files`). `sync_reg` is the merged state and doubles as the "last exported state" the next capture

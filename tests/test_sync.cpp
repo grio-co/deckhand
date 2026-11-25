@@ -35,6 +35,9 @@ struct Dev {
   bool hints = false;
   std::function<bool(const char*)> fault;
   std::string folder;
+  std::string pass;
+  std::int64_t retention = 180ll * 24 * 3600 * 1000;
+  int compact_after = 64;
   std::unique_ptr<Library> lib;
   std::unique_ptr<SyncEngine> eng;
 
@@ -46,6 +49,9 @@ struct Dev {
     c.clock = [this] { return g_now + skew; };
     c.max_log_bytes = max_log;
     c.trust_path_hints = hints;
+    c.passphrase = pass;
+    c.tombstone_retention_ms = retention;
+    c.compact_after_files = compact_after;
     c.fault = [this](const char* s) { return fault && fault(s); };
     eng = std::make_unique<SyncEngine>(*lib, c);
   }
@@ -729,6 +735,189 @@ void test_compaction() {
   for (const auto& dv : devs) CHECK(!dv.name.empty() && dv.files >= 1);
 }
 
+void restart(Dev& d, const std::string& pass) {
+  d.stop();
+  d.pass = pass;
+  d.start();
+}
+std::string device_dir(Scenario& s, Dev& d) { return s.folder + "/DeckHandSync/v1/" + d.eng->status().device_id; }
+bool folder_contains(const std::string& folder, const std::string& needle) {
+  for (const auto& e : fs::recursive_directory_iterator(folder)) {
+    if (!e.is_regular_file()) continue;
+    std::ifstream in(e.path(), std::ios::binary);
+    std::stringstream b;
+    b << in.rdbuf();
+    if (b.str().find(needle) != std::string::npos) return true;
+  }
+  return false;
+}
+
+void test_encryption() {
+  if (!SyncEngine::encryption_available()) return;
+  Scenario s("crypt");
+  Dev& a = s.add("A");
+  Dev& b = s.add("B");
+  add_track(a, 1, "Plainly Visible");
+  sync_all(s);
+  CHECK(folder_contains(s.folder, "Plainly Visible"));
+
+  // Turning encryption on replaces this device's files; the other device then asks for the passphrase.
+  restart(a, "correct horse");
+  sync(a);
+  CHECK(!folder_contains(device_dir(s, a), "Plainly Visible"));
+  adv();
+  edit_title(a, tid(a, 1), "Secret Title");
+  sync(a);
+  CHECK(!folder_contains(device_dir(s, a), "Secret Title"));
+
+  // A device that never had the passphrase writes nothing into an encrypted folder.
+  Dev& c = s.add("C");
+  add_track(c, 3, "From C");
+  adv();
+  const auto refused = c.eng->sync_once();
+  CHECK(!refused.ok && refused.error.find("encrypted") != std::string::npos);
+  CHECK(!fs::exists(device_dir(s, c)) && !folder_contains(s.folder, "From C"));
+
+  // A wrong passphrase is rejected before anything is written.
+  restart(c, "wrong horse");
+  adv();
+  const auto wrong = c.eng->sync_once();
+  CHECK(!wrong.ok && wrong.error.find("passphrase") != std::string::npos);
+  CHECK(!fs::exists(device_dir(s, c)));
+
+  // B still writes plain files: A does not take them, and B (previously unencrypted) now refuses to continue.
+  adv();
+  CHECK(!b.eng->sync_once().ok);
+  restart(b, "correct horse");
+  restart(c, "correct horse");
+  sync_all(s);
+  expect_equal(s);
+  CHECK(title_of(b, 1) == "Secret Title" && count(a, "SELECT count(*) FROM tracks") == 2);
+  CHECK(!folder_contains(s.folder, "Secret Title") && !folder_contains(s.folder, "From C"));
+
+  // Nothing new: nothing written. Compaction keeps the encryption.
+  const int files = s.files_in_folder();
+  sync_all(s);
+  CHECK(s.files_in_folder() == files);
+  adv();
+  CHECK(a.eng->compact().ok);
+  CHECK(!folder_contains(s.folder, "Secret Title"));
+  Dev& d = s.add("D");
+  restart(d, "correct horse");
+  sync_all(s);
+  expect_equal(s);
+
+  // A new passphrase: the others are skipped until they have it too, and nothing is lost.
+  restart(a, "battery staple");
+  adv();
+  edit_title(a, tid(a, 1), "Re-keyed");
+  const auto ra = sync(a);
+  CHECK(ra.ok);
+  adv();
+  const auto rb = sync(b);
+  CHECK(rb.files_skipped > 0 && title_of(b, 1) == "Secret Title");
+  for (auto& dev : s.devs) restart(*dev, "battery staple");
+  sync_all(s);
+  expect_equal(s);
+  CHECK(title_of(b, 1) == "Re-keyed");
+
+  // Turning it off again everywhere writes plain files.
+  for (auto& dev : s.devs) restart(*dev, "");
+  sync_all(s, 4);
+  expect_equal(s);
+  CHECK(folder_contains(s.folder, "Re-keyed"));
+}
+
+void test_encrypted_format() {
+  if (!SyncEngine::encryption_available()) return;
+  detail::Sealer sealer{std::string(32, 'k'), std::string(16, 's')};
+  detail::FileHeader h;
+  h.device_id = "0123456789abcdef";
+  h.device_name = "A";
+  h.seq = 1;
+  detail::FileWriter w(h, &sealer);
+  for (int i = 0; i < 30000; ++i) {  // several sealed records
+    detail::RegRec r;
+    r.eid = "track-" + std::to_string(i);
+    r.field = "title";
+    r.st = {1000 + i, 0, h.device_id};
+    r.v = detail::Val::text("a title long enough to fill batches " + std::to_string(i));
+    w.add(r);
+  }
+  const std::string file = w.finish();
+  const detail::KeyFor right = [&](const std::string& salt) { return salt == sealer.salt ? &sealer.key : nullptr; };
+  const auto good = detail::parse_file(file, right);
+  CHECK(good.complete && good.encrypted && !good.locked && good.opened_batches > 1 && good.regs.size() == 30000);
+  const auto no_key = detail::parse_file(file);
+  CHECK(no_key.locked && no_key.regs.empty());
+  const std::string other(32, 'x');
+  CHECK(detail::parse_file(file, [&](const std::string&) { return &other; }).locked);
+  // An altered byte with a repaired record checksum still fails authentication.
+  std::string bad = file;
+  const std::size_t header_len = static_cast<unsigned char>(bad[8]);
+  const std::size_t rec = 8 + 4 + header_len + 4;
+  std::uint32_t len = 0;
+  for (int i = 0; i < 4; ++i) len |= static_cast<std::uint32_t>(static_cast<unsigned char>(bad[rec + i])) << (8 * i);
+  bad[rec + 4 + len / 2] ^= 1;
+  const std::uint32_t crc = detail::crc32(bad.data() + rec + 4, len);
+  for (int i = 0; i < 4; ++i) bad[rec + 4 + len + i] = static_cast<char>(crc >> (8 * i));
+  const auto tampered = detail::parse_file(bad, right);
+  CHECK(tampered.locked && tampered.regs.empty());
+  // Cut off after the first sealed record: what authenticated is usable, the file is not complete.
+  const auto cut = detail::parse_file(file.substr(0, rec + 4 + len + 4), right);
+  CHECK(!cut.complete && !cut.regs.empty() && cut.regs.size() < 30000);
+}
+
+void test_tombstone_cleanup() {
+  Scenario s("prune");
+  Dev& a = s.add("A");
+  Dev& b = s.add("B");
+  add_track(a, 1, "Keep");
+  add_track(a, 2, "Doomed", "Gone Artist");
+  add_track(b, 1, "Keep");
+  add_track(b, 2, "Doomed", "Gone Artist");
+  sync_all(s);
+  adv();
+  a.lib->remove_track(tid(a, 2));
+  sync_all(s);
+  const std::string regs = "SELECT count(*) FROM sync_reg WHERE kind = 'T' AND eid = '" + fp_of_seed(2) + "'";
+  const auto young = a.eng->compact();
+  CHECK(young.ok && young.records_pruned == 0 && count(a, regs.c_str()) > 1);
+  adv(200ll * 24 * 3600 * 1000);
+  const auto old = a.eng->compact();
+  CHECK(old.ok && old.records_pruned > 0 && count(a, regs.c_str()) == 1);
+  // B never pruned; a device joining now still sees the deletion.
+  Dev& c = s.add("C");
+  sync_all(s);
+  expect_equal(s);
+  CHECK(count(c, "SELECT count(*) FROM tracks") == 1);
+  // The file comes back on B with the same details: A, which pruned them, gets all of them again.
+  adv();
+  add_track(b, 2, "Doomed", "Gone Artist");
+  sync_all(s);
+  expect_equal(s);
+  CHECK(title_of(a, 2) == "Doomed" && count(a, "SELECT count(*) FROM tracks WHERE artist = 'Gone Artist' AND bpm = 120") == 1);
+}
+
+void test_auto_compaction() {
+  Scenario s("autocompact");
+  Dev& a = s.add("A");
+  a.compact_after = 4;
+  restart(a, "");
+  add_track(a, 1, "T");
+  for (int i = 0; i < 12; ++i) {
+    adv();
+    edit_title(a, tid(a, 1), "T" + std::to_string(i));
+    sync(a);
+  }
+  const std::string dir = device_dir(s, a);
+  CHECK(std::distance(fs::directory_iterator(dir), fs::directory_iterator()) <= 5);
+  Dev& b = s.add("B");
+  sync_all(s);
+  expect_equal(s);
+  CHECK(title_of(b, 1) == "T11");
+}
+
 void test_big_library() {
   Scenario s("big");
   Dev& a = s.add("A");
@@ -800,6 +989,10 @@ int main() {
   test_crash_safety();
   test_clock_skew();
   test_compaction();
+  test_encryption();
+  test_encrypted_format();
+  test_tombstone_cleanup();
+  test_auto_compaction();
   test_big_library();
   std::error_code ec;
   fs::remove_all(fs::temp_directory_path() / ("dh_sync_fp_" + std::to_string(run_id())), ec);

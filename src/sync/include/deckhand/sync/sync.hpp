@@ -26,6 +26,13 @@ struct SyncConfig {
   std::vector<std::string> settings_allow;                           // key prefixes that sync; see DefaultSettingsAllow
   std::size_t max_log_bytes = 1u << 20;                              // close a log file once it reaches this size
   bool trust_path_hints = true;  // relink a missing track when the other device's file path also exists here
+  // Non-empty: encrypt this device's files with a key derived from it, and accept only encrypted files from others.
+  // It is never written to the folder or the database by the engine.
+  std::string passphrase;
+  // Compaction drops the details of anything deleted longer ago than this (the deletion itself is kept).
+  // Negative: never.
+  std::int64_t tombstone_retention_ms = 180ll * 24 * 3600 * 1000;
+  int compact_after_files = 64;  // sync_once compacts once this device has more files than this; 0 = never
 };
 
 struct SyncResult {
@@ -38,6 +45,8 @@ struct SyncResult {
   int files_corrupt = 0;      // read but incomplete or damaged (valid records are still used)
   int records_applied = 0;    // remote records that changed local state
   int tracks_missing = 0;     // rows whose audio file is not on this device
+  int files_skipped = 0;      // other devices' files not usable with this passphrase (or lack of one)
+  int records_pruned = 0;     // details of long-deleted items dropped by compaction
   std::vector<std::string> warnings;
 };
 
@@ -79,6 +88,9 @@ class SyncEngine {
 
   Status status();
   std::vector<DeviceInfo> devices();
+
+  // False in builds without a crypto library: a passphrase is then an error.
+  static bool encryption_available();
 
   // Content fingerprint: size plus a hash of three 64 KiB windows (whole file when small). "" if unreadable.
   static std::string fingerprint_file(const std::string& path);

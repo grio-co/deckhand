@@ -53,7 +53,13 @@ void App::ui_field(const Rect& r, Field& f, const std::string& hint) {
   const bool focus = focus_ == &f;
   dl_.rrect(r.x, r.y, r.w, r.h, 4, rgba(10, 11, 14));
   dl_.rrect_outline(r.x, r.y, r.w, r.h, 4, focus ? th.accent : th.line, 1);
-  const std::string shown = f.text.empty() && !focus ? hint : f.text + (focus ? "|" : "");
+  std::string value = f.text;
+  if (f.secret) {  // one dot per character (UTF-8 continuation bytes do not count)
+    value.clear();
+    for (const char c : f.text)
+      if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) value += "\xE2\x80\xA2";
+  }
+  const std::string shown = f.text.empty() && !focus ? hint : value + (focus ? "|" : "");
   const std::string t = skin_->fit(shown, 12, 0, r.w - 14);
   if (!t.empty()) dl_.text(r.x + 7, r.y + (r.h - dl_.text_height(t, 12, 0)) / 2, t, 12, f.text.empty() && !focus ? th.dim : th.text, Align::Left, r.w - 14);
 }
@@ -146,6 +152,9 @@ void App::open_panel(Panel p) {
       sv_["sync.device_name"] = lib_->setting("sync.device_name", host_name());
       f_sync_folder_.text = sv_["sync.folder"];
       f_sync_name_.text = sv_["sync.device_name"];
+      sv_["sync.password"] = lib_->setting("sync.password");
+      f_sync_pass_.text = sv_["sync.password"];
+      f_sync_pass_.secret = true;
       post_kind(Job::SyncInfo);  // devices and last sync, read on the loader thread
       f_port_.text = sv_["api.port"];
       f_obs_host_.text = sv_["obs.host"];
@@ -233,6 +242,7 @@ void App::commit_settings() {
   const std::string old_folder = sv_["sync.folder"];
   text("sync.folder", f_sync_folder_, true);
   text("sync.device_name", f_sync_name_, false);
+  text("sync.password", f_sync_pass_, true);
   if (sv_["sync.folder"] != old_folder) post_kind(Job::SyncInfo);
 }
 
@@ -565,6 +575,11 @@ void App::draw_sync_section(float x, float& y, float rw) {
   dl_.text(x, y + 5, T("settings.sync_device"), 12, th.dim, Align::Left, lw - 6);
   ui_field({x + lw, y, std::min(rw - lw, 300.0f), 24}, f_sync_name_, host_name());
   y += line;
+  if (deckhand::sync::SyncEngine::encryption_available()) {
+    dl_.text(x, y + 5, T("settings.sync_passphrase"), 12, th.dim, Align::Left, lw - 6);
+    ui_field({x + lw, y, std::min(rw - lw, 300.0f), 24}, f_sync_pass_, T("settings.sync_passphrase_hint"));
+    y += line;
+  }
 
   SyncSummary s;
   {
@@ -585,6 +600,7 @@ void App::draw_sync_section(float x, float& y, float rw) {
   if (!have_folder) text = T("settings.sync_no_folder");
   else if (s.running) text = T("settings.sync_running"), color = th.text;
   else if (!s.error.empty() && !s.last_ok) text = T("settings.sync_error", {{"message", s.error}}), color = th.warn;
+  else if (s.skipped > 0) text = T("settings.sync_locked", {{"count", s.skipped}}), color = th.warn;
   else if (s.last_ms > 0 && s.sent >= 0) text = T("settings.sync_last", {{"time", date_text(s.last_ms)}, {"sent", s.sent}, {"received", s.received}}), color = th.text;
   else if (s.last_ms > 0) text = T("settings.sync_last_time", {{"time", date_text(s.last_ms)}}), color = th.text;
   else text = T("settings.sync_never");

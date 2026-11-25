@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "crypto.hpp"
 #include "deckhand/log/log.hpp"
 #include "format.hpp"
 #include "frac.hpp"
@@ -139,6 +140,22 @@ bool parse_name(const std::string& name, std::uint64_t& seq, bool& snapshot) {
   snapshot = ext == ".dhsnap";
   return true;
 }
+std::string from_hex(const std::string& h) {
+  const auto nib = [](char c) { return c >= 'a' ? c - 'a' + 10 : c - '0'; };
+  std::string out;
+  for (std::size_t i = 0; i + 1 < h.size(); i += 2) out.push_back(static_cast<char>(nib(h[i]) << 4 | nib(h[i + 1])));
+  return out;
+}
+std::string to_hex(const std::string& bytes) {
+  static const char digits[] = "0123456789abcdef";
+  std::string out;
+  for (const unsigned char c : bytes) {
+    out.push_back(digits[c >> 4]);
+    out.push_back(digits[c & 15]);
+  }
+  return out;
+}
+
 std::string file_name_for(std::uint64_t seq, bool snapshot) {
   char b[32];
   std::snprintf(b, sizeof b, "%08llu", static_cast<unsigned long long>(seq));
@@ -375,6 +392,8 @@ struct SyncEngine::Impl {
   std::int64_t last_sync = 0;
   std::string last_error;
   int changes = 0;
+  std::map<std::string, std::string> keys;  // salt -> derived key, for this passphrase
+  Sealer sealer;                            // set while this device writes encrypted files
 
   struct TC {
     std::string fp, path;
@@ -550,9 +569,10 @@ struct SyncEngine::Impl {
   std::string new_eid() { return dev + ":" + hex_of(++eid_ctr); }
 
   // Emit a local register if the live value differs from what the merged state says.
-  bool put(char kind, const std::string& eid, const std::string& field, const Val& v) {
+  // `force` emits it regardless: used when an entity comes back, because other devices may have pruned its fields.
+  bool put(char kind, const std::string& eid, const std::string& field, const Val& v, bool force = false) {
     const Reg* r = st.find(kind, eid, field);
-    if (r ? same(r->v, v) : v.empty()) return false;
+    if (!force && (r ? same(r->v, v) : v.empty())) return false;
     st.set_local(kind, eid, field, tick(), v);
     ++changes;
     return true;
@@ -760,14 +780,16 @@ struct SyncEngine::Impl {
       if (canon[t.fp] != static_cast<std::size_t>(&t - live.data())) continue;
       live_fps.insert(t.fp);
       const std::string& fp = t.fp;
-      if (!st.alive('T', fp)) put('T', fp, "_del", Val::integer(0));
-      for (int k = 0; k < kNumTrackFields; ++k) put('T', fp, kTrackFields[k].name, t.vals[static_cast<std::size_t>(k)]);
-      if (!st.find('T', fp, "hint") && !t.missing) {
-        put('T', fp, "file_name", Val::text(base_name(t.path)));
-        put('T', fp, "hint", Val::text(t.path));
+      const bool back = !st.alive('T', fp);
+      if (back) put('T', fp, "_del", Val::integer(0));
+      for (int k = 0; k < kNumTrackFields; ++k)
+        put('T', fp, kTrackFields[k].name, t.vals[static_cast<std::size_t>(k)], back);
+      if ((back || !st.find('T', fp, "hint")) && !t.missing) {
+        put('T', fp, "file_name", Val::text(base_name(t.path)), back);
+        put('T', fp, "hint", Val::text(t.path), back);
       }
       const auto g = grids.find(t.id);
-      put('T', fp, "grid", Val::text(g == grids.end() ? std::string() : g->second));
+      put('T', fp, "grid", Val::text(g == grids.end() ? std::string() : g->second), back);
       // Cues.
       std::unordered_set<std::string> seen;
       const auto ci = cues.find(t.id);
@@ -775,8 +797,9 @@ struct SyncEngine::Impl {
         for (const auto& c : ci->second) {
           if (!seen.insert(c.key).second) continue;
           const std::string eid = fp + "#" + c.key;
-          if (st.entity('C', eid) && !st.alive('C', eid)) put('C', eid, "_del", Val::integer(0));
-          for (int k = 0; k < 5; ++k) put('C', eid, kCueFields[k], c.vals[static_cast<std::size_t>(k)]);
+          const bool revived = st.entity('C', eid) && !st.alive('C', eid);
+          if (revived) put('C', eid, "_del", Val::integer(0));
+          for (int k = 0; k < 5; ++k) put('C', eid, kCueFields[k], c.vals[static_cast<std::size_t>(k)], revived);
         }
       }
       const std::string prefix = fp + "#";
@@ -817,12 +840,17 @@ struct SyncEngine::Impl {
     }
     for (const auto& r : rows)
       if (!pm.l2e.count(r.id)) map_put(pm, 'P', r.id, new_eid());
+    std::unordered_set<std::string> revived;
     for (const auto& r : rows) {
       const std::string& eid = pm.l2e[r.id];
-      if (!st.alive('P', eid)) put('P', eid, "_del", Val::integer(0));
-      put('P', eid, "name", Val::text(r.name));
-      put('P', eid, "is_folder", Val::integer(r.folder ? 1 : 0));
-      put('P', eid, "parent", Val::text(r.parent ? pm.l2e[r.parent] : std::string()));
+      const bool back = !st.alive('P', eid);
+      if (back) {
+        put('P', eid, "_del", Val::integer(0));
+        revived.insert(eid);
+      }
+      put('P', eid, "name", Val::text(r.name), back);
+      put('P', eid, "is_folder", Val::integer(r.folder ? 1 : 0), back);
+      put('P', eid, "parent", Val::text(r.parent ? pm.l2e[r.parent] : std::string()), back);
     }
     // Order within each parent.
     Tree tree = build_tree(st);
@@ -847,7 +875,11 @@ struct SyncEngine::Impl {
       for (const Row* r : list) ids.push_back(pm.l2e[r->id]);
       const auto fresh = plan_keys(keep, keys, ids);
       for (std::size_t i = 0; i < list.size(); ++i)
-        if (!fresh[i].empty()) put('P', pm.l2e[list[i]->id], "pos", Val::text(fresh[i]));
+      {
+          const std::string& eid = pm.l2e[list[i]->id];
+          const bool back = revived.count(eid) != 0;
+          if (back || !fresh[i].empty()) put('P', eid, "pos", Val::text(fresh[i].empty() ? keys[i] : fresh[i]), back);
+        }
     }
     capture_entries(pm, maps);
   }
@@ -1011,6 +1043,147 @@ struct SyncEngine::Impl {
     return rec;
   }
 
+  static void write_file(const fs::path& path, FileWriter& w) {
+    const std::string bytes = w.finish();
+    if (bytes.empty()) throw std::runtime_error("encryption failed");
+    std::string err;
+    if (!write_file_atomic(path.string(), bytes, err)) throw std::runtime_error(err);
+  }
+
+  // ---- encryption -------------------------------------------------------------------------------------------------
+  const std::string* key_for(const std::string& salt) {
+    if (cfg.passphrase.empty() || salt.empty() || salt.size() > 64) return nullptr;
+    auto it = keys.find(salt);
+    if (it == keys.end()) {
+      if (keys.size() >= 32) return nullptr;  // each derivation is deliberately slow: do not let a folder queue many
+      std::string key;
+      if (!derive_key(cfg.passphrase, salt, key)) return nullptr;
+      it = keys.emplace(salt, std::move(key)).first;
+    }
+    return &it->second;
+  }
+  ParsedFile parse(const std::string& bytes) {
+    return parse_file(bytes, [this](const std::string& salt) { return key_for(salt); });
+  }
+  // A file this device must not use: it cannot open it, or it is plain while this device requires encryption.
+  bool unusable(const ParsedFile& pf) const {
+    return pf.locked || (!cfg.passphrase.empty() && pf.header_ok && !pf.encrypted);
+  }
+
+  // The newest file of every other device that writes encrypted files.
+  std::vector<fs::path> encrypted_peers() const {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    for (fs::directory_iterator d(root_dir(), ec), dend; !ec && d != dend; d.increment(ec)) {
+      std::error_code e2;
+      if (!d->is_directory(e2) || d->path().filename().string() == dev) continue;
+      std::uint64_t newest = 0;
+      fs::path path;
+      for (fs::directory_iterator f(d->path(), e2), fend; !e2 && f != fend; f.increment(e2)) {
+        std::uint64_t seq;
+        bool snap;
+        if (parse_name(f->path().filename().string(), seq, snap) && seq >= newest) {
+          newest = seq;
+          path = f->path();
+        }
+      }
+      if (path.empty()) continue;
+      std::ifstream in(path, std::ios::binary);
+      char prefix[8] = {};
+      if (in.read(prefix, 8) && std::string(prefix, 4) == "DHLG" && (prefix[6] & kFlagEncrypted)) out.push_back(path);
+    }
+    return out;
+  }
+
+  // Chooses how this device writes. Returns the new "enc_mark" when it differs from the one its files were written
+  // with ("" = unchanged); the caller rewrites its files and then calls commit_mode.
+  std::string prepare_encryption() {
+    const std::string old = meta_get("enc_mark");  // "" never encrypted, "off" turned off, else a key digest
+    const bool never = old.empty() || old == "off";
+    sealer = {};
+    if (cfg.passphrase.empty()) {
+      // A device that never had the passphrase must not add its library to an encrypted folder in the clear.
+      if (old.empty() && !encrypted_peers().empty())
+        throw std::runtime_error("this sync folder is encrypted: enter its passphrase (nothing was written)");
+      return never ? std::string() : std::string("off");
+    }
+    if (!crypto_available()) throw std::runtime_error("this build cannot encrypt: remove the sync passphrase");
+    std::string salt = from_hex(meta_get("enc_salt"));
+    const std::string* key = key_for(salt);
+    std::string mark = key ? key_mark(*key) : std::string();
+    if (!key || mark != old) {  // new or changed passphrase: join the salt other devices already use
+      bool joined = false, refused = false;
+      for (const auto& path : encrypted_peers()) {
+        std::string bytes;
+        if (!read_file(path.string(), bytes)) continue;
+        const ParsedFile pf = parse(bytes);
+        if (pf.opened_batches > 0) {
+          salt = pf.header.salt;
+          joined = true;
+          break;
+        }
+        refused = refused || pf.locked;
+      }
+      if (!joined && refused && never)
+        throw std::runtime_error("wrong sync passphrase: it does not open the files in this folder (nothing was written)");
+      if (salt.empty() && !random_bytes(salt, kSaltLen)) throw std::runtime_error("no random numbers available");
+      key = key_for(salt);
+      if (!key) throw std::runtime_error("cannot derive the sync key");
+      mark = key_mark(*key);
+    }
+    sealer = {*key, salt};
+    return mark == old ? std::string() : mark;
+  }
+  void commit_mode(const std::string& mark) {
+    Transaction tx(db);
+    meta_put("enc_mark", mark);
+    meta_put("enc_salt", to_hex(sealer.salt));
+    tx.commit();
+  }
+
+  int own_file_count() const {
+    int n = 0;
+    std::error_code ec;
+    for (fs::directory_iterator it(own_dir(), ec), end; !ec && it != end; it.increment(ec)) {
+      std::uint64_t seq;
+      bool snap;
+      if (parse_name(it->path().filename().string(), seq, snap)) ++n;
+    }
+    return n;
+  }
+
+  // ---- tombstones ---------------------------------------------------------------------------------------------------
+  // Long-deleted entities keep only what the merge still needs: the deletion, a playlist's parent (cycle breaking)
+  // and an entry's playlist.
+  void prune_tombstones(SyncResult& r) {
+    if (cfg.tombstone_retention_ms < 0) return;
+    const std::int64_t cutoff = now() - cfg.tombstone_retention_ms;
+    Transaction tx(db);
+    Stmt del(db, "DELETE FROM sync_reg WHERE kind = ?1 AND eid = ?2 AND field = ?3");
+    for (int k = 0; kKinds[k]; ++k) {
+      const char kind = kKinds[k];
+      for (auto& [eid, e] : st.ent[k]) {
+        const auto d = e.f.find("_del");
+        if (d == e.f.end() || d->second.v.empty() || d->second.st.wall > cutoff) continue;
+        bool unsent = false;
+        for (const auto& f : e.f) unsent = unsent || f.second.pending;
+        if (unsent) continue;
+        for (auto it = e.f.begin(); it != e.f.end();) {
+          if (it->first == "_del" || (kind == 'P' && it->first == "parent") || (kind == 'E' && it->first == "pl")) {
+            ++it;
+            continue;
+          }
+          del.bind(1, std::string_view(&kind, 1)).bind(2, eid).bind(3, it->first);
+          del.run();
+          st.dirty.erase(Key{kind, eid, it->first});
+          it = e.f.erase(it);
+          ++r.records_pruned;
+        }
+      }
+    }
+    tx.commit();
+  }
+
   void write_pending(SyncResult& r) {
     const fs::path dir = own_dir();
     std::error_code ec;
@@ -1027,21 +1200,20 @@ struct SyncEngine::Impl {
       h.seq = next_seq;
       h.created_ms = now();
       h.kind = kFileLog;
-      FileWriter w(h);
-      std::vector<Key> keys;
+      FileWriter w(h, sealer.key.empty() ? nullptr : &sealer);
+      std::vector<Key> written;
       while (it != st.pending.end() && w.size() < cfg.max_log_bytes) {
         w.add(rec_of(*it));
-        keys.push_back(*it);
+        written.push_back(*it);
         ++it;
       }
-      std::string err;
-      if (!write_file_atomic((dir / file_name_for(next_seq, false)).string(), w.finish(), err)) throw std::runtime_error(err);
+      write_file(dir / file_name_for(next_seq, false), w);
       ++next_seq;
       ++r.files_written;
-      r.records_written += static_cast<int>(keys.size());
+      r.records_written += static_cast<int>(written.size());
       fault("write.file");
       Transaction tx(db);
-      for (const auto& k : keys) {
+      for (const auto& k : written) {
         const auto& [kind, eid, field] = k;
         st.ent[State::idx(kind)][eid].f[field].pending = false;
         st.pending.erase(k);
@@ -1103,7 +1275,7 @@ struct SyncEngine::Impl {
         in.size = f.size;
         std::string bytes;
         if (read_file((d->path() / f.name).string(), bytes)) {
-          in.pf = parse_file(bytes);
+          in.pf = parse(bytes);
           in.size = bytes.size();
         } else {
           in.pf.problem = "cannot read file";
@@ -1123,7 +1295,8 @@ struct SyncEngine::Impl {
           cover = it->seq;
           break;
         }
-        if (load(*it).pf.complete) {
+        const ParsedFile& pf = load(*it).pf;
+        if (pf.complete && !unusable(pf)) {
           cover = it->seq;
           break;
         }
@@ -1146,8 +1319,18 @@ struct SyncEngine::Impl {
   void apply(std::vector<Incoming>& in, const std::unordered_set<std::string>& present, SyncResult& r) {
     Transaction tx(db);
     std::unordered_set<std::string> devices_seen;
+    std::set<std::string> skipped;
     for (auto& f : in) {
-      for (const auto& rec : f.pf.regs) {
+      const bool skip = unusable(f.pf);
+      if (skip) {
+        ++r.files_skipped;
+        if (skipped.insert(f.dev).second)
+          r.warnings.push_back("device " + f.dev + ": " +
+                               (f.pf.locked ? "its files need the same passphrase here and there"
+                                            : "it writes unencrypted files; enter the passphrase on it"));
+        if (!f.pf.locked) continue;  // plain files are not trusted while encryption is on
+      }
+      for (const auto& rec : f.pf.regs) {  // from a locked file: only what authenticated
         if (State::idx(rec.kind) < 0 || rec.field.empty()) continue;
         if (rec.kind == 'G' && !setting_allowed(rec.eid, cfg.settings_allow)) continue;
         observe(rec.st);
@@ -1155,15 +1338,13 @@ struct SyncEngine::Impl {
           r.warnings.push_back("device " + rec.st.dev + " has a clock more than a day ahead");
         if (st.merge(rec.kind, rec.eid, rec.field, rec.st, rec.v)) ++r.records_applied;
       }
+      if (skip) continue;  // not recorded as read, so it is tried again once the passphrase matches
       if (f.pf.unsupported) r.warnings.push_back(f.dev + "/" + f.name + ": " + f.pf.problem);
       else if (!f.pf.complete) {
         ++r.files_corrupt;
         r.warnings.push_back(f.dev + "/" + f.name + ": " + f.pf.problem + "; " + std::to_string(f.pf.regs.size()) +
                              " valid records used");
       }
-      if (f.pf.encrypted_records)
-        r.warnings.push_back(f.dev + "/" + f.name + ": " + std::to_string(f.pf.encrypted_records) +
-                             " encrypted records skipped (encryption is not supported by this version)");
       Stmt s(db, "INSERT OR REPLACE INTO sync_files(dev, name, size, status) VALUES (?1, ?2, ?3, ?4)");
       s.bind(1, f.dev).bind(2, f.name).bind(3, static_cast<std::int64_t>(f.size)).bind(4, f.pf.complete ? 1 : f.pf.unsupported ? 3 : 2);
       s.run();
@@ -1544,7 +1725,15 @@ struct SyncEngine::Impl {
     return guarded([&](SyncResult& r) {
       run_capture(r);
       fault("capture.done");
-      write_pending(r);
+      const std::string mode = prepare_encryption();
+      if (!mode.empty()) {  // encryption turned on, off or re-keyed: replace every file this device has written
+        if (own_file_count() > 0) write_snapshot(r);
+        else write_pending(r);
+        commit_mode(mode);
+      } else {
+        write_pending(r);
+        if (cfg.compact_after_files > 0 && own_file_count() > cfg.compact_after_files) write_snapshot(r);
+      }
       std::vector<Incoming> in;
       std::unordered_set<std::string> present;
       read_remote(in, present, r);
@@ -1560,7 +1749,15 @@ struct SyncEngine::Impl {
   SyncResult compact() {
     return guarded([&](SyncResult& r) {
       run_capture(r);
+      const std::string mode = prepare_encryption();
+      write_snapshot(r);
+      if (!mode.empty()) commit_mode(mode);
+    });
+  }
+
+  void write_snapshot(SyncResult& r) {
       write_pending(r);
+      prune_tombstones(r);
       const fs::path dir = own_dir();
       next_seq = std::max(next_seq, scan_max_seq(dir) + 1);
       FileHeader h;
@@ -1569,7 +1766,7 @@ struct SyncEngine::Impl {
       h.seq = next_seq;
       h.created_ms = now();
       h.kind = kFileSnapshot;
-      FileWriter w(h);
+      FileWriter w(h, sealer.key.empty() ? nullptr : &sealer);
       for (const auto& ents : st.ent)
         for (const auto& [eid, e] : ents)
           for (const auto& [field, reg] : e.f)
@@ -1582,10 +1779,9 @@ struct SyncEngine::Impl {
               rec.v = reg.v;
               w.add(rec);
             }
-      std::string err;
       const std::uint64_t snap_seq = next_seq;
       r.records_written += static_cast<int>(w.count());
-      if (!write_file_atomic((dir / file_name_for(snap_seq, true)).string(), w.finish(), err)) throw std::runtime_error(err);
+      write_file(dir / file_name_for(snap_seq, true), w);
       ++next_seq;
       ++r.files_written;
       fault("compact.snapshot");
@@ -1601,7 +1797,6 @@ struct SyncEngine::Impl {
           fs::remove(it->path(), e2);
         }
       }
-    });
   }
 
   int relink_missing(const std::vector<std::string>& dirs) {
@@ -1700,6 +1895,7 @@ SyncEngine::~SyncEngine() = default;
 SyncResult SyncEngine::sync_once() { return impl_->sync_once(); }
 SyncResult SyncEngine::capture() { return impl_->capture_only(); }
 SyncResult SyncEngine::compact() { return impl_->compact(); }
+bool SyncEngine::encryption_available() { return crypto_available(); }
 int SyncEngine::relink_missing(const std::vector<std::string>& dirs) { return impl_->relink_missing(dirs); }
 Status SyncEngine::status() { return impl_->status(); }
 std::vector<DeviceInfo> SyncEngine::devices() { return impl_->devices(); }

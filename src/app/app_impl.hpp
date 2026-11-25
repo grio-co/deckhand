@@ -31,6 +31,7 @@
 #include "deckhand/midi/controller.hpp"
 #include "deckhand/services/track_analysis.hpp"
 #include "deckhand/services/usb_export.hpp"
+#include "deckhand/sync/sync.hpp"
 #include "hub_api.hpp"
 #include "skin_view.hpp"
 
@@ -138,11 +139,13 @@ struct SyncSummary {
   std::string error;           // last failure
   int sent = -1, received = -1;  // changes of the last sync run in this session (-1 = unknown)
   int other_devices = 0;       // devices seen in the folder besides this one
+  int skipped = 0;             // files of other devices the last run could not use (passphrase mismatch)
 };
 
 // A single-line text field shared by the overlays: the focused one receives typed text.
 struct Field {
   std::string text;
+  bool secret = false;  // drawn as dots
 };
 
 }  // namespace detail
@@ -473,7 +476,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   bool export_other_ = false;  // the last entry of the export menu is "Other folder..." (needs choose_folder)
   Field* focus_ = nullptr;  // focused overlay field
   Field f_period_, f_port_, f_obs_host_, f_obs_port_, f_obs_source_, f_search_learn_;
-  Field f_title_, f_artist_, f_key_, f_rating_, f_relink_, f_relink_old_, f_sync_folder_, f_sync_name_;
+  Field f_title_, f_artist_, f_key_, f_rating_, f_relink_, f_relink_old_, f_sync_folder_, f_sync_name_, f_sync_pass_;
   Field* last_focus_ = nullptr;
   std::map<std::string, std::string> sv_;  // settings shown in the settings panel
   int tag_rating_ = 0;

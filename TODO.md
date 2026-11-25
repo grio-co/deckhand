@@ -49,7 +49,9 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [ ] Windows: build and test on the real PC (MSVC build, WASAPI audio, MIDI, Media Foundation
       codecs, HiDPI); then enable the separate engine process there (needs the UI-side quit
       handling on Windows)
-- [ ] Sync: passphrase encryption, tombstone clean-up
+- [x] Sync: passphrase encryption, tombstone clean-up (long-deleted details dropped at compaction)
+- [ ] Sync: passphrase encryption on iOS (no OpenSSL there); encryption never tried across two real computers;
+      removing tombstones altogether needs per-device acknowledgements
 - [ ] Bluetooth MIDI pairing: try with a real device
 - [ ] Skins: window shapes, images/sprites and rotate animations are parsed but not drawn;
       hidden widgets keep their layout space

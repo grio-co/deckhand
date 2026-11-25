@@ -564,6 +564,7 @@ void App::sync_job(Library& lib, bool run) {
   cfg.folder = folder;
   cfg.device_name = lib.setting("sync.device_name", host_name());
   if (cfg.device_name.empty()) cfg.device_name = host_name();
+  cfg.passphrase = lib.setting("sync.password");  // "password" in the name: write-only over the API, never synced
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     sync_.running = run;
@@ -590,6 +591,7 @@ void App::sync_job(Library& lib, bool run) {
       if (r.ok) {
         sync_.sent = r.records_written;
         sync_.received = r.records_applied;
+        sync_.skipped = r.files_skipped;
       }
     } else if (!st.last_error.empty() && sync_.last_ms == 0) {
       sync_.last_ok = false;
