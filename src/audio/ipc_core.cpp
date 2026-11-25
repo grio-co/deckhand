@@ -18,7 +18,7 @@ bool fail(std::string& error, const char* msg) {
 
 bool finite_in(double v, double lo, double hi) { return std::isfinite(v) && v >= lo && v <= hi; }
 
-void fingerprint(std::uint32_t (&fp)[10]) {
+void fingerprint(std::uint32_t (&fp)[12]) {
   fp[0] = sizeof(DeckView);
   fp[1] = sizeof(MixerView);
   fp[2] = sizeof(SamplerView);
@@ -29,6 +29,8 @@ void fingerprint(std::uint32_t (&fp)[10]) {
   fp[7] = sizeof(WireCommand) * 100 + sizeof(WireEvent);
   fp[8] = static_cast<std::uint32_t>(sizeof(Shared));
   fp[9] = static_cast<std::uint32_t>(Op::Count) * 1000 + kMaxDecks * 100 + kSamplerSlots;
+  fp[10] = sizeof(InputInfo);
+  fp[11] = 0;
 }
 }  // namespace
 
@@ -49,9 +51,9 @@ bool check_shared(const void* base, std::size_t size, std::string& error) {
   if (s->hdr.magic != kMainMagic) return fail(error, "not an engine segment");
   if (s->hdr.version != kProtocolVersion) return fail(error, "engine protocol version differs");
   if (s->hdr.header_size != sizeof(Header) || s->hdr.total_size != sizeof(Shared)) return fail(error, "engine layout differs");
-  std::uint32_t fp[10];
+  std::uint32_t fp[12];
   fingerprint(fp);
-  for (int i = 0; i < 10; ++i)
+  for (int i = 0; i < 12; ++i)
     if (s->hdr.fingerprint[i] != fp[i]) return fail(error, "engine was built from different sources");
   return true;
 }
@@ -265,6 +267,8 @@ Scope scope_of(Op op) {
   switch (op) {
     case Op::Crossfader: case Op::HeadMix: case Op::HeadLevel: case Op::MasterLevel: case Op::MasterBpm:
     case Op::SamplerLevel: case Op::RecStart: case Op::RecStop: case Op::StreamEnable: case Op::SamplerStop:
+    case Op::MicOn: case Op::MicLevel: case Op::MicEqLow: case Op::MicEqHigh: case Op::MicTalkover:
+    case Op::MicTalkoverDepth: case Op::MicMonitor: case Op::MicGate:
       return Scope::Global;
     case Op::FxSelect: case Op::FxEnable: case Op::FxWet: case Op::FxTime: case Op::FxParam:
       return Scope::Fx;
@@ -305,6 +309,27 @@ bool validate_command(const WireCommand& w, Command& out) {
       break;
     case Op::SamplerStop:
       if (w.i < -1 || w.i >= kSamplerSlots) return false;
+      break;
+    case Op::RecStart:
+      if (w.i < 0 || w.i > 1) return false;  // bit 0: leave the microphone out
+      break;
+    case Op::StreamEnable:
+      if (w.i < 0 || w.i > 3) return false;  // bit 0: on, bit 1: leave the microphone out
+      break;
+    case Op::MicOn: case Op::MicMonitor:
+      if (w.i < -1 || w.i > 1) return false;
+      break;
+    case Op::MicTalkover:
+      if (w.i < -1 || w.i > 2) return false;
+      break;
+    case Op::MicLevel: case Op::MicEqLow: case Op::MicEqHigh:
+      if (!finite_in(w.f, -0.001, 1.001)) return false;  // the engine clamps
+      break;
+    case Op::MicTalkoverDepth:
+      if (!finite_in(w.f, -24.001, 0.001)) return false;
+      break;
+    case Op::MicGate:
+      if (!finite_in(w.f, -80.001, -19.999)) return false;
       break;
     default: break;
   }

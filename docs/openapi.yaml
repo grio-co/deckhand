@@ -106,6 +106,12 @@ info:
     | `head_mix` | value | 0 cue .. 1 master | Headphone mix |
     | `head_level` / `master_level` / `sampler_level` | value | 0..1 | Levels |
     | `master_bpm` | value | 0..300 (0 follows decks) | Tempo for beat-synced effects and sampler |
+    | `mic_on` / `mic_monitor` | toggle | 0/1 | Microphone channel on / also in the headphones (needs a microphone input chosen in the settings) |
+    | `mic_level` | value | 0..1 (0.8 unity) | Microphone level |
+    | `mic_eq_low` / `mic_eq_high` | value | 0..1 (0.5 flat, +-12 dB) | Microphone EQ |
+    | `mic_talkover` | toggle | 0 off, 1 on (ducks the music while the microphone is above the threshold), 2 always duck | Talkover |
+    | `mic_talkover_depth` | value | -24..0 dB | How far talkover lowers the music |
+    | `mic_gate` | value | -80..-20 dB (-80 = gate off) | Microphone noise gate threshold |
     | `fx<1..3>.select/on/wet/param/time` | as deck | as deck | Master-bus effect slots |
 
     | Sampler control (slot 1..16) | Kind | Value | Purpose |
@@ -323,7 +329,8 @@ paths:
       summary: Run a mixer control (optionally scheduled)
       description: |
         Required scope: `control:mixer`. `{control}` is a mixer control: `crossfader`, `head_mix`,
-        `head_level`, `master_level`, `master_bpm`, `sampler_level`, or a master-bus effect slot control
+        `head_level`, `master_level`, `master_bpm`, `sampler_level`, a microphone control (`mic_on`, `mic_level`,
+        `mic_eq_low`, `mic_eq_high`, `mic_talkover`, `mic_talkover_depth`, `mic_monitor`, `mic_gate`), or a master-bus effect slot control
         `fx1.select`, `fx1.on`, `fx1.wet`, `fx1.param`, `fx1.time` (slots 1..3).
       x-scope: "control:mixer"
       parameters:
@@ -332,7 +339,7 @@ paths:
           required: true
           schema:
             type: string
-            pattern: '^(crossfader|head_mix|head_level|master_level|master_bpm|sampler_level|fx[1-3]\.(select|on|wet|param|time))$'
+            pattern: '^(crossfader|head_mix|head_level|master_level|master_bpm|sampler_level|mic_on|mic_level|mic_eq_low|mic_eq_high|mic_talkover|mic_talkover_depth|mic_monitor|mic_gate|fx[1-3]\.(select|on|wet|param|time))$'
           example: crossfader
       requestBody:
         required: false
@@ -1209,6 +1216,12 @@ components:
         master_level: {type: number}
         peak_left: {type: number}
         peak_right: {type: number}
+        mic_on: {type: boolean}
+        mic_present: {type: boolean, description: An input is open and feeding the microphone channel.}
+        mic_level: {type: number}
+        mic_peak: {type: number}
+        mic_talkover: {type: integer, description: "0 off, 1 on, 2 always"}
+        mic_ducking: {type: boolean}
     Control:
       type: object
       required: [name, kind, range, help]

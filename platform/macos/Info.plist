@@ -17,6 +17,7 @@
   <key>NSDocumentsFolderUsageDescription</key><string>DeckHand plays audio files you choose from your Documents folder.</string>
   <key>NSDownloadsFolderUsageDescription</key><string>DeckHand plays audio files you choose from your Downloads folder.</string>
   <key>NSBluetoothAlwaysUsageDescription</key><string>DeckHand uses Bluetooth to connect Bluetooth MIDI controllers you pair with it.</string>
+  <key>NSMicrophoneUsageDescription</key><string>DeckHand uses the audio input you choose in the settings for the microphone channel (talkover, announcements). Nothing is recorded unless you start a recording.</string>
   <key>NSRemovableVolumesUsageDescription</key><string>DeckHand plays audio files stored on removable drives.</string>
   <key>CFBundleDocumentTypes</key>
   <array>

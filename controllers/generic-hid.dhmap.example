@@ -1,0 +1,60 @@
+# Annotated example of a USB HID controller mapping. EVERY NUMBER HERE IS ILLUSTRATIVE: this is not the layout
+# of any real product. Copy it, change the ids and the report layout to what your device's documentation (or
+# an observation with HID learn / a report dump tool) says, and save it as <name>.dhmap in DeckHand's data
+# folder's controllers/ directory. Format reference: docs/CONTROLLERS.md ("HID controllers").
+
+name  "Example HID Deck"
+
+# Which device. vid and pid are required; usage_page/usage/interface narrow it down when a device exposes
+# several HID interfaces (a keyboard/mouse interface is never opened, whatever is written here).
+hid   vid=0x1234 pid=0xABCD usage_page=0xFF00
+
+jog   ticks_per_rev=1440                 # counts of the jog counter per revolution (default for rel rules)
+audio match="Example" master=1 phones=3  # optional audio routing hint, as for MIDI
+
+# Sent once when the device connects. A device that needs an "advanced mode" switch-on would put it here.
+hid_init feature report=3 01 00
+# hid_init output report=4 AA
+
+# ---- inputs: report 1 -------------------------------------------------------------------------------
+# Buttons: one bit. byte counts from the first byte AFTER the report id.
+in hid report=1 byte=2 bit=0 button play deck=1
+in hid report=1 byte=2 bit=1 button cue  deck=1
+in hid report=1 byte=2 bit=2 button sync deck=1
+in hid report=1 byte=2 bit=3 button modifier name=shift             # a held button, used by when=
+in hid report=1 byte=2 bit=4 button seek_start deck=1 when=shift    # same bit layout, second layer
+in hid report=1 byte=3 bit=0 button pad_mode mode=beatloop deck=1
+in hid report=1 byte=3 bit=1 button hotcue slot=1 deck=1 mode=hotcue
+in hid report=1 byte=3 bit=1 button beatloop beats=4 deck=1 mode=beatloop
+in hid report=1 byte=3 bit=7 button play deck=2 invert=1            # active-low bit: 0 = pressed
+
+# Jog touch sensor: a bit that is 1 while the platter top is touched.
+in hid report=1 byte=4 bit=0 touch jog_touch deck=1
+
+# Absolute controls. 16 bits little endian, normalised over its raw range (here 0..4000, reversed so that
+# "up" is larger); a 12-bit value that sits in the low bits of two bytes; a signed 8-bit value.
+in hid report=1 byte=5  size=2 endian=le min=4000 max=0 abs tempo deck=1
+in hid report=1 byte=7  bits=0-11 abs fader deck=1 pickup=1         # soft takeover, as for MIDI
+in hid report=1 byte=9  size=2 endian=be abs crossfader
+in hid report=1 byte=11 signed=1 abs eq_low deck=1 min=-100 max=100 deadzone=0.03
+in hid report=1 byte=12 abs mic_level                               # the microphone channel level
+
+# Jog wheel: a 16-bit running position that wraps at 65536 (delta with wrap handling, both directions).
+in hid report=1 byte=13 size=2 endian=le rel jog deck=1 surface=top ticks_per_rev=2048
+# A browse encoder reporting a per-report signed step (-1, 0, +1 ...).
+in hid report=1 byte=15 signed=1 delta browse
+
+# ---- outputs: report 2 ------------------------------------------------------------------------------
+# The hub builds the whole report from this template and sends it when it changed (at most every 20 ms).
+# Bytes that no out rule writes keep the init values (here byte 0 is a constant the device wants).
+hid_out report=2 size=8 init="80 00 00 00 00 00 00 00" interval=20
+
+out hid report=2 byte=1 bit=0 playing deck=1 on=1 off=0
+out hid report=2 byte=1 bit=1 cue     deck=1 on=1 off=0 blink=1
+out hid report=2 byte=1 bit=2 sync    deck=1 on=1 off=0
+out hid report=2 byte=1 bit=3 pad_mode deck=1 mode=beatloop on=1 off=0
+out hid report=2 byte=1 bit=4 mic_on on=1 off=0
+out hid report=2 byte=1 bit=5 modifier name=shift on=1 off=0
+# A level meter: 0..255 in one byte, or any width (here 16 bits big endian, 0x0000..0x03FF).
+out hid report=2 byte=2 level deck=1 on=FF off=10
+out hid report=2 byte=4 size=2 endian=be level deck=2 on=3FF off=0

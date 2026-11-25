@@ -173,6 +173,12 @@ struct ApiBridge::Impl {
     j.set("master_level", static_cast<double>(m.master_level));
     j.set("peak_left", static_cast<double>(m.peak_left));
     j.set("peak_right", static_cast<double>(m.peak_right));
+    j.set("mic_on", m.mic_on);
+    j.set("mic_present", m.mic_present);
+    j.set("mic_level", static_cast<double>(m.mic_level));
+    j.set("mic_peak", static_cast<double>(m.mic_peak));
+    j.set("mic_talkover", static_cast<double>(m.mic_talkover));
+    j.set("mic_ducking", m.mic_ducking);
     return j;
   }
 

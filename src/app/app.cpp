@@ -48,6 +48,10 @@ App::App(const dh_platform& platform, const dh_config& config)
   touch_ = config.touch;
   audio_pref_ = lib_->setting("audio.device", "");
   audio_period_ = static_cast<std::uint32_t>(std::clamp(std::atoi(lib_->setting("audio.period", "256").c_str()), 64, 2048));
+  input_pref_ = lib_->setting("audio.input_device", "");  // empty (the default): no microphone, no capture device
+  input_channel_ = std::clamp(std::atoi(lib_->setting("audio.input_channel", "1").c_str()) - 1, 0, 61);
+  input_stereo_ = lib_->setting("audio.input_stereo", "0") == "1";
+  talk_depth_ = std::clamp(static_cast<float>(std::atof(lib_->setting("audio.mic_depth", "-12").c_str())), -24.0f, 0.0f);
   variant_ = lib_->setting("ui.layout", "main") == "four" ? "four" : "main";
 
   std::vector<std::string> folders;
@@ -69,6 +73,7 @@ App::App(const dh_platform& platform, const dh_config& config)
   } else {
     start_audio();
   }
+  apply_input(false);
   loader_ = std::thread([this] { loader_main(); });
   control_ = std::thread([this] { control_main(); });
   if (remote_ && remote_->attached_existing()) {
@@ -126,6 +131,8 @@ App::~App() {
   if (loader_.joinable()) loader_.join();
   if (control_.joinable()) control_.join();
   stop_signal_watch();
+  if (local_hub_) local_hub_->set_hid_io(nullptr);
+  hid_.reset();
   if (local_hub_) local_hub_->set_io(nullptr);
   midi_.reset();
   if (remote_) {
@@ -173,6 +180,7 @@ void App::setup_engine(const std::vector<std::string>& mapping_folders) {
               for (DeckInfo& d : decks_) d = DeckInfo{};  // the new engine has empty decks
             }
             start_audio();
+            apply_input(true);  // the new engine has no input open
             Job j;  // the new engine has empty sampler slots too
             j.kind = Job::RestoreSamples;
             j.slot = 1;
@@ -217,6 +225,14 @@ void App::setup_engine(const std::vector<std::string>& mapping_folders) {
         audio_recheck_ = true;
       });
   local_hub_->set_io(midi_.get());
+  hid_ = create_hid_io(
+      [this](const std::string& id, int report, const std::uint8_t* data, std::size_t n) {
+        if (local_hub_) local_hub_->hid(id, report, data, n);
+      },
+      [this] {
+        if (local_hub_) local_hub_->devices_changed();
+      });
+  if (hid_) local_hub_->set_hid_io(hid_.get());
   hub_ = std::make_unique<LocalHub>(*local_hub_);
 }
 
@@ -309,6 +325,41 @@ void App::start_audio() {
 }
 
 void App::restart_audio() { start_audio(); }
+
+void App::apply_input(bool force) {
+  std::string pref;
+  int channel;
+  bool stereo;
+  float depth;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    pref = input_pref_;
+    channel = input_channel_;
+    stereo = input_stereo_;
+    depth = talk_depth_;
+  }
+  Command d;
+  d.op = Op::MicTalkoverDepth;
+  d.f = depth;
+  engine_->send(d);
+  const InputStatus st = engine_->input_status();
+  if (pref.empty()) {  // no microphone chosen: make sure no capture device is open
+    if (st.open || st.lost) engine_->close_input();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    input_error_.clear();
+    return;
+  }
+  if (!force && (st.open || st.lost)) return;  // an engine that kept running already has its input
+  InputConfig c;
+  c.device_hint = pref;
+  c.channel = channel;
+  c.stereo = stereo;
+  std::string error;
+  const bool ok = engine_->open_input(c, error);
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  input_error_ = ok ? std::string() : error;
+  if (!ok) DH_LOG(Warn, "microphone input: %s", error.c_str());
+}
 
 void App::control_main() {
   double last_audio_check = now_seconds(), last_tick = last_audio_check, last_sync = last_audio_check;

@@ -183,6 +183,14 @@ Target map_binding(std::string_view n) {
     if (k == "master.level") return info("master_level");
     if (k == "master.volume") return control("mixer.master_level", -1, 0, 1, 0.8);
     if (k == "sampler.level") return control("mixer.sampler_level", -1, 0, 1, 0.8);
+    if (k == "mic.on") return control("mixer.mic_on");
+    if (k == "mic.talkover") return control("mixer.mic_talkover");
+    if (k == "mic.monitor") return control("mixer.mic_monitor");
+    if (k == "mic.level") return control("mixer.mic_level", -1, 0, 1, 0.8);
+    if (k == "mic.eq.low") return control("mixer.mic_eq_low", -1, 0, 1, 0.5);
+    if (k == "mic.eq.high") return control("mixer.mic_eq_high", -1, 0, 1, 0.5);
+    if (k == "mic.depth") return control("mixer.mic_talkover_depth", -1, -24, 0, -12);
+    if (k == "mic.meter") return info("mic_level");
     return {};
   }
 

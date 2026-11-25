@@ -73,6 +73,11 @@ int main(int argc, char** argv) {
   send(0x90, 0x0B, 0x00);  // release does nothing
   CHECK(sink.commands.size() == n);
 
+#ifdef DECKHAND_ENGINE_HAS_MIC
+  send(0xB6, 0x05, 0x7F);  // MIC LEVEL (14-bit)
+  send(0xB6, 0x25, 0x7F);
+  CHECK(sink.last().op == Op::MicLevel && std::fabs(sink.last().f - 1.0f) < 1e-4f);
+#endif
   send(0x91, 0x0C, 0x7F);  // CUE deck 2 press / release
   CHECK(sink.last().op == Op::CueDown && sink.last().deck == 1);
   send(0x91, 0x0C, 0x00);
@@ -613,8 +618,10 @@ out 94 73 color_fx deck=1 effect=crush
     CHECK(!parse_mapping("name \"x\"\nmatch \"x\"\nin button 90 01 fx_assign target=deck1\n", bm, err));
     CHECK(!parse_mapping("name \"x\"\nmatch \"x\"\nin button 90 01 fx_assign unit=1 target=deck9\n", bm, err));
     CHECK(!parse_mapping("name \"x\"\nmatch \"x\"\nin button 90 01 fx_on unit=9 slot=1\n", bm, err));
-    CHECK(!parse_mapping("name \"x\"\nmatch \"x\"\nin abs14 B6 05 25 mic_level\n", bm, err) &&
-          err.find("microphone") != std::string::npos);
+    // The mic actions parse (they send engine commands only when the engine has them: DECKHAND_ENGINE_HAS_MIC).
+    CHECK(parse_mapping("name \"x\"\nmatch \"x\"\nin abs14 B6 05 25 mic_level\nin button 90 01 mic_on\n"
+                        "in abs B6 06 mic_eq_low\nin abs B6 07 mic_eq_high\nin button 90 02 mic_talkover hold=1\n"
+                        "out 90 01 mic_on\nout 90 02 mic_talkover\n", bm, err));
     CHECK(parse_mapping("name \"x\"\nmatch \"x\"\nout 90 01 master_cue\nout 90 02 fx_assign unit=2 target=deck2\n", bm, err));
   }
   {

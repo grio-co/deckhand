@@ -62,7 +62,7 @@ Send `Authorization: Bearer <token>`. Bodies and replies are JSON.
 | `GET /v1/decks`, `GET /v1/decks/{n}` | `read` | Deck state, loaded track, cues, loop |
 | `POST /v1/decks/{n}/load` | `control:deck:{n}` | `{"track_id": 12}` or `{"path": "/abs/file"}` |
 | `POST /v1/decks/{n}/{control}` | `control:deck:{n}` | Any deck control, e.g. `play`, `cue`, `sync`, `seek`, `hotcue.3`, `beatloop`, `eq_low` |
-| `GET /v1/mixer`, `POST /v1/mixer/{control}` | `read`, `control:mixer` | `crossfader`, `head_mix`, `head_level`, `master_level` |
+| `GET /v1/mixer`, `POST /v1/mixer/{control}` | `read`, `control:mixer` | `crossfader`, `head_mix`, `head_level`, `master_level`, `mic_on`, `mic_level`, `mic_eq_low`, `mic_eq_high`, `mic_talkover`, `mic_talkover_depth`, `mic_monitor`, `mic_gate` |
 | `GET /v1/controls` | `read` | Every control name with kind, range, help and current value |
 | `POST /v1/commands` | `control` | `{"commands": [{"control": "deck1.play", ...}, ...]}` |
 | `GET /v1/schedule`, `DELETE /v1/schedule[/{id}]` | `read`, `control` | Pending scheduled commands |

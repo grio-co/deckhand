@@ -520,6 +520,36 @@ void test_commands_and_wire() {
   note("garbage segment: rings and snapshots stay in bounds");
 }
 
+
+// The microphone commands cross the boundary with the same discipline as every other field.
+void test_mic_wire() {
+  Command c;
+  WireCommand w;
+  const auto ok = [&](Op op, int i, float f) {
+    w = WireCommand{};
+    w.op = static_cast<std::uint8_t>(op);
+    w.i = i;
+    w.f = f;
+    return validate_command(w, c) && c.op == op && c.i == i && c.f == f;
+  };
+  CHECK(ok(Op::MicOn, 1, 0) && ok(Op::MicOn, 0, 0) && ok(Op::MicOn, -1, 0) && !ok(Op::MicOn, 2, 0) && !ok(Op::MicOn, -2, 0));
+  CHECK(ok(Op::MicMonitor, 1, 0) && !ok(Op::MicMonitor, 5, 0));
+  CHECK(ok(Op::MicTalkover, 2, 0) && ok(Op::MicTalkover, -1, 0) && !ok(Op::MicTalkover, 3, 0));
+  CHECK(ok(Op::MicLevel, 0, 0.5f) && ok(Op::MicLevel, 0, 1.0f) && !ok(Op::MicLevel, 0, 1.5f) && !ok(Op::MicLevel, 0, -0.5f));
+  CHECK(ok(Op::MicEqLow, 0, 0.5f) && !ok(Op::MicEqLow, 0, 7.0f) && ok(Op::MicEqHigh, 0, 0.0f) && !ok(Op::MicEqHigh, 0, std::nanf("")));
+  CHECK(ok(Op::MicTalkoverDepth, 0, -12.0f) && ok(Op::MicTalkoverDepth, 0, 0.0f) && ok(Op::MicTalkoverDepth, 0, -24.0f));
+  CHECK(!ok(Op::MicTalkoverDepth, 0, -40.0f) && !ok(Op::MicTalkoverDepth, 0, 6.0f));
+  CHECK(ok(Op::MicGate, 0, -50.0f) && ok(Op::MicGate, 0, -80.0f) && !ok(Op::MicGate, 0, 0.0f) && !ok(Op::MicGate, 0, -120.0f));
+  w = WireCommand{};
+  w.op = static_cast<std::uint8_t>(Op::MicOn);
+  w.deck = 200;  // the deck field is ignored for global ops, not trusted
+  w.i = 1;
+  CHECK(validate_command(w, c) && c.deck == 0);
+  CHECK(ok(Op::RecStart, 1, 0) && !ok(Op::RecStart, 2, 0) && ok(Op::StreamEnable, 3, 0) && !ok(Op::StreamEnable, 4, 0));
+  CHECK(kProtocolVersion >= 2);
+  note("microphone commands: validated on the wire");
+}
+
 #if !defined(_WIN32)
 // ================================================================== two processes, real engine binary
 struct Wav {
@@ -842,6 +872,147 @@ void test_second_instance(const std::string& base) {
   c.shutdown_remote(0);
 }
 
+
+// ---- microphone channel through the real helper (null audio: no capture hardware is ever touched) ----------------
+void test_mic_ipc(const std::string& base) {
+  const std::string dir = base + "/data-mic";
+  fs::create_directories(dir);
+  std::string error;
+  RemoteEngine eng(options_for(dir));
+  CHECK(eng.connect(error));
+  OutputConfig oc;
+  CHECK(eng.start(oc, error));
+
+  CHECK(!eng.input_status().open && !eng.mixer().mic_present);  // nothing is opened until asked
+  const std::vector<std::string> devs = eng.input_devices();
+  CHECK(devs.size() == 1 && devs[0] == "Null Input");
+
+  // commands go through the ring and come back in the mixer view
+  eng.send(cmd(Op::MicOn, 0, 0, 1));
+  eng.send(cmd(Op::MicLevel, 0, 0.5f));
+  eng.send(cmd(Op::MicEqLow, 0, 0.25f));
+  eng.send(cmd(Op::MicEqHigh, 0, 0.75f));
+  eng.send(cmd(Op::MicTalkover, 0, 0, 2));
+  eng.send(cmd(Op::MicTalkoverDepth, 0, -9.0f));
+  eng.send(cmd(Op::MicMonitor, 0, 0, 1));
+  eng.send(cmd(Op::MicGate, 0, -50.0f));
+  CHECK(wait_for([&] {
+    const MixerView m = eng.mixer();
+    return m.mic_on && m.mic_monitor && m.mic_talkover == 2 && m.mic_level == 0.5f && m.mic_eq_low == 0.25f && m.mic_eq_high == 0.75f &&
+           m.mic_depth_db == -9.0f && m.mic_gate_db == -50.0f;
+  }, 3));
+  eng.send(cmd(Op::MicTalkover, 0, 0, -1));  // toggle from "always" turns it off
+  CHECK(wait_for([&] { return eng.mixer().mic_talkover == 0; }, 3));
+  eng.send(cmd(Op::MicTalkover, 0, 0, 1));
+  CHECK(wait_for([&] { return eng.mixer().mic_talkover == 1; }, 3));
+
+  // values the engine must refuse leave the state alone
+  eng.send(cmd(Op::MicLevel, 0, 7.0f));
+  eng.send(cmd(Op::MicTalkoverDepth, 0, -99.0f));
+  eng.send(cmd(Op::MicOn, 0, 0, 9));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  CHECK(eng.mixer().mic_level == 0.5f && eng.mixer().mic_depth_db == -9.0f && eng.mixer().mic_on);
+
+  // open / close through the control socket
+  InputConfig ic;
+  ic.device_hint = "whatever";  // the null engine takes any name
+  ic.channel = 0;
+  ic.stereo = true;
+  CHECK(eng.open_input(ic, error));
+  CHECK(wait_for([&] { return eng.input_status().open && eng.mixer().mic_present; }, 3));
+  const InputStatus st = eng.input_status();
+  CHECK(!st.name.empty() && st.sample_rate > 0 && !st.lost);
+  note("input open through the helper: %s, %u Hz", st.name.c_str(), st.sample_rate);
+  InputConfig far = ic;
+  far.channel = 99;  // beyond what the request accepts
+  CHECK(!eng.open_input(far, error) && !error.empty());
+  far.channel = 40;  // accepted by the request, more than the device has
+  CHECK(!eng.open_input(far, error) && error.find("channel") != std::string::npos);
+  CHECK(wait_for([&] { return !eng.input_status().open; }, 3));
+  CHECK(eng.open_input(ic, error));
+  CHECK(wait_for([&] { return eng.input_status().open; }, 3));
+  eng.close_input();
+  CHECK(wait_for([&] { return !eng.input_status().open && !eng.mixer().mic_present; }, 3));
+
+  // recording and stream tap flags are carried
+  CHECK(eng.record_open(base + "/rec-mic1.wav", false, error, false));
+  eng.record_stop();
+  eng.record_close();
+  CHECK(eng.record_open(base + "/rec-mic2.wav", false, error));
+  eng.record_stop();
+  eng.record_close();
+  eng.stream_enable(true, false, false);
+  CHECK(wait_for([&] { return eng.mixer().stream_enabled; }, 3));
+  eng.stream_enable(false);
+  CHECK(wait_for([&] { return !eng.mixer().stream_enabled; }, 3));
+  note("microphone through the engine process: commands, views, open / close, recording and stream flags");
+
+  eng.shutdown_remote(50);
+  SessionNames names;
+  CHECK(session_names(dir, names, error));
+  CHECK(wait_for([&] {
+    Shm probe;
+    std::string e2;
+    return !Shm::open(names.shm_main, false, probe, e2);
+  }, 3));
+}
+
+// An engine of another protocol version is asked to leave and a fresh one starts: no attach, no crash.
+void test_version_mismatch(const std::string& base) {
+  const std::string dir = base + "/data-ver";
+  fs::create_directories(dir);
+  SessionNames names;
+  std::string error;
+  CHECK(session_names(dir, names, error));
+  Listener old_engine;
+  CHECK(old_engine.listen(names.socket, error));
+  std::atomic<bool> got_hello{false}, got_quit{false}, done{false};
+  std::thread fake([&] {
+    const double end = now_s() + 15;
+    while (!done && now_s() < end) {
+      Conn c;
+      if (!old_engine.accept(c, 100)) continue;
+      for (;;) {
+        std::uint8_t type = 0;
+        std::vector<std::uint8_t> payload;
+        if (!recv_frame(c, type, payload, 500)) break;
+        Wr out;
+        if (type == kReqHello) {
+          out.u32(kProtocolVersion - 1);  // an engine built before the microphone channel
+          out.u64(1);
+          out.u32(999999);                // no such process
+          got_hello = true;
+        } else if (type == kReqQuit) {
+          old_engine.close();
+          got_quit = true;
+        }
+        send_frame(c, type, out.bytes());
+        if (type == kReqQuit) {
+          done = true;
+          break;
+        }
+      }
+    }
+  });
+  RemoteEngine eng(options_for(dir));
+  const bool connected = eng.connect(error);
+  done = true;
+  fake.join();
+  CHECK(got_hello && got_quit);
+  CHECK(connected);
+  CHECK(!eng.attached_existing() && eng.engine_pid() != 999999 && process_alive(eng.engine_pid()));
+  OutputConfig oc;
+  CHECK(eng.start(oc, error));
+  CHECK(eng.input_devices().size() == 1);  // the new protocol answers the new requests
+  note("old protocol version: engine asked to quit, a fresh one attached (pid %u)", eng.engine_pid());
+  eng.shutdown_remote(50);
+  CHECK(wait_for([&] {
+    Shm probe;
+    std::string e2;
+    return !Shm::open(names.shm_main, false, probe, e2);
+  }, 3));
+}
+
 #endif  // !_WIN32
 
 }  // namespace
@@ -859,6 +1030,7 @@ int main(int, char** argv) {
 #endif
   test_blocks();
   test_commands_and_wire();
+  test_mic_wire();
 #if defined(_WIN32)
   std::printf("engine ipc ok (portable parts; the fork and kill tests are POSIX-only, see platform/windows/tests/ipc_test.cpp)\n");
   return 0;
@@ -875,6 +1047,8 @@ int main(int, char** argv) {
   test_two_process(base);
   test_sigterm_and_backoff(base);
   test_second_instance(base);
+  test_mic_ipc(base);
+  test_version_mismatch(base);
   fs::remove_all(base);
   std::printf("engine ipc ok\n");
   return 0;

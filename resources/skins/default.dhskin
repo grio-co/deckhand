@@ -326,6 +326,18 @@ window main size=1280x800 min=960x600 title="@app.title" {
           use strip n=1 color=deck1
           use strip n=2 color=deck2
         }
+        row h=22 gap=4 {
+          button bind="mixer.mic.on" text="@mixer.mic" font=small bg=panel radius=r w=40 {
+            state hover { bg=hover }
+            state on { bg=good color=bg }
+          }
+          button bind="mixer.mic.talkover" text="@mixer.talkover" font=small bg=panel radius=r w=44 {
+            state hover { bg=hover }
+            state on { bg=accent color=bg }
+          }
+          fader bind="mixer.mic.level" orientation=horizontal color=text bg=panel radius=2
+          meter bind="mixer.mic.meter" orientation=horizontal w=48 bg=panel
+        }
         label text="@mixer.crossfader" font=small color=dim h=12 text_align=center
         fader bind="mixer.crossfader" orientation=horizontal color=accent bg=panel radius=2 h=26
         row h=44 gap=6 {
@@ -366,6 +378,18 @@ window four size=1440x900 min=1100x680 title="@app.title" {
           use strip4 n=3 color=deck3
           use strip4 n=4 color=deck4
           use strip4 n=2 color=deck2
+        }
+        row h=22 gap=4 {
+          button bind="mixer.mic.on" text="@mixer.mic" font=small bg=panel radius=r w=40 {
+            state hover { bg=hover }
+            state on { bg=good color=bg }
+          }
+          button bind="mixer.mic.talkover" text="@mixer.talkover" font=small bg=panel radius=r w=44 {
+            state hover { bg=hover }
+            state on { bg=accent color=bg }
+          }
+          fader bind="mixer.mic.level" orientation=horizontal color=text bg=panel radius=2
+          meter bind="mixer.mic.meter" orientation=horizontal w=48 bg=panel
         }
         label text="@mixer.crossfader" font=small color=dim h=12 text_align=center
         fader bind="mixer.crossfader" orientation=horizontal color=accent bg=panel radius=2 h=24

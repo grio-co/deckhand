@@ -6,7 +6,7 @@ one `.dhmap` text file; nothing is compiled.
 - Built-in mappings: `controllers/` (bundled into the app).
 - Your own: `controllers/` inside DeckHand's data folder. A mapping with the same `name`
   replaces the built-in one.
-- A device is matched by its MIDI name. Unmatched devices are listed in the log.
+- A MIDI device is matched by its MIDI name; a USB HID device by vendor/product id (see HID controllers). Unmatched MIDI devices are listed in the log.
 
 ## File format
 One directive per line; `#` starts a comment; bytes are hex; decks and slots count from 1.
@@ -51,7 +51,8 @@ fader crossfader head_mix head_level master_level pfl browse browse_press load p
 | `master_bpm` | button / abs / rel | `value=X` sets (0 = follow the decks); abs sweeps `lo=`..`hi=` (default 60..180); rel: `scale=` BPM per tick |
 | `fx_assign` | button | `unit=N target=deck1\|deck2\|deck3\|deck4\|master`: unit N now addresses that channel (press only) |
 | `master_cue` | button | headphones monitor the master, see Master cue; `value=1\|0` sets, `hold=1` momentary |
-| `mic_level` | - | reserved: the engine has no microphone input yet; a mapping using it is rejected |
+| `mic_on` `mic_talkover` | button | microphone on/off and talkover (ducking) on/off: toggle; `value=1\|0` sets; `hold=1` = on while held |
+| `mic_level` `mic_eq_low` `mic_eq_high` | abs | microphone level and its two EQ bands (0..1; 0.5 = flat) |
 | `modifier` | button | holds the modifier `name=<name>` (global, or only for `deck=N`) |
 | `keyboard` `keyshift` `padfx` | pad button | see pad modes |
 
@@ -67,7 +68,7 @@ transform pitch crusher vinyl_brake backspin`.
 `when=!<modifier>`, `pickup=0|1`, `deadzone=X` (0..0.45).
 
 Output states: `playing cue sync pfl loop loop_in hotcue loaded pad_mode level key_lock quantize slip
-reverse fx_on sampler_playing loop_beats key_shift modifier fx_assign master_cue color_fx`, with `blink=1`, `on=XX off=XX`, and for
+reverse fx_on sampler_playing loop_beats key_shift modifier fx_assign master_cue color_fx mic_on mic_talkover`, with `blink=1`, `on=XX off=XX`, and for
 `level` meters `min=XX max=XX`.
 - `fx_on slot=N [unit=master] [effect=<name>]`: lit while that slot is on (and runs that effect).
 - `sampler_playing slot=N [offset=N]`: lit while the sampler slot plays (needs the sampler views, see
@@ -78,6 +79,7 @@ reverse fx_on sampler_playing loop_beats key_shift modifier fx_assign master_cue
 - `modifier name=<name>`: lit while the modifier is held.
 - `fx_assign unit=N target=deckX|master`: lit while effect unit N is assigned to it.
 - `master_cue`: lit while master cue is on.
+- `mic_on`, `mic_talkover`: lit while the hub's last mic command left them on (the hub's own state, like master cue).
 - `color_fx deck=N [effect=<name>]`: lit while the deck's colour effect is that one (without `effect=`: any
   but the default filter).
 
@@ -153,6 +155,92 @@ controller (it is not listed by `connected()`).
   are the device name for a new file). A line replaces any existing line with the same control, or the same
   action and target (deck, slot, unit, mode, when...); everything else is kept.
 
+## HID controllers
+Many controllers (jog-wheel units, some mixers and pads) speak USB HID instead of MIDI. They use the same
+`.dhmap` files, the same actions, arguments, LED states, pad modes, modifiers and soft takeover; only the
+addressing of a control differs: a field of a HID report instead of a MIDI status/data pair. A mapping may
+have a MIDI side (`match`), a HID side (`hid`) or both (modifiers are then separate per transport).
+`controllers/generic-hid.dhmap.example` is an annotated example with illustrative numbers.
+
+    hid vid=0x.... pid=0x.... [usage_page=0x.... usage=0x.... interface=N]   # which device (vid and pid required)
+    hid_init feature|output report=<id> <hex bytes>      # sent once when the device connects (repeatable)
+    hid_out report=<id> size=<n> [init=<hex bytes>] [interval=<ms>]   # template of an output report
+    in  hid report=<id> byte=<n> [bit=<b> | bits=<lo>-<hi> | size=<bytes> endian=le|be] [signed=1]
+        <button|touch|abs|rel|delta> <action> [key=value ...]
+    out hid report=<id> byte=<n> [bit=<b> | bits=<lo>-<hi> | size=<bytes> endian=le|be]
+        <state> [key=value ...]
+
+Addressing: `report` is the report id (0 for devices without numbered reports). `byte` counts from the
+first byte after the report id; the id itself is never part of the data. A field is `size` bytes (1..4,
+default 1, little endian unless `endian=be`); `bit=b` or `bits=lo-hi` (bit 0 = least significant) picks bits
+out of the assembled value, so a 12-bit control across two bytes is `byte=6 bits=0-11` and a button is
+`byte=2 bit=3`. `signed=1` reads two's complement.
+
+Input kinds:
+- `button` / `touch` (the same; `touch` reads better for jog touch sensors): non-zero = pressed. `invert=1` for
+  active-low bits.
+- `abs`: the raw value is normalised to 0..1 over the full range of the field's width (or the signed range),
+  or over `min=<raw> max=<raw>` (decimal or 0x hex; `max` may be less than `min` to reverse). Everything
+  an absolute MIDI control can do works: `lo=`/`hi=`, `invert=`, `pickup=`, `deadzone=`.
+- `rel`: a running position that wraps at its width (a jog wheel reporting an N-bit counter): each report
+  gives the delta with wrap handling (250 to 3 on 8 bits is +9, 3 to 250 is -9). Per rule `ticks_per_rev=N`
+  (counts per revolution; default: the mapping's `jog` directive); `scale=` and `invert=` as for MIDI.
+- `delta`: the field itself is a per-report signed delta (acts on every report while non-zero).
+
+Reports repeat every field, so a rule acts only when its own field changed since the previous report. The
+first report after connecting is a baseline: nothing moves just because a device was plugged in. A report too
+short for a rule is ignored by that rule.
+
+Output reports: `hid_out` declares the template of an output report (payload size, the starting bytes, and
+the minimum interval between sends, default 20 ms). `out hid` rules write their LED/meter state into
+fields of it (`on=`/`off=` are hex values of the field width; the default `on` is every bit set; `level`
+meters use `on` as maximum and `off` as minimum lit value). The hub composes the whole report from the template and all
+rules and sends it only when it changed and the interval has passed (a held-back change goes out on a later
+`tick`, so call `tick` regularly); bytes no rule writes keep the template's `init` values. Without a
+`hid_out` line a template is made from the rules (zeros, as large as the rules reach). Fields are not
+limited to single bits, which leaves room for later text or segment displays (a display is a field with `size=` bytes) -
+no display actions exist yet. `hid_init` is how a device is switched into a special mode at connect.
+
+### Safety
+- Only devices a mapping names by vendor/product id are enumerated at all (the platform layers filter by
+  vid/pid before looking at anything else); unmapped devices are never opened.
+- Keyboards, keypads, mice and pointers (usage page 0x01 usages 0x01, 0x02, 0x06, 0x07, and page 0x07) are
+  refused: a `hid` line naming them is a parse error, and the hub and every platform `open` refuse them even
+  when a wide match (`hid vid=.. pid=..` without `usage_page=`) would otherwise reach them. Name the
+  `usage_page=`/`usage=` (or `interface=`) of the controller's own interface when a device also exposes a keyboard.
+- Devices are opened with ordinary shared access, never exclusively (macOS: no `kIOHIDOptionsTypeSeizeDevice`).
+- HID is dormant until the app creates a `HidIO` (`create_hid_io`) and hands it to `ControllerHub::set_hid_io`.
+
+### HID learn (devices without a mapping)
+By default no unmapped HID device is even listed. To learn one, the app opts in with
+`hub.hid_learn_allow(vid, pid)` (a device the user picked) or `hub.hid_learn_gamepads(true)` (also lists
+joysticks, game pads and multi-axis devices). Those devices get an empty generated mapping, and
+`learn_begin(action)` / `learn_result()` / `learn_commit()` work as for MIDI: the next control moved on any
+device is captured and not dispatched. The hub watches every report: it keeps the last report per device and
+which bytes change all the time (counters, sensors: ignored once they have changed in most recent reports).
+- A button action is captured at once from the first report where exactly one bit changed (`... bit=5 button`,
+  with `invert=1` when it went 1 to 0) or one byte went to or from zero; several controls changing at once
+  are ignored until a clear press.
+- Other actions observe up to 12 changing reports (0.4 s after the last, or `learn_result(true)`) and classify
+  the byte that changed most: two adjacent bytes become one 16-bit field (`size=2 endian=le|be`) when the high byte
+  only steps by one as the low byte wraps; a value that returns to zero several times is `delta signed=1`;
+  a value that moves one way in small steps, wrapping at its width, is `rel`; otherwise faders and knobs
+  are `abs` (jog and browse actions default to `rel`; other actions are `abs` when the values spread over a
+  quarter of the range). So sweep a fader fully, or turn a jog a few clicks.
+- A fader or encoder action given a lone toggling bit fails with `learn_error()`.
+- `learn_header()` (read before `learn_commit()`, which resets the learn state) is the `hid vid=0x.... pid=0x....`
+  line to pass as the last argument of `save_user_mapping(device, lines, folder, &error, header)`; it
+  writes it instead of the `match` line of a new file. `learn_choices()` is unchanged.
+
+### Platforms
+- macOS: IOKit HIDManager (`platform/apple/hid_apple.cpp`; the manager is never opened, devices are opened
+  one by one). iOS has no IOHID access: `create_hid_io` returns null there.
+- Linux: `/dev/hidraw*`, found by rescanning `/sys/class/hidraw` about once a second (no libudev). The
+  node needs permission: install a per-device udev rule, see `platform/linux/packaging/70-deckhand-hid.rules.example`
+  (copy it to `/etc/udev/rules.d/`, put the controller's `lsusb` ids in, run `udevadm control --reload` and
+  `udevadm trigger`). Without it DeckHand logs "cannot open /dev/hidrawN: Permission denied".
+- Windows: SetupAPI + hid.dll, overlapped reads on a thread per opened device.
+
 ## Hub API for the app
 `tick(decks, count, now)` as before; `tick(decks, count, &mixer, samplers, sampler_count, now)` also
 feeds the master effect state, sampler level, master BPM and sampler slot states. All actions are engine
@@ -166,6 +254,11 @@ feeds the master effect state, sampler level, master BPM and sampler slot states
   but **not yet on the hardware**. See docs/TESTING-FLX4.md.
 
 ## Not yet
-- HID controllers, a MIDI learn UI, and a controller-state readback at connect (use `pickup=1` to avoid
-  jumps). The FLX4 mapping lacks KEY LOCK and the MIC level (the engine has no mic input); its beat FX channel
-  switch and MASTER CUE note assignments are guesses (docs/TESTING-FLX4.md).
+- A MIDI/HID learn UI, a controller-state readback at connect (use `pickup=1` to avoid jumps), and text or
+  segment displays on HID devices. The FLX4 mapping lacks KEY LOCK; its beat FX channel switch and MASTER
+  CUE note assignments are guesses (docs/TESTING-FLX4.md).
+- No HID controller mapping is shipped: report layouts are device facts that have to be verified on the
+  hardware (or from the maker's published documentation), so none are written from memory. The HID path is tested
+  with simulated reports only.
+- The mic actions send engine commands only in a build whose `engine.hpp` defines `DECKHAND_ENGINE_HAS_MIC`;
+  without it they parse and do nothing.

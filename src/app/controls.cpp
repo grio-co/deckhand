@@ -63,6 +63,14 @@ const Def kMixer[] = {
     {"master_level", Kind::Value, Op::MasterLevel, 0, 1, "0..1", "Master level"},
     {"master_bpm", Kind::Value, Op::MasterBpm, 0, 300, "BPM, 0 = follow the decks", "Tempo used by beat-synced effects and the sampler"},
     {"sampler_level", Kind::Value, Op::SamplerLevel, 0, 1, "0..1", "Sampler level"},
+    {"mic_on", Kind::Toggle, Op::MicOn, 0, 1, "0 off, 1 on, none = toggle", "Microphone channel on (needs a microphone input chosen in the settings)"},
+    {"mic_level", Kind::Value, Op::MicLevel, 0, 1, "0..1 (0.8 = unity)", "Microphone level"},
+    {"mic_eq_low", Kind::Value, Op::MicEqLow, 0, 1, "0..1 (0.5 = flat)", "Microphone low EQ"},
+    {"mic_eq_high", Kind::Value, Op::MicEqHigh, 0, 1, "0..1 (0.5 = flat)", "Microphone high EQ"},
+    {"mic_talkover", Kind::Toggle, Op::MicTalkover, 0, 2, "0 off, 1 on (ducks the music while you speak), 2 always duck, none = toggle", "Talkover: duck the music under the microphone"},
+    {"mic_talkover_depth", Kind::Value, Op::MicTalkoverDepth, -24, 0, "dB of ducking, -24..0", "How far talkover lowers the music"},
+    {"mic_monitor", Kind::Toggle, Op::MicMonitor, 0, 1, "0 off, 1 on, none = toggle", "Also play the microphone in the headphones"},
+    {"mic_gate", Kind::Value, Op::MicGate, -80, -20, "dB threshold, -80 = noise gate off", "Microphone noise gate"},
 };
 
 // Effect slot controls: deck1.fx2.wet, mixer.fx1.select ... (mixer = the master bus).
@@ -280,6 +288,7 @@ bool build_control(const IEngine& engine, std::string_view name, bool has_value,
       const bool current = d.op == Op::PlayToggle ? view.playing : d.op == Op::SyncToggle ? view.sync : view.pfl;
       if (d.op != Op::PlayToggle && d.op != Op::SyncToggle) {  // these take 1 / 0 / -1 (toggle)
         c.i = has_value ? (value != 0 ? 1 : 0) : -1;
+        if (d.op == Op::MicTalkover && has_value && std::lround(value) == 2) c.i = 2;
         out.push_back(c);
       } else if (!has_value || (value != 0) != current) {
         out.push_back(c);
@@ -359,6 +368,14 @@ bool read_control(const IEngine& engine, std::string_view name, double& value) {
       case Op::MasterLevel: value = m.master_level; return true;
       case Op::MasterBpm: value = m.master_bpm; return true;
       case Op::SamplerLevel: value = m.sampler_level; return true;
+      case Op::MicOn: value = m.mic_on; return true;
+      case Op::MicLevel: value = m.mic_level; return true;
+      case Op::MicEqLow: value = m.mic_eq_low; return true;
+      case Op::MicEqHigh: value = m.mic_eq_high; return true;
+      case Op::MicTalkover: value = m.mic_talkover; return true;
+      case Op::MicTalkoverDepth: value = m.mic_depth_db; return true;
+      case Op::MicMonitor: value = m.mic_monitor; return true;
+      case Op::MicGate: value = m.mic_gate_db; return true;
       default: return false;
     }
   }

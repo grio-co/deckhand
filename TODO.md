@@ -44,8 +44,7 @@ them in [CHANGELOG.md](CHANGELOG.md).
 
 ## Next
 - [ ] Embedding (docs/EMBEDDING.md): test input and audio inside Rig; Rig side wires `DeckHandKit` (Rig session)
-- [ ] Linux: rerun the container build against the skin-driven UI; fall back to no audio device
-      cleanly; audio-route change notifications; test on a real machine (audio, MIDI, Wayland)
+- [ ] Linux: test on a real machine (audio, MIDI, Wayland, GPU drivers)
 - [ ] Windows: build and test on the real PC (MSVC build, WASAPI audio, MIDI, Media Foundation
       codecs, HiDPI); then enable the separate engine process there (needs the UI-side quit
       handling on Windows)
@@ -53,13 +52,14 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [ ] Sync: passphrase encryption on iOS (no OpenSSL there); encryption never tried across two real computers;
       removing tombstones altogether needs per-device acknowledgements
 - [ ] Bluetooth MIDI pairing: try with a real device
-- [ ] Skins: window shapes, images/sprites and rotate animations are parsed but not drawn;
-      hidden widgets keep their layout space
-- [ ] Controllers: microphone input (engine has none yet); HID controllers
+- [ ] Skins: non-rectangular window shapes (needs drag regions in the skin format)
+- [ ] Microphone: try a real input device (macOS permission prompt from the helper process is untested)
+- [ ] HID: try a real HID controller; Windows HID code is compile-checked only; no HID mappings shipped yet
 - [ ] Listening test of key lock on real mixes; transient handling if needed
 - [ ] Test against a real OBS
-- [ ] USB export: check against a reference export, then the CDJ-3000 test; write exportExt.pdb
-- [ ] CI on all platforms; vendored dependencies for portable builds
+- [ ] USB export: run `compare_exports` against a reference stick (docs/EXPORT.md says how to make one),
+      then the CDJ-3000 test; 11 format details are still undocumented guesses
+- [ ] CI on all platforms (in progress); vendored dependencies for portable builds
 - [ ] iOS app (pull request open; touch layout pending)
 
 ## Known limits of the current build

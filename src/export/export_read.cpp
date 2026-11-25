@@ -6,6 +6,7 @@
 #include <map>
 
 #include "bytes.hpp"
+#include "rawio.hpp"
 #include "deckhand/export/export.hpp"
 
 namespace deckhand::usbexport {
@@ -14,60 +15,14 @@ namespace {
 using detail::Bytes;
 namespace fs = std::filesystem;
 
-struct View {
-  const Bytes& d;
-  std::size_t base = 0;
-  bool ok(std::size_t off, std::size_t n) const { return base + off + n <= d.size() && base + off + n >= base + off; }
-  std::uint32_t le16(std::size_t o) const { return ok(o, 2) ? d[base + o] | (d[base + o + 1] << 8) : 0; }
-  std::uint32_t le32(std::size_t o) const { return ok(o, 4) ? le16(o) | (le16(o + 2) << 16) : 0; }
-  std::uint32_t be16(std::size_t o) const { return ok(o, 2) ? (d[base + o] << 8) | d[base + o + 1] : 0; }
-  std::uint32_t be32(std::size_t o) const { return ok(o, 4) ? (be16(o) << 16) | be16(o + 2) : 0; }
-  std::uint32_t u8(std::size_t o) const { return ok(o, 1) ? d[base + o] : 0; }
-};
+using detail::View;
+using detail::read_all;
+using detail::utf16be_z;
 
-bool read_all(const fs::path& p, Bytes& out) {
-  std::ifstream f(p, std::ios::binary);
-  if (!f) return false;
-  out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-  return true;
-}
-
-// DeviceSQL string at v+off. Returns false when malformed.
-bool dsql(const View& v, std::size_t off, std::string& out) {
-  out.clear();
-  if (!v.ok(off, 1)) return false;
-  const unsigned lk = v.u8(off);
-  if (lk & 1) {  // short ASCII
-    const std::size_t len = lk >> 1;
-    if (len < 1 || !v.ok(off, len)) return false;
-    out.assign(reinterpret_cast<const char*>(&v.d[v.base + off + 1]), len - 1);
-    return true;
-  }
-  const std::size_t len = v.le16(off + 1);
-  if (len < 4 || !v.ok(off, len)) return false;
-  const std::size_t n = len - 4;
-  const std::uint8_t* p = &v.d[v.base + off + 4];
-  if (lk == 0x40) {
-    out.assign(reinterpret_cast<const char*>(p), n);
-    return true;
-  }
-  if (lk == 0x90) {
-    std::u16string u;
-    for (std::size_t i = 0; i + 1 < n; i += 2) u.push_back(static_cast<char16_t>(p[i] | (p[i + 1] << 8)));
-    out = detail::utf16_to_utf8(u);
-    return true;
-  }
-  return false;
-}
-
-std::string utf16be_z(const View& v, std::size_t off, std::size_t bytes) {
-  std::u16string u;
-  for (std::size_t i = 0; i + 1 < bytes && v.ok(off + i, 2); i += 2) {
-    const char16_t c = static_cast<char16_t>(v.be16(off + i));
-    if (c == 0) break;
-    u.push_back(c);
-  }
-  return detail::utf16_to_utf8(u);
+bool dsql(const View& v, std::size_t off, std::string& out, bool isrc = false) {
+  const detail::DsqlStr s = detail::dsql_read(v, off, isrc);
+  out = s.text;
+  return s.ok();
 }
 
 struct RawTrack {
@@ -187,6 +142,36 @@ bool parse_anlz(const fs::path& path, ReadTrack& rt, int kind, std::string& erro
   return true;
 }
 
+// exportExt.pdb: tags (type 3) and track-tag links (type 4). Missing file is not an error.
+void read_ext_db(const fs::path& root, ReadExport& out) {
+  Bytes db;
+  if (!read_all(root / "PIONEER/rekordbox/exportExt.pdb", db)) return;
+  detail::PdbFile f;
+  if (!f.load(std::move(db))) return;
+  out.has_ext_db = true;
+  for (const auto& t : f.tables) {
+    std::size_t valid = 0;
+    for (const auto& row : t.rows) {
+      if (!row.present) continue;
+      ++valid;
+      const View r{f.data, row.abs};
+      if (t.type == 3) {
+        ReadTag tag;
+        const bool far = (r.le16(0) & 4) != 0;
+        tag.category = r.le32(0x0C);
+        tag.category_pos = r.le32(0x10);
+        tag.id = r.le32(0x14);
+        tag.is_category = r.le32(0x18) != 0;
+        dsql(r, far ? r.le16(0x1E) : r.u8(0x1D), tag.name);
+        out.tags.push_back(std::move(tag));
+      } else if (t.type == 4) {
+        out.tag_links.emplace_back(r.le32(4), r.le32(8));
+      }
+    }
+    out.ext_table_rows.push_back(valid);
+  }
+}
+
 }  // namespace
 
 bool read_export(const std::string& root_str, ReadExport& out, std::string& error) {
@@ -272,6 +257,10 @@ bool read_export(const std::string& root_str, ReadExport& out, std::string& erro
                   if (!dsql(r, r.le16(0x5E + 2 * idx), o)) o = "\x01<bad>";
                   return o;
                 };
+                {
+                  std::string isrc;
+                  if (dsql(r, r.le16(0x5E), isrc, true)) rt.rt.isrc = isrc;
+                }
                 rt.rt.analyze_path = str(14);
                 t.comment = str(16);
                 t.title = str(17);
@@ -348,6 +337,7 @@ bool read_export(const std::string& root_str, ReadExport& out, std::string& erro
       }
       out.tracks.push_back(std::move(r.rt));
     }
+    read_ext_db(root, out);
     return true;
   } catch (const std::exception& e) {
     error = std::string("read_export: ") + e.what();

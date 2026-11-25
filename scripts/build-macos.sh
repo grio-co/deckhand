@@ -45,7 +45,7 @@ swiftc -O -swift-version 5 \
   -ldh_library -ldh_audio -ldh_gfx -ldh_log -ldh_platform -ldh_miniaudio \
   $(cat "$BUILD/tls_link.txt") $(cat "$BUILD/sqlite_link.txt") -lc++ \
   -framework AppKit -framework Metal -framework MetalKit -framework QuartzCore -framework CoreText \
-  -framework CoreMIDI -framework CoreAudioKit -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
+  -framework CoreMIDI -framework IOKit -framework CoreAudioKit -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
 
 cp "$ROOT"/controllers/*.dhmap "$APP/Contents/Resources/controllers/"
 cp -R "$ROOT/resources/lang" "$ROOT/resources/skins" "$APP/Contents/Resources/"
@@ -54,10 +54,14 @@ sed -e "s/@BUNDLE_ID@/$BUNDLE_ID/" -e "s/@VERSION@/$VERSION/g" \
     "$ROOT/platform/macos/Info.plist" > "$APP/Contents/Info.plist"
 
 # The audio engine runs as a helper process beside the app (see ARCHITECTURE.md). It is signed first, with the same
-# identity and hardened runtime and no entitlements: shared memory and Unix sockets between the two processes need none.
+# identity and hardened runtime. Shared memory and Unix sockets between the two processes need no entitlements; the
+# only one both binaries carry is audio input (microphone channel), which the hardened runtime requires on whichever
+# binary opens the capture device (the helper normally, the app in in-process mode). The device is only ever opened
+# after the user picks an input in the settings.
+ENTITLEMENTS="$ROOT/platform/macos/DeckHand.entitlements"
 cp "$BUILD/deckhand-engine" "$APP/Contents/MacOS/deckhand-engine"
-codesign --force --options runtime --timestamp --identifier "$BUNDLE_ID.engine" --sign "$IDENTITY" "$APP/Contents/MacOS/deckhand-engine"
-codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --identifier "$BUNDLE_ID.engine" --sign "$IDENTITY" "$APP/Contents/MacOS/deckhand-engine"
+codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
 codesign --verify --strict "$APP"
 codesign --verify --strict "$APP/Contents/MacOS/deckhand-engine"
 echo "built and signed: $APP"

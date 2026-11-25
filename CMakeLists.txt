@@ -157,11 +157,14 @@ if(APPLE)
   add_library(dh_platform STATIC ${apple_srcs})
   target_link_libraries(dh_platform PUBLIC dh_audio dh_midi
     "-framework AudioToolbox" "-framework CoreMIDI" "-framework CoreFoundation" "-framework CoreAudio")
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    target_link_libraries(dh_platform PUBLIC "-framework IOKit")  # HID (iOS has no IOHID: hid_apple.cpp compiles to a stub)
+  endif()
 elseif(WIN32)
   # Windows: Media Foundation decodes (plus built-in PCM WAV/AIFF readers), WinMM does MIDI.
   file(GLOB win_srcs CONFIGURE_DEPENDS platform/windows/*.cpp)
   add_library(dh_platform STATIC ${win_srcs})
-  target_link_libraries(dh_platform PUBLIC dh_audio dh_midi mfplat mfreadwrite mfuuid propsys ole32 oleaut32 uuid winmm)
+  target_link_libraries(dh_platform PUBLIC dh_audio dh_midi mfplat mfreadwrite mfuuid propsys ole32 oleaut32 uuid winmm hid setupapi)
   # IPC (shared memory, control channel, process spawn) and the control sockets.
   target_link_libraries(dh_audio PUBLIC ws2_32 bcrypt advapi32 ole32)
   target_link_libraries(dh_broadcast PUBLIC ws2_32)

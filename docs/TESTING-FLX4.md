@@ -66,12 +66,12 @@ Expected for each: pads act as described, and the mode button lights. Report whi
   `fx_assign` lines in the file). ON/OFF must work in all three positions (position 2 sends 95 47).
 - MASTER CUE: press, the headphones should switch to the master mix (head mix full master); press again
   restores the previous head mix. The LED note is assumed to be 96 63 too: report if it stays dark.
-  Moving the headphone mix knob afterwards takes over. SHIFT + MASTER CUE and MIC LEVEL are not mapped.
+  Moving the headphone mix knob afterwards takes over. SHIFT + MASTER CUE is not mapped. MIC LEVEL (B6 05/25) is mapped to `mic_level`: turning it should move the microphone channel level once the engine build has the mic commands.
 - **LEVEL/DEPTH** is the one control whose published status byte and channel column disagree. If the
   knob does nothing, look at the log for the control change it sends (B4 or B5, number 02/22) and report it.
 - SMART CFX button: steps the colour effect the CFX knobs drive (both decks); SHIFT steps back. Report
   what the CFX knob then does. Its LED (assumed 96 00, lit while a non-default colour effect is on deck 1)
-  is unconfirmed. Not mapped: Smart Fader, MIC level (the engine has no mic input yet), mono/stereo switch.
+  is unconfirmed. Not mapped: Smart Fader, mono/stereo switch.
 
 ## 6. LEDs
 PLAY and CUE, SYNC, headphone CUE, hot cue pads, beat loop and beat jump pads, mode buttons, pad FX pads

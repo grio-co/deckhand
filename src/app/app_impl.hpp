@@ -267,6 +267,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void stop_signal_watch();
   void start_audio();
   void restart_audio();
+  void apply_input(bool force);  // microphone input from the settings (opens nothing while none is chosen)
   void set_status(const std::string& s) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     status_ = s;
@@ -338,6 +339,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void save_setting(const std::string& key, const std::string& value) { lib_->set_setting(key, value); }
   bool field_key(dh_key key);
   void draw_sync_section(float x, float& y, float rw);
+  void draw_microphone_section(float x, float& y, float rw);
   void draw_controller_section(float x, float& y, float rw);
   bool choose_folder(const std::string& title, std::string& out);
   static std::string host_name();
@@ -361,6 +363,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   RemoteEngine* remote_ = nullptr;        // engine_ when it runs in its own process
   std::unique_ptr<ControllerHub> local_hub_;  // in-process mode only; otherwise the hub lives in the engine process
   std::unique_ptr<MidiIO> midi_;
+  std::unique_ptr<HidIO> hid_;
   std::unique_ptr<HubApi> hub_;
   std::thread signal_thread_;
   std::unique_ptr<ApiBridge> api_;
@@ -382,6 +385,10 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   DeckInfo decks_[kMaxDecks];
   std::string status_, audio_label_, audio_choice_, audio_pref_, last_audio_error_;
   std::uint32_t audio_period_ = 256;
+  std::string input_pref_, input_error_;  // audio.input_device ("" = no microphone) and the last open error
+  int input_channel_ = 0;                 // audio.input_channel, 0-based
+  bool input_stereo_ = false;             // audio.input_stereo
+  float talk_depth_ = -12.0f;             // audio.mic_depth, dB
   bool importing_ = false, exporting_ = false;
   std::atomic<bool> rows_dirty_{true};
   std::atomic<bool> audio_recheck_{false};
@@ -482,7 +489,8 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   int tag_rating_ = 0;
   std::string tag_path_;
   float dev_scroll_ = 0, panel_content_h_ = 0;
-  std::vector<std::string> output_devices_;
+  std::vector<std::string> output_devices_, input_devices_;
+  float in_scroll_ = 0;
   float panel_scroll_ = 0;
   std::int64_t edit_track_ = 0;
   std::string relink_old_;

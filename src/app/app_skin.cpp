@@ -118,6 +118,10 @@ bool App::read_number(const ui::Target& t, double& v) {
     v = std::max(mixer_.peak_left, mixer_.peak_right);
     return true;
   }
+  if (t.name == "mic_level") {
+    v = mixer_.mic_peak;
+    return true;
+  }
   if (t.name == "count") {
     v = static_cast<double>(rows_.size());
     return true;

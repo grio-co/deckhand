@@ -470,10 +470,11 @@ SamplerView RemoteEngine::sampler(int slot) const {
   return l ? l->sh->sampler[std::clamp(slot, 0, kSamplerSlots - 1)].read() : SamplerView{};
 }
 
-bool RemoteEngine::record_open(const std::string& path, bool pre_clip, std::string& error) {
+bool RemoteEngine::record_open(const std::string& path, bool pre_clip, std::string& error, bool include_mic) {
   Wr w;
   w.str(path);
   w.u8(pre_clip ? 1 : 0);
+  w.u8(include_mic ? 1 : 0);
   std::vector<std::uint8_t> r;
   if (!rpc(kReqRecOpen, w.bytes(), r, 5000)) {
     error = "the audio engine is not responding";
@@ -503,10 +504,11 @@ std::string RemoteEngine::recorder_path() const {
   return text_of(r.path, sizeof r.path, r.path_len);
 }
 
-void RemoteEngine::stream_enable(bool on, bool pre_clip) {
+void RemoteEngine::stream_enable(bool on, bool pre_clip, bool include_mic) {
   Wr w;
   w.u8(on ? 1 : 0);
   w.u8(pre_clip ? 1 : 0);
+  w.u8(include_mic ? 1 : 0);
   std::vector<std::uint8_t> r;
   rpc(kReqStreamEnable, w.bytes(), r, 3000);
   if (const auto l = link()) l->sh->stream.discard();
@@ -518,6 +520,49 @@ std::size_t RemoteEngine::stream_read(float* out, std::size_t max_frames) {
 std::uint64_t RemoteEngine::stream_dropped_frames() const {
   const auto l = link();
   return l ? l->sh->hdr.stream_dropped.load() : 0;
+}
+
+bool RemoteEngine::open_input(const InputConfig& config, std::string& error) {
+  Wr w;
+  w.str(config.device_hint);
+  w.i32(config.channel);
+  w.u8(config.stereo ? 1 : 0);
+  std::vector<std::uint8_t> r;
+  if (!rpc(kReqOpenInput, w.bytes(), r, 8000)) {
+    error = "the audio engine is not responding";
+    return false;
+  }
+  Rd rd(r.data(), r.size());
+  const bool ok = rd.u8() != 0;
+  error = rd.str();
+  return ok && rd.ok();
+}
+void RemoteEngine::close_input() {
+  std::vector<std::uint8_t> r;
+  rpc(kReqCloseInput, {}, r, 5000);
+}
+std::vector<std::string> RemoteEngine::input_devices() {
+  std::vector<std::string> out;
+  std::vector<std::uint8_t> r;
+  if (!rpc(kReqInputDevices, {}, r, 4000)) return out;
+  Rd rd(r.data(), r.size());
+  const std::uint32_t n = rd.u32();
+  for (std::uint32_t i = 0; i < n && i < 256 && rd.ok(); ++i) out.push_back(rd.str());
+  return out;
+}
+InputStatus RemoteEngine::input_status() const {
+  InputStatus st;
+  const auto l = link();
+  if (!l) return st;
+  const InputInfo in = l->sh->input.read();
+  st.open = in.open != 0;
+  st.lost = in.lost != 0;
+  st.sample_rate = in.sample_rate;
+  st.latency_ms = std::isfinite(in.latency_ms) ? in.latency_ms : 0;
+  st.underruns = in.underruns;
+  st.overruns = in.overruns;
+  st.name = text_of(in.name, sizeof in.name, in.name_len);
+  return st;
 }
 
 std::uint64_t RemoteEngine::clock_frames() const {

@@ -25,7 +25,10 @@
 
 namespace deckhand::ipc {
 
-constexpr std::uint32_t kProtocolVersion = 1;
+// 2: microphone channel (Mic* ops, MixerView fields, InputInfo snapshot, input requests, include-mic flags).
+// Bump whenever a wire layout or the meaning of a request changes: a UI that finds an engine with another version
+// asks it to quit and starts a fresh one (RemoteEngine::establish), and the segment's fingerprint covers the sizes.
+constexpr std::uint32_t kProtocolVersion = 2;
 constexpr int kBlockSlots = 64;  // track / sample blocks in flight at once
 
 // What the OS hands out for a file or socket: a descriptor on POSIX, a HANDLE / SOCKET on Windows (-1 = none).
@@ -364,6 +367,12 @@ struct DeviceInfo {
   std::uint32_t name_len = 0;
   char name[128] = {};
 };
+struct InputInfo {  // the microphone input (InputStatus on the wire)
+  std::uint32_t open = 0, lost = 0, sample_rate = 0, name_len = 0;
+  double latency_ms = 0;
+  std::uint64_t underruns = 0, overruns = 0;
+  char name[128] = {};
+};
 struct RecInfo {
   RecorderStatus st;
   std::uint32_t path_len = 0;
@@ -391,7 +400,7 @@ struct Header {
   std::uint32_t version = 0;
   std::uint32_t header_size = 0;
   std::uint64_t total_size = 0;
-  std::uint32_t fingerprint[10] = {};  // sizes of the shared types: both sides must be built from the same source
+  std::uint32_t fingerprint[12] = {};  // sizes of the shared types: both sides must be built from the same source
   std::atomic<std::uint64_t> session_id{0};
   std::atomic<std::uint32_t> engine_pid{0};
   std::atomic<std::uint32_t> engine_state{0};
@@ -416,6 +425,7 @@ struct Shared {
   SeqSlot<RecInfo> rec;
   SeqSlot<DeviceInfo> device;
   SeqSlot<HubInfo> hub;
+  SeqSlot<InputInfo> input;
   CmdRing<kCmdRingSize> cmd;
   SpscShared<WireEvent, kEventRingSize> events;
   StreamShared<kStreamFrames> stream;
@@ -512,7 +522,7 @@ enum Req : std::uint8_t {
   kReqOpenDevice,      // str hint, i32 master, i32 phones, u32 period, u8 follow -> u8 ok, str error
   kReqCloseDevice,
   kReqDevices,         // -> u32 n, str...
-  kReqRecOpen,         // str path, u8 pre -> u8 ok, str error
+  kReqRecOpen,         // str path, u8 pre, u8 include_mic -> u8 ok, str error
   kReqRecStop,
   kReqRecClose,
   kReqSamplerLoad,     // i32 slot, i32 block slot, u64 generation -> u8 ok, str error
@@ -520,13 +530,16 @@ enum Req : std::uint8_t {
   kReqCancel,          // u64 id -> u8
   kReqCancelAll,
   kReqClockAtWall,     // i64 steady ns -> u64 frame
-  kReqStreamEnable,    // u8 on, u8 pre
+  kReqStreamEnable,    // u8 on, u8 pre, u8 include_mic
   kReqQuit,            // u32 fade ms
   kReqHubLearnBegin,   // str action -> u8 ok, str error
   kReqHubLearnCancel,
   kReqHubLearnCommit,  // -> u8 ok
   kReqHubLearnResult,  // u8 finalize -> str line
   kReqPing,
+  kReqOpenInput,       // str hint, i32 channel, u8 stereo -> u8 ok, str error
+  kReqCloseInput,
+  kReqInputDevices,    // -> u32 n, str...
 };
 
 class Wr {

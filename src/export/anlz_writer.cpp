@@ -206,14 +206,19 @@ void tag_pwv4(Bytes& b, const std::vector<WaveSample>& w) {
   put_be32(b, 6);
   put_be32(b, 1200);
   put_be32(b, 0);
-  // Entry layout is NOT documented on the analysis page; this is a guess (see docs/EXPORT.md).
+  // Entry layout per the protocol analysis page ("Requesting Nxs2 Track Waveforms"): six bytes per column. Bytes 0
+  // and 1 are whiteness-related, byte 2 the energy in the lower half of the frequency range, bytes 3, 4 and 5 the
+  // energy in the lower third, middle and top. How the first two are derived is not documented: DeckHand writes the
+  // high-band share (0..255) to both. Byte 2 is approximated as (2 low + mid) / 3.
   for (const auto& c : resample(w, 1200)) {
-    put_u8(b, 0);
-    put_u8(b, 0);
+    const unsigned total = c.low + c.mid + c.high;
+    const unsigned white = total == 0 ? 0 : (255u * c.high + total / 2) / total;
+    put_u8(b, white);
+    put_u8(b, white);
+    put_u8(b, (2u * c.low + c.mid + 1) / 3);
     put_u8(b, c.low);
     put_u8(b, c.mid);
     put_u8(b, c.high);
-    put_u8(b, peak(c));
   }
   end_tag(b, s);
 }

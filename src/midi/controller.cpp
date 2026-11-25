@@ -12,7 +12,27 @@
 
 #include "deckhand/log/log.hpp"
 
+// The engine commands for the microphone channel (Op::MicOn, MicLevel, MicEqLow, MicEqHigh, MicTalkover) arrive
+// with the microphone work; until engine.hpp defines the marker DECKHAND_ENGINE_HAS_MIC the mic actions parse but
+// send nothing.
+#if defined(DECKHAND_ENGINE_HAS_MIC)
+#define DECKHAND_HAVE_MIC_OPS 1
+#endif
+
 namespace deckhand {
+
+bool hid_usage_refused(int usage_page, int usage) {
+  if (usage_page == 0x07) return true;  // keyboard / keypad page
+  if (usage_page == 0x01) return usage == 0x01 || usage == 0x02 || usage == 0x06 || usage == 0x07;  // pointer, mouse, keyboard, keypad
+  return false;
+}
+
+bool hid_matches(const HidMatch& m, const HidDeviceInfo& d) {
+  return (m.vid < 0 || m.vid == d.vid) && (m.pid < 0 || m.pid == d.pid) &&
+         (m.usage_page < 0 || m.usage_page == d.usage_page) && (m.usage < 0 || m.usage == d.usage) &&
+         (m.interface_number < 0 || m.interface_number == d.interface_number);
+}
+
 namespace {
 
 std::string lower(std::string s) {
@@ -84,7 +104,9 @@ const Named kActions[] = {
     {"sampler_stop", int(Action::SamplerStop)}, {"sampler_level", int(Action::SamplerLevel)},
     {"master_bpm", int(Action::MasterBpm)}, {"keyboard", int(Action::Keyboard)}, {"keyshift", int(Action::KeyShiftPad)},
     {"padfx", int(Action::PadFx)}, {"modifier", int(Action::Modifier)}, {"fx_assign", int(Action::FxAssign)},
-    {"master_cue", int(Action::MasterCue)},
+    {"master_cue", int(Action::MasterCue)}, {"mic_on", int(Action::MicOn)}, {"mic_level", int(Action::MicLevel)},
+    {"mic_eq_low", int(Action::MicEqLow)}, {"mic_eq_high", int(Action::MicEqHigh)},
+    {"mic_talkover", int(Action::MicTalkover)},
 };
 const Named kStates[] = {
     {"playing", int(LedState::Playing)}, {"cue", int(LedState::Cue)}, {"sync", int(LedState::Sync)},
@@ -95,11 +117,14 @@ const Named kStates[] = {
     {"sampler_playing", int(LedState::SamplerPlaying)}, {"loop_beats", int(LedState::LoopBeats)},
     {"key_shift", int(LedState::KeyShift)}, {"modifier", int(LedState::Modifier)}, {"fx_assign", int(LedState::FxAssign)},
     {"master_cue", int(LedState::MasterCue)}, {"color_fx", int(LedState::ColorFx)},
+    {"mic_on", int(LedState::MicOn)}, {"mic_talkover", int(LedState::MicTalkover)},
 };
 const Named kModes[] = {{"hotcue", 0}, {"padfx1", 1}, {"beatjump", 2}, {"sampler", 3},
                         {"keyboard", 4}, {"padfx2", 5}, {"beatloop", 6}, {"keyshift", 7}};
 const Named kInKinds[] = {{"button", int(InKind::Button)}, {"abs", int(InKind::Abs)}, {"abs14", int(InKind::Abs14)},
                           {"rel", int(InKind::Rel)}, {"rel2", int(InKind::Rel2)}};
+const Named kHidKinds[] = {{"button", int(InKind::HidButton)}, {"touch", int(InKind::HidButton)},
+                           {"abs", int(InKind::HidAbs)}, {"rel", int(InKind::HidRel)}, {"delta", int(InKind::HidDelta)}};
 const Named kEffects[] = {
     {"none", int(EffectKind::None)}, {"echo", int(EffectKind::Echo)}, {"ping_pong", int(EffectKind::PingPong)},
     {"spiral", int(EffectKind::Spiral)}, {"reverb", int(EffectKind::Reverb)}, {"flanger", int(EffectKind::Flanger)},
@@ -132,13 +157,35 @@ struct Args {
   float amount = 1, value = 0, lo = 0, hi = 1, deadzone = -1;
   int pickup = -1, pad = -1, offset = 0;
   int on = 0x7F, off = 0, min = -1, max = -1;
-  std::string match, effect, when, name, target;
+  bool has_on = false;
+  std::string min_s, max_s;  // as written (MIDI out: hex byte; HID in: a number)
+  std::string match, effect, when, name, target, init;
+  // HID
+  int report = -1, byte = -1, bit_lo = -1, bit_hi = -1, size = -1, endian = -1;
+  bool is_signed = false;
+  double interval = -1;
+  long vid = -1, pid = -1, usage_page = -1, usage = -1, interface_number = -1;
   int master = -1, phones = -1;
   double ticks_per_rev = -1;
 };
 
-bool parse_args(const std::vector<std::string>& t, std::size_t from, Args& a, std::string& error) {
-  for (std::size_t i = from; i < t.size(); ++i) {
+bool dec_int(const std::string& s, long& out) {  // decimal, or 0x-prefixed hex
+  if (s.empty()) return false;
+  char* end = nullptr;
+  out = std::strtol(s.c_str(), &end, 0);
+  return *end == '\0';
+}
+
+bool hex_int(const std::string& s, long& out) {  // hex, up to 8 digits
+  if (s.empty() || s.size() > 8) return false;
+  char* end = nullptr;
+  out = std::strtol(s.c_str(), &end, 16);
+  return *end == '\0' && out >= 0;
+}
+
+bool parse_args(const std::vector<std::string>& t, std::size_t from, Args& a, std::string& error,
+                std::size_t to = std::string::npos) {
+  for (std::size_t i = from; i < t.size() && i < to; ++i) {
     const auto eq = t[i].find('=');
     if (eq == std::string::npos) {
       error = "expected key=value, got '" + t[i] + "'";
@@ -147,6 +194,7 @@ bool parse_args(const std::vector<std::string>& t, std::size_t from, Args& a, st
     const std::string k = t[i].substr(0, eq), v = t[i].substr(eq + 1);
     const float num = static_cast<float>(std::atof(v.c_str()));
     std::uint8_t b = 0;
+    long n = 0;
     if (k == "deck") { a.deck = std::atoi(v.c_str()) - 1; a.has_deck = true; }
     else if (k == "slot") { a.slot = std::atoi(v.c_str()) - 1; a.has_slot = true; }
     else if (k == "mode") { if (!lookup(kModes, v, a.mode)) { error = "unknown pad mode '" + v + "'"; return false; } }
@@ -175,10 +223,30 @@ bool parse_args(const std::vector<std::string>& t, std::size_t from, Args& a, st
     else if (k == "offset") a.offset = std::atoi(v.c_str());
     else if (k == "when") a.when = v;
     else if (k == "name") a.name = v;
-    else if (k == "on" && hex_byte(v, b)) a.on = b;
-    else if (k == "off" && hex_byte(v, b)) a.off = b;
-    else if (k == "min" && hex_byte(v, b)) a.min = b;
-    else if (k == "max" && hex_byte(v, b)) a.max = b;
+    else if (k == "on" && hex_int(v, n)) { a.on = static_cast<int>(n); a.has_on = true; }
+    else if (k == "off" && hex_int(v, n)) a.off = static_cast<int>(n);
+    else if (k == "min" && !v.empty()) { a.min_s = v; if (hex_byte(v, b)) a.min = b; }
+    else if (k == "max" && !v.empty()) { a.max_s = v; if (hex_byte(v, b)) a.max = b; }
+    else if (k == "report" && dec_int(v, n)) a.report = static_cast<int>(n);
+    else if (k == "byte" && dec_int(v, n)) a.byte = static_cast<int>(n);
+    else if (k == "bit" && dec_int(v, n)) a.bit_lo = a.bit_hi = static_cast<int>(n);
+    else if (k == "bits") {
+      const auto dash = v.find('-');
+      long lo = 0, hi = 0;
+      if (dash == std::string::npos || !dec_int(v.substr(0, dash), lo) || !dec_int(v.substr(dash + 1), hi)) { error = "bits must be <lo>-<hi>"; return false; }
+      a.bit_lo = static_cast<int>(lo);
+      a.bit_hi = static_cast<int>(hi);
+    }
+    else if (k == "size" && dec_int(v, n)) a.size = static_cast<int>(n);
+    else if (k == "endian" && (v == "le" || v == "be")) a.endian = v == "be" ? 1 : 0;
+    else if (k == "signed") a.is_signed = v == "1";
+    else if (k == "interval" && dec_int(v, n) && n >= 0) a.interval = static_cast<double>(n) / 1000.0;
+    else if (k == "init") a.init = v;
+    else if (k == "vid" && dec_int(v, n)) a.vid = n;
+    else if (k == "pid" && dec_int(v, n)) a.pid = n;
+    else if (k == "usage_page" && dec_int(v, n)) a.usage_page = n;
+    else if (k == "usage" && dec_int(v, n)) a.usage = n;
+    else if (k == "interface" && dec_int(v, n)) a.interface_number = n;
     else if (k == "match") a.match = v;
     else if (k == "master") a.master = std::atoi(v.c_str()) - 1;
     else if (k == "phones") a.phones = std::atoi(v.c_str()) - 1;
@@ -223,7 +291,7 @@ Class action_class(Action a) {
     case Action::Tempo: case Action::Trim: case Action::EqHigh: case Action::EqMid: case Action::EqLow:
     case Action::Filter: case Action::Fader: case Action::Crossfader: case Action::HeadMix: case Action::HeadLevel:
     case Action::MasterLevel: case Action::AutoGain: case Action::FxWet: case Action::FxParam:
-    case Action::SamplerLevel:
+    case Action::SamplerLevel: case Action::MicLevel: case Action::MicEqLow: case Action::MicEqHigh:
       return Class::Value;
     case Action::Jog: case Action::Browse: return Class::Delta;
     case Action::KeyShift: case Action::MasterBpm: case Action::FxSelect: case Action::FxTime: return Class::Any;
@@ -257,15 +325,77 @@ double loop_beats(const DeckView& d) {
   return (d.loop_out - d.loop_in) / d.sample_rate * track_bpm / 60.0;
 }
 
+bool hex_string(const std::string& s, std::vector<std::uint8_t>& out) {  // "00 1F ff" or "001Fff"
+  out.clear();
+  int hi = -1;
+  for (char c : s) {
+    if (std::isspace(static_cast<unsigned char>(c))) continue;
+    const int v = std::isdigit(static_cast<unsigned char>(c)) ? c - '0'
+                  : (std::isxdigit(static_cast<unsigned char>(c)) ? std::tolower(c) - 'a' + 10 : -1);
+    if (v < 0) return false;
+    if (hi < 0) hi = v;
+    else { out.push_back(static_cast<std::uint8_t>(hi << 4 | v)); hi = -1; }
+  }
+  return hi < 0;
+}
+
+// The report field an "in hid" / "out hid" line addresses.
+bool make_field(const Args& a, HidField& f, std::string& why, bool input = true) {
+  if (a.report < 0 || a.report > 255) { why = "hid rules need report=0..255"; return false; }
+  if (a.byte < 0 || a.byte > 4095) { why = "hid rules need byte=0..4095"; return false; }
+  int lo = a.bit_lo, hi = a.bit_hi, size = a.size;
+  if (size < 0) size = lo >= 0 ? hi / 8 + 1 : 1;
+  if (size < 1 || size > 4) { why = "size must be 1..4 bytes"; return false; }
+  if (lo < 0) { lo = 0; hi = size * 8 - 1; }
+  if (lo > hi || hi >= size * 8) { why = "bit range outside the field"; return false; }
+  f.report = a.report;
+  f.byte = a.byte;
+  f.size = size;
+  f.lo = lo;
+  f.hi = hi;
+  f.big = a.endian == 1;
+  f.is_signed = a.is_signed;
+  if (input) {
+    long n = 0;
+    if (!a.min_s.empty()) { if (!dec_int(a.min_s, n)) { why = "bad min= for a HID field"; return false; } f.has_min = true; f.vmin = static_cast<double>(n); }
+    if (!a.max_s.empty()) { if (!dec_int(a.max_s, n)) { why = "bad max= for a HID field"; return false; } f.has_max = true; f.vmax = static_cast<double>(n); }
+    if (f.has_min && f.has_max && f.vmin == f.vmax) { why = "min and max are equal"; return false; }
+  }
+  return true;
+}
+
+// Reads a field out of a report payload. False when the report is too short.
+bool hid_read(const HidField& f, const std::uint8_t* d, std::size_t n, std::int64_t& out) {
+  if (!d || static_cast<std::size_t>(f.byte) + static_cast<std::size_t>(f.size) > n) return false;
+  std::uint64_t v = 0;
+  for (int i = 0; i < f.size; ++i) {
+    const std::uint8_t b = d[f.byte + (f.big ? i : f.size - 1 - i)];
+    v = v << 8 | b;
+  }
+  const int w = f.width();
+  v = (v >> f.lo) & ((1ULL << w) - 1);
+  out = (f.is_signed && ((v >> (w - 1)) & 1)) ? static_cast<std::int64_t>(v) - (1LL << w) : static_cast<std::int64_t>(v);
+  return true;
+}
+
+// Writes the low bits of `value` into a field of a report payload (other bits are kept).
+void hid_write(const HidField& f, std::vector<std::uint8_t>& d, std::uint32_t value) {
+  if (static_cast<std::size_t>(f.byte) + static_cast<std::size_t>(f.size) > d.size()) return;
+  std::uint64_t v = 0;
+  for (int i = 0; i < f.size; ++i) v = v << 8 | d[f.byte + (f.big ? i : f.size - 1 - i)];
+  const std::uint64_t mask = ((1ULL << f.width()) - 1) << f.lo;
+  v = (v & ~mask) | ((static_cast<std::uint64_t>(value) << f.lo) & mask);
+  for (int i = 0; i < f.size; ++i) {
+    const int shift = 8 * (f.big ? f.size - 1 - i : i);
+    d[f.byte + i] = static_cast<std::uint8_t>(v >> shift);
+  }
+}
+
 // Parses one mapping line into m (blank and comment lines are fine). Returns false with a reason.
 bool parse_line(Mapping& m, const std::string& line, std::string& why) {
   const std::vector<std::string> t = tokens(line);
   if (t.empty()) return true;
   const std::string& head = t[0];
-  if (head == "in" && t.size() > 4 && (t[4] == "mic_level" || (t.size() > 5 && t[5] == "mic_level"))) {
-    why = "mic_level is reserved: the engine has no microphone input yet";
-    return false;
-  }
   if (head == "name" && t.size() == 2) {
     m.name = t[1];
   } else if (head == "match" && t.size() == 2) {
@@ -295,19 +425,76 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
     }
     if (msg.empty()) { why = "init needs at least one byte"; return false; }
     m.init.push_back(std::move(msg));
+  } else if (head == "hid") {
+    Args a;
+    if (!parse_args(t, 1, a, why)) return false;
+    if (a.vid < 0 || a.vid > 0xFFFF || a.pid < 0 || a.pid > 0xFFFF) { why = "hid needs vid=0x.... and pid=0x...."; return false; }
+    if (hid_usage_refused(static_cast<int>(a.usage_page), static_cast<int>(a.usage))) {
+      why = "keyboards, keypads, mice and pointers are never opened";
+      return false;
+    }
+    m.hid = true;
+    m.hid_match = HidMatch{static_cast<int>(a.vid), static_cast<int>(a.pid), static_cast<int>(a.usage_page),
+                           static_cast<int>(a.usage), static_cast<int>(a.interface_number)};
+  } else if (head == "hid_out") {
+    Args a;
+    if (!parse_args(t, 1, a, why)) return false;
+    if (a.report < 0 || a.report > 255 || a.size < 1 || a.size > 1024) { why = "hid_out needs report=0..255 and size=1..1024"; return false; }
+    HidOutTemplate tpl;
+    tpl.report = a.report;
+    tpl.size = a.size;
+    if (!hex_string(a.init, tpl.init)) { why = "bad init= hex bytes"; return false; }
+    if (static_cast<int>(tpl.init.size()) > tpl.size) { why = "init is longer than size"; return false; }
+    tpl.init.resize(static_cast<std::size_t>(tpl.size), 0);
+    if (a.interval >= 0) tpl.interval = a.interval;
+    for (const HidOutTemplate& o : m.hid_out)
+      if (o.report == tpl.report) { why = "duplicate hid_out for this report"; return false; }
+    m.hid_out.push_back(std::move(tpl));
+  } else if (head == "hid_init") {
+    // hid_init feature|output report=<id> <hex bytes...>
+    HidInit h;
+    if (t.size() < 4 || (t[1] != "feature" && t[1] != "output")) { why = "expected: hid_init feature|output report=<id> <bytes>"; return false; }
+    h.feature = t[1] == "feature";
+    long n = 0;
+    if (t[2].compare(0, 7, "report=") != 0 || !dec_int(t[2].substr(7), n) || n < 0 || n > 255) { why = "hid_init needs report=0..255"; return false; }
+    h.report = static_cast<int>(n);
+    for (std::size_t i = 3; i < t.size(); ++i) {
+      std::uint8_t b = 0;
+      if (!hex_byte(t[i], b)) { why = "bad hex byte '" + t[i] + "'"; return false; }
+      h.data.push_back(b);
+    }
+    m.hid_init.push_back(std::move(h));
   } else if (head == "in") {
     // in <kind> <status> <data1> [<data1 lsb>] <action> [args]
+    // in hid <field args> <kind> <action> [args]
     InRule r;
     int kind = 0, action = 0;
-    if (t.size() < 5 || !lookup(kInKinds, t[1], kind)) { why = "expected: in <kind> <status> <data1> <action>"; return false; }
-    r.kind = static_cast<InKind>(kind);
     std::size_t i = 2;
-    if (!hex_byte(t[i++], r.status) || !hex_byte(t[i++], r.data1)) { why = "bad status or data byte"; return false; }
-    if (r.kind == InKind::Abs14 && (i >= t.size() || !hex_byte(t[i++], r.data1_lsb))) { why = "abs14 needs MSB and LSB"; return false; }
-    if (i >= t.size() || !lookup(kActions, t[i], action)) { why = "unknown action"; return false; }
-    r.action = static_cast<Action>(action);
     Args a;
-    if (!parse_args(t, i + 1, a, why)) return false;
+    const bool is_hid = t.size() > 1 && t[1] == "hid";
+    if (is_hid) {
+      std::size_t k = 2;
+      while (k < t.size() && t[k].find('=') != std::string::npos) ++k;
+      if (k + 1 >= t.size() || !lookup(kHidKinds, t[k], kind)) {
+        why = "expected: in hid report=<id> byte=<n> [bit=|bits=|size= endian=] <button|touch|abs|rel|delta> <action>";
+        return false;
+      }
+      r.kind = static_cast<InKind>(kind);
+      if (!parse_args(t, 2, a, why, k)) return false;
+      i = k + 1;
+      if (!lookup(kActions, t[i], action)) { why = "unknown action"; return false; }
+      r.action = static_cast<Action>(action);
+      if (!parse_args(t, i + 1, a, why)) return false;
+      if (!make_field(a, r.hid, why)) return false;
+    } else {
+      if (t.size() < 5 || !lookup(kInKinds, t[1], kind)) { why = "expected: in <kind> <status> <data1> <action>"; return false; }
+      r.kind = static_cast<InKind>(kind);
+      if (!hex_byte(t[i++], r.status) || !hex_byte(t[i++], r.data1)) { why = "bad status or data byte"; return false; }
+      if (r.kind == InKind::Abs14 && (i >= t.size() || !hex_byte(t[i++], r.data1_lsb))) { why = "abs14 needs MSB and LSB"; return false; }
+      if (i >= t.size() || !lookup(kActions, t[i], action)) { why = "unknown action"; return false; }
+      r.action = static_cast<Action>(action);
+      if (!parse_args(t, i + 1, a, why)) return false;
+    }
     r.deck = a.deck;
     r.slot = a.slot;
     r.mode = a.mode;
@@ -323,6 +510,7 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
     r.pickup = a.pickup;
     r.pad = a.pad;
     r.offset = a.offset;
+    if (a.ticks_per_rev > 0) r.ticks_per_rev = a.ticks_per_rev;
     if (r.action == Action::PadMode && r.mode < 0) { why = "pad_mode needs mode=<name>"; return false; }
     if (!a.when.empty()) {
       r.when_not = a.when[0] == '!';
@@ -353,19 +541,37 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
     }
     const std::size_t idx = m.in.size();
     m.in.push_back(r);
-    m.index.emplace(static_cast<std::uint16_t>(r.status << 8 | r.data1), idx);
-    if (r.kind == InKind::Abs14) m.index.emplace(static_cast<std::uint16_t>(r.status << 8 | r.data1_lsb), idx);
+    if (is_hid) {
+      m.hid_index[r.hid.report].push_back(idx);
+    } else {
+      m.index.emplace(static_cast<std::uint16_t>(r.status << 8 | r.data1), idx);
+      if (r.kind == InKind::Abs14) m.index.emplace(static_cast<std::uint16_t>(r.status << 8 | r.data1_lsb), idx);
+    }
   } else if (head == "out") {
     // out <status> <data1> <state> [args]
+    // out hid <field args> <state> [args]
     OutRule r;
     int state = 0;
-    if (t.size() < 4 || !hex_byte(t[1], r.status) || !hex_byte(t[2], r.data1) || !lookup(kStates, t[3], state)) {
-      why = "expected: out <status> <data1> <state>";
-      return false;
+    Args a;
+    const bool is_hid = t.size() > 1 && t[1] == "hid";
+    if (is_hid) {
+      std::size_t k = 2;
+      while (k < t.size() && t[k].find('=') != std::string::npos) ++k;
+      if (k >= t.size() || !lookup(kStates, t[k], state)) {
+        why = "expected: out hid report=<id> byte=<n> [bit=|bits=|size= endian=] <state>";
+        return false;
+      }
+      if (!parse_args(t, 2, a, why, k) || !parse_args(t, k + 1, a, why)) return false;
+      if (!make_field(a, r.hid_field, why, false)) return false;
+      r.hid = true;
+    } else {
+      if (t.size() < 4 || !hex_byte(t[1], r.status) || !hex_byte(t[2], r.data1) || !lookup(kStates, t[3], state)) {
+        why = "expected: out <status> <data1> <state>";
+        return false;
+      }
+      if (!parse_args(t, 4, a, why)) return false;
     }
     r.state = static_cast<LedState>(state);
-    Args a;
-    if (!parse_args(t, 4, a, why)) return false;
     r.deck = a.deck;
     r.slot = a.slot;
     r.mode = a.mode;
@@ -376,8 +582,12 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
     r.master_unit = a.master_unit;
     r.fx_unit = a.fx_unit;
     r.offset = a.offset;
-    r.on = static_cast<std::uint8_t>(a.max >= 0 ? a.max : a.on);
-    r.off = static_cast<std::uint8_t>(a.min >= 0 ? a.min : a.off);
+    long lim = 0;
+    if (r.hid && !a.has_on) a.on = static_cast<int>((1LL << r.hid_field.width()) - 1);  // HID default: every bit set
+    r.on = !a.max_s.empty() ? (hex_int(a.max_s, lim) ? static_cast<int>(lim) : -1) : a.on;
+    r.off = !a.min_s.empty() ? (hex_int(a.min_s, lim) ? static_cast<int>(lim) : -1) : a.off;
+    const int top = r.hid ? static_cast<int>((1LL << r.hid_field.width()) - 1) : 0xFF;
+    if (r.on < 0 || r.off < 0 || r.on > top || r.off > top) { why = "on/off/min/max do not fit " + std::string(r.hid ? "the field" : "a byte"); return false; }
     if (r.state == LedState::PadMode && r.mode < 0) { why = "pad_mode state needs mode=<name>"; return false; }
     if (r.state == LedState::Modifier) {
       if (a.name.empty()) { why = "modifier state needs name=<name>"; return false; }
@@ -409,7 +619,13 @@ void line_keys(const std::string& line, std::string& control, std::string& actio
   action.clear();
   if (t.size() < 5 || (t[0] != "in" && t[0] != "out")) return;
   std::size_t first = 4;  // first token after the address
-  if (t[0] == "in") {
+  if (t[1] == "hid") {  // field tokens (key=value) identify the control; then kind (in) / state (out)
+    std::size_t k = 2;
+    control = t[0] + " hid";
+    for (; k < t.size() && t[k].find('=') != std::string::npos; ++k) control += " " + t[k];
+    first = t[0] == "in" ? k + 1 : k;
+    if (first >= t.size()) { control.clear(); return; }
+  } else if (t[0] == "in") {
     control = "in " + upper(t[2]) + " " + upper(t[3]);
     first = t[1] == "abs14" ? 5 : 4;
   } else {
@@ -441,15 +657,46 @@ bool parse_mapping(const std::string& text, Mapping& m, std::string& error) {
       return false;
     }
   }
-  if (m.name.empty() || m.match.empty()) {
-    error = "mapping needs both a name and a match line";
+  if (m.name.empty() || (m.match.empty() && !m.hid)) {
+    error = "mapping needs a name and a match line (or a hid line)";
     return false;
+  }
+  bool any_hid = false;
+  for (const InRule& r : m.in) any_hid = any_hid || r.kind >= InKind::HidButton;
+  for (const OutRule& r : m.out) any_hid = any_hid || r.hid;
+  if ((any_hid || !m.hid_out.empty() || !m.hid_init.empty()) && !m.hid) {
+    error = "HID rules need a 'hid vid=0x.... pid=0x....' line";
+    return false;
+  }
+  // Every HID output report needs a template; one is made from the rules' extent when none was declared.
+  const std::size_t declared = m.hid_out.size();
+  for (const OutRule& r : m.out) {
+    if (!r.hid) continue;
+    const int end = r.hid_field.byte + r.hid_field.size;
+    std::size_t at = m.hid_out.size();
+    for (std::size_t i = 0; i < m.hid_out.size(); ++i)
+      if (m.hid_out[i].report == r.hid_field.report) at = i;
+    if (at == m.hid_out.size()) {
+      HidOutTemplate n;
+      n.report = r.hid_field.report;
+      m.hid_out.push_back(std::move(n));
+    }
+    HidOutTemplate& tpl = m.hid_out[at];
+    if (at < declared && end > tpl.size) {
+      error = "out hid rule reaches byte " + std::to_string(end - 1) + ", outside hid_out report " +
+              std::to_string(tpl.report) + " (size " + std::to_string(tpl.size) + ")";
+      return false;
+    }
+    if (end > tpl.size) {
+      tpl.size = end;
+      tpl.init.resize(static_cast<std::size_t>(end), 0);
+    }
   }
   return true;
 }
 
 bool save_user_mapping(const std::string& device, const std::vector<std::string>& lines, const std::string& folder,
-                       std::string* error) {
+                       std::string* error, const std::string& header) {
   const auto fail = [&](const std::string& why) {
     if (error) *error = why;
     return false;
@@ -471,7 +718,8 @@ bool save_user_mapping(const std::string& device, const std::vector<std::string>
   if (existing.empty()) {
     existing.push_back("# DeckHand controller mapping created by MIDI learn.");
     existing.push_back("name  \"" + device + "\"");
-    existing.push_back("match \"" + device + "\"");
+    if (header.empty()) existing.push_back("match \"" + device + "\"");
+    else existing.push_back(header);
   }
   for (const std::string& add : lines) {
     Mapping check;
@@ -534,6 +782,31 @@ struct ControllerHub::Learn {
   std::uint8_t status = 0;
   std::vector<std::pair<int, int>> samples;  // (data1, value)
   std::chrono::steady_clock::time_point last;
+  // HID: the report observed, the frame before the first change, the frames after it, bytes to ignore
+  bool hid = false;
+  int report = 0;
+  std::vector<std::uint8_t> base, noisy;
+  std::vector<std::vector<std::uint8_t>> frames;
+  std::string header;
+};
+
+struct ControllerHub::HidTrack {
+  std::vector<std::uint8_t> last;
+  std::vector<std::uint8_t> noise;  // grows when a byte changes, shrinks when it does not
+  bool noisy(std::size_t i) const { return i < noise.size() && noise[i] >= 60; }
+  void update(const std::uint8_t* data, std::size_t size) {
+    const std::size_t n = std::min<std::size_t>(size, 512);
+    if (last.size() != n) {
+      last.assign(data, data + n);
+      noise.assign(n, 0);
+      return;
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+      if (data[i] != last[i]) noise[i] = static_cast<std::uint8_t>(std::min(255, noise[i] + 10));
+      else if (noise[i]) --noise[i];
+      last[i] = data[i];
+    }
+  }
 };
 
 ControllerHub::ControllerHub(ControlSink& sink, std::vector<Mapping> mappings)
@@ -548,6 +821,43 @@ void ControllerHub::set_io(MidiIO* io) {
   devices_changed();
 }
 
+void ControllerHub::hid_set_matches() {
+  std::vector<HidMatch> matches;
+  for (const Mapping& m : mappings_)
+    if (m.hid && !m.generated) matches.push_back(m.hid_match);
+  if (learn_gamepads_)
+    for (int usage : {0x04, 0x05, 0x08}) matches.push_back(HidMatch{-1, -1, 0x01, usage, -1});
+  for (const auto& p : learn_allow_) matches.push_back(HidMatch{p.first, p.second, -1, -1, -1});
+  hid_io_->set_matches(matches);
+}
+
+void ControllerHub::set_hid_io(HidIO* io) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    hid_io_ = io;
+    if (hid_io_) hid_set_matches();
+  }
+  devices_changed();
+}
+
+void ControllerHub::hid_learn_gamepads(bool on) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    learn_gamepads_ = on;
+    if (hid_io_) hid_set_matches();
+  }
+  devices_changed();
+}
+
+void ControllerHub::hid_learn_allow(int vid, int pid) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    learn_allow_.emplace_back(vid, pid);
+    if (hid_io_) hid_set_matches();
+  }
+  devices_changed();
+}
+
 void ControllerHub::fit(Active& a) {
   const std::size_t n = a.map->in.size();
   a.msb.resize(n, 0);
@@ -557,25 +867,104 @@ void ControllerHub::fit(Active& a) {
   a.last_v.resize(n, -1.0f);
   a.aux.resize(n, -1);
   a.held.resize(a.map->modifiers.size(), std::array<bool, kMaxDecks + 1>{});
+  a.hid_prev.resize(n, 0);
+  a.hid_seen.resize(n, 0);
+  a.hid_sent.resize(a.map->hid_out.size());
+  a.hid_time.resize(a.map->hid_out.size(), -1e9);
 }
 
 void ControllerHub::devices_changed() {
-  if (!io_) return;
-  const std::vector<std::string> names = io_->devices();
+  if (!io_ && !hid_io_) return;
+  const std::vector<std::string> names = io_ ? io_->devices() : std::vector<std::string>();
+  const std::vector<HidDeviceInfo> infos = hid_io_ ? hid_io_->devices() : std::vector<HidDeviceInfo>();
   std::lock_guard<std::mutex> lock(mutex_);
+  if (io_) midi_devices_changed(names);
+  if (hid_io_) hid_devices_changed(infos);
+}
+
+void ControllerHub::hid_devices_changed(const std::vector<HidDeviceInfo>& infos) {
+  hid_known_ = infos;
+  active_.erase(std::remove_if(active_.begin(), active_.end(),
+                               [&](const Active& a) {
+                                 if (!a.hid) return false;
+                                 const bool gone = std::none_of(infos.begin(), infos.end(), [&](const HidDeviceInfo& d) { return d.id == a.device; });
+                                 if (gone) {
+                                   DH_LOG(Info, "controller disconnected: %s", a.map->name.c_str());
+                                   hid_io_->close(a.device);
+                                   for (auto t = hid_tracks_.begin(); t != hid_tracks_.end();)
+                                     t = t->first.first == a.device ? hid_tracks_.erase(t) : std::next(t);
+                                 }
+                                 return gone;
+                               }),
+                active_.end());
+  for (const HidDeviceInfo& info : infos) {
+    if (std::any_of(active_.begin(), active_.end(), [&](const Active& a) { return a.hid && a.device == info.id; })) continue;
+    if (hid_usage_refused(info.usage_page, info.usage)) {  // never open keyboards, mice and pointers
+      DH_LOG(Debug, "HID device %04X:%04X usage %04X/%04X refused", info.vid, info.pid, info.usage_page, info.usage);
+      continue;
+    }
+    Mapping* found = nullptr;
+    for (Mapping& m : mappings_)
+      if (m.hid && !m.generated && hid_matches(m.hid_match, info)) { found = &m; break; }
+    if (!found) {  // no mapping: only devices the app opted into (HID learn) get an empty one
+      const bool game = learn_gamepads_ && info.usage_page == 0x01 && (info.usage == 0x04 || info.usage == 0x05 || info.usage == 0x08);
+      const bool allowed = game || std::any_of(learn_allow_.begin(), learn_allow_.end(), [&](const std::pair<int, int>& p) {
+                             return p.first == info.vid && (p.second < 0 || p.second == info.pid);
+                           });
+      if (!allowed) continue;
+      char fallback[32];
+      std::snprintf(fallback, sizeof fallback, "HID %04X:%04X", info.vid, info.pid);
+      const std::string name = info.product.empty() ? std::string(fallback) : info.product;
+      for (Mapping& m : mappings_)
+        if (m.hid && m.generated && m.name == name && m.hid_match.vid == info.vid && m.hid_match.pid == info.pid) found = &m;
+      if (!found) {
+        Mapping g;
+        g.name = name;
+        g.match.clear();
+        g.hid = true;
+        g.generated = true;
+        g.hid_match = HidMatch{info.vid, info.pid, -1, -1, -1};
+        mappings_.push_back(std::move(g));
+        found = &mappings_.back();
+      }
+      DH_LOG(Info, "HID device without a mapping: %s (learn available)", name.c_str());
+    }
+    if (!hid_io_->open(info.id)) {
+      DH_LOG(Warn, "could not open HID device %04X:%04X", info.vid, info.pid);
+      continue;
+    }
+    Active a;
+    a.hid = true;
+    a.device = info.id;
+    a.map = found;
+    fit(a);
+    if (!found->generated) {
+      for (const HidInit& h : found->hid_init) {
+        if (h.feature) hid_io_->send_feature(info.id, h.report, h.data.data(), h.data.size());
+        else hid_io_->send_output(info.id, h.report, h.data.data(), h.data.size());
+      }
+      DH_LOG(Info, "controller connected: %s (HID, mapping \"%s\")", info.product.c_str(), found->name.c_str());
+    }
+    active_.push_back(std::move(a));
+  }
+}
+
+void ControllerHub::midi_devices_changed(const std::vector<std::string>& names) {
   // Drop controllers that went away.
   active_.erase(std::remove_if(active_.begin(), active_.end(),
                                [&](const Active& a) {
+                                 if (a.hid) return false;
                                  const bool gone = std::find(names.begin(), names.end(), a.device) == names.end();
                                  if (gone) DH_LOG(Info, "controller disconnected: %s", a.device.c_str());
                                  return gone;
                                }),
                 active_.end());
   for (const std::string& device : names) {
-    if (std::any_of(active_.begin(), active_.end(), [&](const Active& a) { return a.device == device; })) continue;
+    if (std::any_of(active_.begin(), active_.end(), [&](const Active& a) { return !a.hid && a.device == device; })) continue;
     const std::string low = lower(device);
     Mapping* found = nullptr;
     for (Mapping& m : mappings_) {
+      if (m.match.empty() || (m.hid && m.generated)) continue;  // HID-only mappings and generated HID ones are not MIDI
       if (m.generated ? m.name != device : low.find(m.match) == std::string::npos) continue;
       found = &m;
       break;
@@ -623,7 +1012,7 @@ bool ControllerHub::audio_hint(std::string& device_match, int& master_channel, i
 
 void ControllerHub::midi(const std::string& device, const std::uint8_t* data, std::size_t size) {
   std::lock_guard<std::mutex> lock(mutex_);
-  const auto it = std::find_if(active_.begin(), active_.end(), [&](const Active& a) { return a.device == device; });
+  const auto it = std::find_if(active_.begin(), active_.end(), [&](const Active& a) { return !a.hid && a.device == device; });
   std::size_t i = 0;
   while (i < size) {
     const std::uint8_t status = data[i];
@@ -674,20 +1063,7 @@ void ControllerHub::handle(Active& a, std::uint8_t status, std::uint8_t d1, std:
     const std::size_t idx = it->second;
     const InRule& r = a.map->in[idx];
     switch (r.kind) {
-      case InKind::Button: {
-        const bool pressed = d2 > 0;
-        const bool filtered = r.when >= 0 || (r.mode >= 0 && r.action != Action::PadMode);
-        if (pressed) {
-          if (!allowed(a, r)) break;
-          a.down[idx] = 1;
-        } else {
-          const bool was = a.down[idx] != 0;
-          a.down[idx] = 0;
-          if (filtered && !was) break;  // its press was routed elsewhere (other layer or mode)
-        }
-        button(a, idx, r, pressed);
-        break;
-      }
+      case InKind::Button: dispatch_button(a, idx, r, d2 > 0); break;
       case InKind::Abs:
         if (allowed(a, r)) value(a, idx, r, static_cast<float>(d2) / 127.0f);
         break;
@@ -698,6 +1074,75 @@ void ControllerHub::handle(Active& a, std::uint8_t status, std::uint8_t d1, std:
       }
       case InKind::Rel: if (allowed(a, r)) delta(a, r, static_cast<int>(d2) - 0x40); break;
       case InKind::Rel2: if (allowed(a, r)) delta(a, r, d2 < 0x40 ? d2 : static_cast<int>(d2) - 0x80); break;
+      default: break;
+    }
+  }
+}
+
+void ControllerHub::dispatch_button(Active& a, std::size_t idx, const InRule& r, bool pressed) {
+  const bool filtered = r.when >= 0 || (r.mode >= 0 && r.action != Action::PadMode);
+  if (pressed) {
+    if (!allowed(a, r)) return;
+    a.down[idx] = 1;
+  } else {
+    const bool was = a.down[idx] != 0;
+    a.down[idx] = 0;
+    if (filtered && !was) return;  // its press was routed elsewhere (other layer or mode)
+  }
+  button(a, idx, r, pressed);
+}
+
+void ControllerHub::hid(const std::string& device, int report_id, const std::uint8_t* data, std::size_t size) {
+  if (!data && size) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = std::find_if(active_.begin(), active_.end(), [&](const Active& a) { return a.hid && a.device == device; });
+  if (it == active_.end()) return;
+  std::shared_ptr<HidTrack>& track = hid_tracks_[{device, report_id}];
+  if (!track) track = std::make_shared<HidTrack>();
+  if (learn_->state == LearnState::Waiting || learn_->state == LearnState::Observing) learn_feed_hid(device, report_id, data, size, *track);
+  else handle_hid(*it, report_id, data, size);
+  track->update(data, size);
+}
+
+namespace {
+float hid_normalise(const HidField& f, std::int64_t raw) {
+  const int w = f.width();
+  const double lo = f.has_min ? f.vmin : (f.is_signed ? -static_cast<double>(1LL << (w - 1)) : 0.0);
+  const double hi = f.has_max ? f.vmax : (f.is_signed ? static_cast<double>((1LL << (w - 1)) - 1) : static_cast<double>((1LL << w) - 1));
+  if (hi == lo) return 0;
+  return static_cast<float>(std::max(0.0, std::min(1.0, (static_cast<double>(raw) - lo) / (hi - lo))));
+}
+}  // namespace
+
+// Reports repeat every field, so a rule acts only when its own field changed since the last report
+// (the first report only records a baseline: nothing moves just because a device connected).
+void ControllerHub::handle_hid(Active& a, int report_id, const std::uint8_t* d, std::size_t n) {
+  const auto rules = a.map->hid_index.find(report_id);
+  if (rules == a.map->hid_index.end()) return;
+  for (const std::size_t idx : rules->second) {
+    const InRule& r = a.map->in[idx];
+    std::int64_t raw = 0;
+    if (!hid_read(r.hid, d, n, raw)) continue;  // short report: ignore
+    const bool had = a.hid_seen[idx] != 0;
+    const std::int64_t prev = a.hid_prev[idx];
+    a.hid_seen[idx] = 1;
+    a.hid_prev[idx] = raw;
+    if (r.kind != InKind::HidDelta && (!had || raw == prev)) continue;
+    switch (r.kind) {
+      case InKind::HidButton: dispatch_button(a, idx, r, (raw != 0) != r.invert); break;
+      case InKind::HidAbs: if (allowed(a, r)) value(a, idx, r, hid_normalise(r.hid, raw)); break;
+      case InKind::HidRel: {
+        const std::int64_t mod = 1LL << r.hid.width();
+        std::int64_t diff = ((raw - prev) % mod + mod) % mod;  // running position: delta with wrap
+        if (diff >= mod / 2) diff -= mod;
+        if (r.invert) diff = -diff;
+        if (allowed(a, r)) delta(a, r, static_cast<int>(diff));
+        break;
+      }
+      case InKind::HidDelta:
+        if (raw != 0 && allowed(a, r)) delta(a, r, static_cast<int>(std::max<std::int64_t>(-100000, std::min<std::int64_t>(100000, r.invert ? -raw : raw))));
+        break;
+      default: break;
     }
   }
 }
@@ -841,6 +1286,23 @@ void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pre
       send(Op::HeadMix);
       break;
     }
+#ifdef DECKHAND_HAVE_MIC_OPS
+    case Action::MicOn: case Action::MicTalkover: {
+      bool& cur = r.action == Action::MicOn ? mic_on_ : mic_talk_;
+      c.deck = 0;
+      const Op op = r.action == Action::MicOn ? Op::MicOn : Op::MicTalkover;
+      if (r.hold) {
+        cur = pressed;
+        c.i = pressed ? 1 : 0;
+        send(op);
+      } else if (pressed) {
+        c.i = r.has_value ? (r.value > 0 ? 1 : 0) : -1;
+        cur = c.i < 0 ? !cur : c.i == 1;
+        send(op);
+      }
+      break;
+    }
+#endif
     case Action::KeyLock: flag(Op::KeyLock, dv.key_lock); break;
     case Action::Quantize: flag(Op::Quantize, dv.quantize); break;
     case Action::Slip: flag(Op::Slip, dv.slip); break;
@@ -1063,6 +1525,11 @@ void ControllerHub::value(Active& a, std::size_t idx, const InRule& r, float v) 
     case Action::HeadLevel: c.op = Op::HeadLevel; break;
     case Action::MasterLevel: c.op = Op::MasterLevel; break;
     case Action::SamplerLevel: c.op = Op::SamplerLevel; break;
+#ifdef DECKHAND_HAVE_MIC_OPS
+    case Action::MicLevel: c.op = Op::MicLevel; c.deck = 0; break;
+    case Action::MicEqLow: c.op = Op::MicEqLow; c.deck = 0; break;
+    case Action::MicEqHigh: c.op = Op::MicEqHigh; c.deck = 0; break;
+#endif
     case Action::AutoGain: c.op = Op::AutoGain; c.f = ranged(-24.0f, 12.0f); break;
     case Action::KeyShift: c.op = Op::KeyShift; c.f = std::round(ranged(-12.0f, 12.0f)); cache_.deck[r.deck].key_shift = c.f; break;
     case Action::MasterBpm: c.op = Op::MasterBpm; c.deck = 0; c.f = ranged(60.0f, 180.0f); cache_.mixer.master_bpm = c.f; break;
@@ -1089,7 +1556,7 @@ void ControllerHub::delta(Active& a, const InRule& r, int steps) {
       a.jog_ticks[r.deck] += steps;
       c.op = Op::JogTurn;
       c.i = r.top ? 1 : 0;
-      c.d = static_cast<double>(steps) * r.amount / a.map->ticks_per_rev;
+      c.d = static_cast<double>(steps) * r.amount / (r.ticks_per_rev > 0 ? r.ticks_per_rev : a.map->ticks_per_rev);
       sink_.command(c);
       break;
     case Action::FxSelect: {
@@ -1155,7 +1622,7 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, double now) {
 
 void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView* mixer, const SamplerView* samplers,
                          int sampler_count, double now) {
-  if (!io_) return;
+  if (!io_ && !hid_io_) return;
   std::lock_guard<std::mutex> lock(mutex_);
   for (int i = 0; i < deck_count && i < kMaxDecks; ++i) {
     cache_.deck[i] = decks[i];
@@ -1168,15 +1635,21 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
   const bool blink_on = std::fmod(now, 0.5) < 0.25;
   const DeckView blank;
   std::map<std::uint16_t, int> want;
+  std::map<std::array<int, 6>, int> hwant;
   for (Active& a : active_) {
     want.clear();
+    hwant.clear();
     for (const OutRule& r : a.map->out) {
-      const bool deckless = r.master_unit || r.fx_unit >= 0 || r.state == LedState::MasterCue || r.state == LedState::Modifier || r.state == LedState::SamplerPlaying;
+      if (r.hid != a.hid) continue;
+      const std::array<int, 6> hkey = {r.hid_field.report, r.hid_field.byte, r.hid_field.size, r.hid_field.lo,
+                                       r.hid_field.hi, r.hid_field.big ? 1 : 0};
+      const bool deckless = r.state == LedState::MicOn || r.state == LedState::MicTalkover || r.master_unit || r.fx_unit >= 0 || r.state == LedState::MasterCue || r.state == LedState::Modifier || r.state == LedState::SamplerPlaying;
       if (r.deck >= deck_count && !deckless) continue;
       const DeckView& d = r.deck < deck_count ? decks[r.deck] : blank;
       const std::uint16_t addr = static_cast<std::uint16_t>(r.status << 8 | r.data1);
       if (r.mode >= 0 && r.state != LedState::PadMode && a.pad_mode[r.deck] != r.mode) {
-        want.emplace(addr, r.off);  // belongs to another pad mode: dark unless an active rule claims it
+        if (r.hid) hwant.emplace(hkey, r.off);  // belongs to another pad mode: dark unless an active rule claims it
+        else want.emplace(addr, r.off);
         continue;
       }
       int byte = 0;
@@ -1224,13 +1697,21 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
           case LedState::FxAssign: on = fx_assigned_[r.fx_unit] == r.fx_target; break;
           case LedState::MasterCue: on = master_cue_; break;
           case LedState::ColorFx: on = r.effect >= 0 ? d.color_fx == r.effect : d.color_fx != static_cast<int>(ColorFx::Filter); break;
+          case LedState::MicOn: on = mic_on_; break;
+          case LedState::MicTalkover: on = mic_talk_; break;
           case LedState::Modifier: on = r.modifier >= 0 && (a.held[r.modifier][0] || a.held[r.modifier][1 + r.deck]); break;
           default: break;
         }
         byte = on ? r.on : r.off;
       }
-      want[addr] = byte;
+      if (r.hid) hwant[hkey] = byte;
+      else want[addr] = byte;
     }
+    if (a.hid) {
+      hid_send_out(a, hwant, now);
+      continue;
+    }
+    if (!io_) continue;
     for (const auto& [addr, byte] : want) {
       const auto last = a.last_out.find(addr);
       if (last != a.last_out.end() && last->second == byte) continue;
@@ -1239,6 +1720,27 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
                                    static_cast<std::uint8_t>(byte)};
       io_->send(a.device, msg, 3);
     }
+  }
+}
+
+// Composes each output report from its template and the claimed fields; sends it when it changed and the
+// report's interval has passed (a report held back by the rate limit goes out on a later tick).
+void ControllerHub::hid_send_out(Active& a, const std::map<std::array<int, 6>, int>& want, double now) {
+  if (!hid_io_) return;
+  for (std::size_t ti = 0; ti < a.map->hid_out.size(); ++ti) {
+    const HidOutTemplate& tpl = a.map->hid_out[ti];
+    std::vector<std::uint8_t> buf = tpl.init;
+    buf.resize(static_cast<std::size_t>(tpl.size), 0);
+    for (const auto& [key, val] : want) {
+      if (key[0] != tpl.report) continue;
+      HidField f;
+      f.report = key[0]; f.byte = key[1]; f.size = key[2]; f.lo = key[3]; f.hi = key[4]; f.big = key[5] != 0;
+      hid_write(f, buf, static_cast<std::uint32_t>(val));
+    }
+    if (a.hid_sent[ti] == buf) continue;
+    if (now - a.hid_time[ti] < tpl.interval) continue;
+    a.hid_time[ti] = now;  // also paces retries after a failed send
+    if (hid_io_->send_output(a.device, tpl.report, buf.data(), buf.size())) a.hid_sent[ti] = std::move(buf);
   }
 }
 
@@ -1316,6 +1818,8 @@ std::vector<LearnChoice> learn_choices(int decks) {
       {"Master level", "master_level"}, {"Master cue", "master_cue"}, {"Browse (encoder)", "browse"},
       {"Browse press", "browse_press"}, {"Sampler level", "sampler_level"}, {"Master BPM", "master_bpm"},
       {"Shift (modifier)", "modifier name=shift"},
+      {"Mic on/off", "mic_on"}, {"Mic level", "mic_level"}, {"Mic EQ low", "mic_eq_low"},
+      {"Mic EQ high", "mic_eq_high"}, {"Mic talkover", "mic_talkover"},
   };
   for (const auto& s : mixer) add("Mixer", s.label, s.act);
   for (int u = 1; u <= 2; ++u) {
@@ -1353,6 +1857,11 @@ LearnState ControllerHub::learn_state() const {
 std::string ControllerHub::learn_device() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return learn_->device;
+}
+
+std::string ControllerHub::learn_header() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return learn_->hid ? learn_->header : std::string();
 }
 
 std::string ControllerHub::learn_error() const {
@@ -1416,7 +1925,186 @@ bool ControllerHub::learn_feed(const std::string& device, std::uint8_t status, s
   return true;
 }
 
+// HID learn. Waiting: the first report with a changed (non-noisy) byte. A button action is captured at once
+// (one changed bit, or one byte going to or from zero); other actions observe up to 12 changing reports
+// (0.4 s after the last, or finalize) and then classify the byte that changed most: a toggling bit is a
+// button, a counter that moves in one direction (wrapping at its width) is `rel`, a field that returns to
+// zero is `delta`, anything else is `abs`. Two adjacent bytes become one 16-bit field when the high byte
+// only ever steps by one as the low byte wraps.
+bool ControllerHub::learn_feed_hid(const std::string& device, int report_id, const std::uint8_t* data, std::size_t size,
+                                   HidTrack& tr) {
+  Learn& l = *learn_;
+  const std::size_t n = std::min<std::size_t>(size, 512);
+  if (tr.last.size() != n) return true;  // no baseline for this report yet
+  const Class cls = action_class(l.action);
+  const auto header = [&] {
+    char buf[96] = "";
+    for (const HidDeviceInfo& d : hid_known_)
+      if (d.id == device) {
+        if (d.usage_page) std::snprintf(buf, sizeof buf, "hid vid=0x%04X pid=0x%04X usage_page=0x%X usage=0x%X", d.vid, d.pid, d.usage_page, d.usage);
+        else std::snprintf(buf, sizeof buf, "hid vid=0x%04X pid=0x%04X", d.vid, d.pid);
+      }
+    l.header = buf;
+  };
+  if (l.state == LearnState::Waiting) {
+    std::vector<std::size_t> changed;
+    int bits = 0;
+    for (std::size_t i = 0; i < n; ++i)
+      if (data[i] != tr.last[i] && !tr.noisy(i)) {
+        changed.push_back(i);
+        for (unsigned x = data[i] ^ tr.last[i]; x; x &= x - 1) ++bits;
+      }
+    if (changed.empty()) return true;
+    l.hid = true;
+    l.device = device;
+    l.report = report_id;
+    l.base = tr.last;
+    l.noisy.assign(n, 0);
+    for (std::size_t i = 0; i < n; ++i) l.noisy[i] = tr.noisy(i) ? 1 : 0;
+    header();
+    if (cls == Class::Button) {
+      char buf[96];
+      const std::size_t b = changed[0];
+      if (bits == 1) {
+        int bit = 0;
+        while (!(((data[b] ^ tr.last[b]) >> bit) & 1)) ++bit;
+        std::snprintf(buf, sizeof buf, "in hid report=%d byte=%zu bit=%d button ", report_id, b, bit);
+        l.line = buf + l.action_text + (((data[b] >> bit) & 1) ? "" : " invert=1");
+      } else if (changed.size() == 1 && (data[b] == 0 || tr.last[b] == 0)) {
+        std::snprintf(buf, sizeof buf, "in hid report=%d byte=%zu button ", report_id, b);
+        l.line = buf + l.action_text + (data[b] ? "" : " invert=1");
+      } else {
+        return true;  // several controls at once: wait for a clear press
+      }
+      Mapping probe;
+      std::string why;
+      if (!parse_line(probe, l.line, why)) {
+        l.state = LearnState::Failed;
+        l.error = why;
+        l.line.clear();
+      } else {
+        l.state = LearnState::Done;
+      }
+      return true;
+    }
+    l.state = LearnState::Observing;
+    l.frames.assign(1, std::vector<std::uint8_t>(data, data + n));
+    l.last = std::chrono::steady_clock::now();
+    return true;
+  }
+  if (device != l.device || report_id != l.report || l.frames.empty() || l.frames.back().size() != n) return true;
+  bool differs = false;
+  for (std::size_t i = 0; i < n; ++i) differs = differs || (data[i] != l.frames.back()[i] && !l.noisy[i]);
+  if (!differs) return true;
+  l.frames.emplace_back(data, data + n);
+  l.last = std::chrono::steady_clock::now();
+  if (l.frames.size() >= 12) learn_finish();
+  return true;
+}
+
+void ControllerHub::learn_finish_hid() {
+  Learn& l = *learn_;
+  const Class cls = action_class(l.action);
+  const std::size_t n = l.base.size();
+  std::vector<const std::vector<std::uint8_t>*> seq{&l.base};
+  for (const auto& f : l.frames) seq.push_back(&f);
+  const auto fail = [&](const std::string& why) {
+    l.state = LearnState::Failed;
+    l.error = why;
+    l.line.clear();
+  };
+  std::vector<int> counts(n, 0);
+  for (std::size_t j = 1; j < seq.size(); ++j)
+    for (std::size_t i = 0; i < n; ++i)
+      if ((*seq[j])[i] != (*seq[j - 1])[i] && !l.noisy[i]) ++counts[i];
+  std::size_t best = 0;
+  for (std::size_t i = 0; i < n; ++i)
+    if (counts[i] > counts[best]) best = i;
+  if (n == 0 || counts[best] == 0) return fail("no control movement was seen");
+  // Widen to two bytes when the neighbour only steps by one as this byte wraps (carry).
+  const auto carries = [&](std::size_t nb) {
+    if (nb >= n || l.noisy[nb] || counts[nb] == 0 || counts[nb] > counts[best]) return false;
+    for (std::size_t j = 1; j < seq.size(); ++j) {
+      const int dn = (*seq[j])[nb] - (*seq[j - 1])[nb], dl = (*seq[j])[best] - (*seq[j - 1])[best];
+      if (dn == 0) continue;
+      if (!((dn == 1 && dl < 0) || (dn == -1 && dl > 0))) return false;
+    }
+    return true;
+  };
+  const bool le = carries(best + 1), be = best > 0 && carries(best - 1);
+  HidField f;
+  f.report = l.report;
+  f.size = 1;
+  f.big = false;
+  f.byte = static_cast<int>(best);
+  if (le != be) {
+    f.size = 2;
+    f.big = be;
+    f.byte = static_cast<int>(be ? best - 1 : best);
+  }
+  f.hi = f.size * 8 - 1;
+  std::vector<std::int64_t> x;
+  for (const auto* fr : seq) {
+    std::int64_t v = 0;
+    hid_read(f, fr->data(), fr->size(), v);
+    x.push_back(v);
+  }
+  const std::int64_t mod = 1LL << f.width();
+  int nonzero = 0, pos = 0, neg = 0, wraps = 0;
+  std::int64_t maxabs = 0, lo = x[0], hi = x[0];
+  for (std::size_t j = 1; j < x.size(); ++j) {
+    lo = std::min(lo, x[j]);
+    hi = std::max(hi, x[j]);
+    const std::int64_t d = x[j] - x[j - 1];
+    if (d == 0) continue;
+    std::int64_t circ = ((d % mod) + mod) % mod;
+    if (circ >= mod / 2) circ -= mod;
+    ++nonzero;
+    (circ > 0 ? pos : neg)++;
+    maxabs = std::max<std::int64_t>(maxabs, std::llabs(circ));
+    if (std::llabs(d) > mod / 2 && std::llabs(circ) < mod / 4) ++wraps;
+  }
+  const bool counter = wraps > 0 || (nonzero >= 2 && std::max(pos, neg) >= 0.85 * nonzero && maxabs <= mod / 4);
+  int returns = 0;  // a per-report delta keeps coming back to zero; a running counter does not
+  for (std::size_t j = 1; j < x.size(); ++j) returns += x[j] == 0;
+  const bool rests_at_zero = x.front() == 0 && x.back() == 0 && returns >= 2;
+  const bool toggle = f.size == 1 && lo != hi && [&] {
+    for (std::int64_t v : x) if (v != lo && v != hi) return false;
+    const std::uint64_t diff = static_cast<std::uint64_t>(lo ^ hi);
+    return (diff & (diff - 1)) == 0;
+  }();
+  char buf[128];
+  std::string kind = "abs", extra;
+  if (toggle) {
+    if (cls == Class::Value || cls == Class::Delta) return fail(cls == Class::Value ? "this action needs a fader or knob, not a button" : "this action needs an encoder, not a button");
+    int bit = 0;
+    while (!(((lo ^ hi) >> bit) & 1)) ++bit;
+    kind = "button";
+    extra = " bit=" + std::to_string(bit) + (((x.back() >> bit) & 1) ? "" : " invert=1");
+  } else if (cls == Class::Value) {
+    kind = "abs";
+  } else if (rests_at_zero) {
+    kind = "delta";
+  } else if (counter) {
+    kind = "rel";
+  } else if (cls == Class::Delta) {
+    kind = "rel";
+  } else {
+    kind = (hi - lo >= mod / 4) ? "abs" : "rel";
+  }
+  std::snprintf(buf, sizeof buf, "in hid report=%d byte=%d", f.report, f.byte);
+  l.line = buf;
+  if (f.size > 1 && kind != "button") l.line += std::string(" size=2 endian=") + (f.big ? "be" : "le");
+  if (kind == "delta") l.line += " signed=1";
+  l.line += extra + " " + kind + " " + l.action_text;
+  Mapping probe;
+  std::string why;
+  if (!parse_line(probe, l.line, why)) return fail(why);
+  l.state = LearnState::Done;
+}
+
 void ControllerHub::learn_finish() {
+  if (learn_->hid) return learn_finish_hid();
   Learn& l = *learn_;
   const Class cls = action_class(l.action);
   std::vector<int> ids;
@@ -1465,8 +2153,19 @@ bool ControllerHub::learn_commit() {
   if (it == active_.end()) return false;
   std::string why;
   if (!parse_line(*it->map, l.line, why)) return false;
-  for (Active& a : active_)
-    if (a.map == it->map) fit(a);
+  const InRule& added = it->map->in.back();
+  for (Active& a : active_) {
+    if (a.map != it->map) continue;
+    fit(a);
+    if (a.hid && added.kind >= InKind::HidButton) {  // the new rule starts from the control's present value
+      const auto track = hid_tracks_.find({a.device, added.hid.report});
+      std::int64_t raw = 0;
+      if (track != hid_tracks_.end() && hid_read(added.hid, track->second->last.data(), track->second->last.size(), raw)) {
+        a.hid_prev[it->map->in.size() - 1] = raw;
+        a.hid_seen[it->map->in.size() - 1] = 1;
+      }
+    }
+  }
   *learn_ = Learn{};
   return true;
 }

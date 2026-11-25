@@ -42,9 +42,6 @@ init 91 17 7F
 #   KEY LOCK / master tempo   no such control or message exists on this unit's list.
 #   Sampler volume            no such control exists on this unit.
 #   Smart Fader (96 01, SHIFT 96 09, LED out 96 01)   no matching action in the format.
-#   MIC LEVEL (B6 05/25, 14-bit)   sends MIDI, but the engine has no microphone input yet, so there is
-#       nothing to drive (the format reserves a mic_level action and rejects it). Intended line once the
-#       engine has a mic path:   in abs14 B6 05 25 mic_level
 #   MASTER CUE SHIFT variant (96 78): not mapped. (MASTER CUE itself, 96 63, is mapped below.)
 #   Android MONO/STEREO switch (96 6D, 7F = mono)   hardware setting, no action.
 #   BEAT FX channel select: mapped below with fx_assign (which note is which position is a guess).
@@ -491,3 +488,7 @@ in button 94 4B fx_time unit=assigned slot=1 dir=1
 in abs14  B4 02 22 fx_wet unit=assigned slot=1
 in button 94 47 fx_on unit=assigned slot=1
 in button 95 47 fx_on unit=assigned slot=1
+
+# MIC LEVEL knob (14-bit, B6 05/25 per the manufacturer's list). Drives the microphone channel level
+# (a no-op until the engine build has the microphone commands, see docs/CONTROLLERS.md).
+in abs14  B6 05 25 mic_level

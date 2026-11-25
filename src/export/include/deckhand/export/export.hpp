@@ -4,6 +4,7 @@
 // sections followed and the list of guessed/undocumented fields. Depends on the C++ standard library only.
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace deckhand::usbexport {
@@ -45,6 +46,7 @@ struct ExportTrack {
   std::vector<ExportBeat> beats;
   std::vector<ExportCue> cues;
   std::vector<WaveSample> waveform;  // 150 per second
+  std::vector<std::string> tags;     // "My Tag" names, written to exportExt.pdb when ExportOptions::write_ext_db
 };
 
 struct ExportPlaylist {
@@ -60,6 +62,14 @@ struct ExportOptions {
   bool copy_audio = true;       // copy to Contents/<Artist>/<Album>/<file>
   bool write_color_preview = true;  // PWV4 (entry layout is a guess, see docs/EXPORT.md)
   bool write_3band = true;          // ANLZ0000.2EX with PWV6/PWV7 (CDJ-3000)
+  // EXPERIMENTAL: also write PIONEER/rekordbox/exportExt.pdb (tags and track-tag links). The public documentation
+  // of that file is thin (see docs/EXPORT.md); default off.
+  bool write_ext_db = false;
+  std::string tag_category = "DeckHand";  // name of the single tag category used for ExportTrack::tags
+  // Test hooks. available_bytes_override >= 0 replaces the free-space query of the destination volume;
+  // fail_after_commits >= 0 makes the commit phase fail after that many files were moved into place.
+  std::int64_t available_bytes_override = -1;
+  int fail_after_commits = -1;
 };
 
 bool export_usb(const std::vector<ExportTrack>& tracks, const std::vector<ExportPlaylist>& playlists,
@@ -67,7 +77,7 @@ bool export_usb(const std::vector<ExportTrack>& tracks, const std::vector<Export
 
 struct ReadTrack {
   ExportTrack track;  // waveform left empty; duration_ms has whole-second resolution
-  std::string label, file_path, analyze_path, ppth_dat, ppth_ext;
+  std::string label, file_path, analyze_path, ppth_dat, ppth_ext, isrc;
   unsigned file_type = 0;
   std::vector<ExportCue> dat_cues;  // from PCOB (DAT)
   std::vector<std::uint8_t> pwav, pwv2, pwv3;
@@ -76,12 +86,23 @@ struct ReadTrack {
   bool has_ext = false, has_2ex = false;
 };
 
+struct ReadTag {
+  std::uint32_t id = 0, category = 0, category_pos = 0;
+  bool is_category = false;
+  std::string name;
+};
+
 struct ReadExport {
   std::vector<ReadTrack> tracks;
   std::vector<ExportPlaylist> playlists;  // folders and playlists with ordered track ids
   std::vector<std::string> colors;        // colour table names, by row order
   std::vector<std::size_t> table_rows;    // valid row count per table type id
   std::uint32_t page_size = 0, num_pages = 0;
+  // exportExt.pdb (empty unless the file exists)
+  bool has_ext_db = false;
+  std::vector<ReadTag> tags;                                      // categories and tags
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> tag_links;  // (track id, tag id)
+  std::vector<std::size_t> ext_table_rows;                        // valid rows per table, in header order
 };
 
 bool read_export(const std::string& root, ReadExport& out, std::string& error);

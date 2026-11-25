@@ -32,7 +32,8 @@ full control API.
 - Streaming: now-playing files, a browser overlay and an OBS WebSocket connection
   ([docs/STREAMING.md](docs/STREAMING.md)); tested against a mock, not yet a real OBS.
 - Languages: English, German, French, Spanish and Japanese packs; switch from the top bar.
-- Controllers: declarative mapping files, any matching MIDI device; DDJ-FLX4 mapping included.
+- Controllers: declarative mapping files for MIDI and HID devices; DDJ-FLX4 mapping included.
+- Microphone channel with talkover.
 - Linux: builds and passes its tests in an Ubuntu container and renders under a virtual
   display ([docs/LINUX.md](docs/LINUX.md)); not yet run on a real Linux machine.
 - Windows: cross-compiles and passes its tests under Wine, and renders correctly there

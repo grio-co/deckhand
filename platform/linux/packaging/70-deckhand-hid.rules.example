@@ -1,0 +1,13 @@
+# DeckHand: let the logged-in user open one HID controller (hidraw) without root.
+#
+# Install:  sudo cp 70-deckhand-hid.rules.example /etc/udev/rules.d/70-deckhand-hid.rules
+#           (edit the ids first), then:  sudo udevadm control --reload && sudo udevadm trigger
+# Find the ids with `lsusb` ("ID 1234:abcd" = vendor:product). The numbers below are placeholders.
+#
+# Grant access per device, not for every hidraw node: a blanket rule would also expose keyboards and mice.
+# "uaccess" gives the user at the seat access; DeckHand itself refuses to open keyboards, mice and pointers.
+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1234", ATTRS{idProduct}=="abcd", TAG+="uaccess"
+
+# Bluetooth devices have no idVendor on the USB parent; match their HID_ID instead (bus 0005):
+# KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0005:1234:ABCD.*", TAG+="uaccess"

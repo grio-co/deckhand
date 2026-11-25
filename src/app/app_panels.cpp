@@ -3,6 +3,10 @@
 // They take the raw pointer (ov_) because the main UI is blocked while one is open.
 #include "app_impl.hpp"
 
+#include <cctype>
+#include <cstdlib>
+#include <cstring>
+
 namespace deckhand {
 
 namespace {
@@ -145,6 +149,7 @@ void App::open_panel(Panel p) {
   switch (p) {
     case Panel::Settings: {
       output_devices_ = engine_->devices();
+      input_devices_ = engine_->input_devices();
       for (const auto& kv : std::vector<std::pair<const char*, const char*>>{{"api.enabled", "1"}, {"api.port", "7373"}, {"stream.files", "0"},
                                                                           {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"obs.host", "127.0.0.1"},
                                                                           {"obs.port", "4455"}, {"obs.text_source", ""}, {"sync.folder", ""}})
@@ -490,6 +495,7 @@ void App::draw_settings(const Rect& m) {
     y += 24;
   }
 
+  draw_microphone_section(x, y, rw);
   draw_controller_section(x, y, rw);
   draw_sync_section(x, y, rw);
 
@@ -536,6 +542,84 @@ void App::draw_settings(const Rect& m) {
   }
   dl_.pop_clip();
   panel_content_h_ = y + panel_scroll_ - body.y + 8;
+}
+
+void App::draw_microphone_section(float x, float& y, float rw) {
+  const ui::Theme& th = theme_;
+  const float line = 28;
+  std::string pref, error;
+  int channel;
+  bool stereo;
+  float depth;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    pref = input_pref_;
+    error = input_error_;
+    channel = input_channel_;
+    stereo = input_stereo_;
+    depth = talk_depth_;
+  }
+  ui_heading(x, y, T("settings.mic"));
+  y += 18;
+  const auto change = [&](const std::string& device, int ch, bool st, float db) {
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      input_pref_ = device;
+      input_channel_ = ch;
+      input_stereo_ = st;
+      talk_depth_ = db;
+    }
+    save_setting("audio.input_device", device);
+    save_setting("audio.input_channel", std::to_string(ch + 1));
+    save_setting("audio.input_stereo", st ? "1" : "0");
+    save_setting("audio.mic_depth", std::to_string(static_cast<int>(std::lround(db))));
+    apply_input(true);
+  };
+  const float row_h = 24;
+  const std::size_t shown = std::min<std::size_t>(input_devices_.size() + 1, 4);
+  const Rect list{x, y, rw, row_h * static_cast<float>(shown) + 4};
+  dl_.rrect(list.x, list.y, list.w, list.h, 4, rgba(10, 11, 14));
+  dl_.push_clip(list.x, list.y, list.w, list.h);
+  for (std::size_t i = 0; i <= input_devices_.size(); ++i) {
+    const std::string name = i == 0 ? std::string() : input_devices_[i - 1];
+    const Rect row{list.x + 2, list.y + 2 + row_h * static_cast<float>(i) - in_scroll_, list.w - 4, row_h};
+    if (row.y + row.h < list.y || row.y > list.bottom()) continue;
+    const bool sel = name == pref;
+    if (sel) dl_.rrect(row.x, row.y, row.w, row.h, 3, with_alpha(th.accent, 110));
+    else if (row.contains(ov_.x, ov_.y) && list.contains(ov_.x, ov_.y)) dl_.rrect(row.x, row.y, row.w, row.h, 3, with_alpha(th.text, 20));
+    const std::string label = i == 0 ? T("settings.mic_none") : name;
+    dl_.text(row.x + 8, row.y + 5, skin_->fit(label, 12, 0, row.w - 16), 12, th.text, Align::Left, row.w - 16);
+    if (ov_.pressed && row.contains(ov_.x, ov_.y) && list.contains(ov_.x, ov_.y) && !sel) change(name, channel, stereo, depth);
+  }
+  dl_.pop_clip();
+  const float total = row_h * static_cast<float>(input_devices_.size() + 1);
+  if (list.contains(ov_.x, ov_.y) && total > list.h) {
+    in_scroll_ = std::clamp(in_scroll_ - ov_.scroll, 0.0f, total - list.h + 4);
+    panel_scroll_ += ov_.scroll;  // the list takes the wheel, not the panel
+  }
+  y += list.h + 10;
+
+  dl_.text(x, y + 5, T("settings.mic_channel"), 12, th.dim);
+  float bx = x + 130;
+  for (int c = 0; c < 8; ++c) {
+    if (ui_button({bx, y, 30, 24}, std::to_string(c + 1), c == channel) && c != channel) change(pref, c, stereo, depth);
+    bx += 34;
+  }
+  if (ui_toggle({bx + 8, y, std::max(120.0f, x + rw - bx - 8), 24}, T("settings.mic_stereo"), stereo)) change(pref, channel, !stereo, depth);
+  y += line;
+  dl_.text(x, y + 5, T("settings.mic_depth"), 12, th.dim);
+  if (ui_button({x + 130, y, 30, 24}, "-", false)) change(pref, channel, stereo, std::max(-24.0f, depth - 3.0f));
+  dl_.text(x + 166, y + 5, T("settings.mic_depth_value", {{"db", static_cast<double>(depth)}}), 12, th.text, Align::Center, 60);
+  if (ui_button({x + 232, y, 30, 24}, "+", false)) change(pref, channel, stereo, std::min(0.0f, depth + 3.0f));
+  y += line;
+  const InputStatus st = engine_->input_status();
+  std::string note;
+  if (pref.empty()) note = T("settings.mic_off_hint");
+  else if (!error.empty()) note = T("settings.mic_error", {{"message", error}});
+  else if (st.lost) note = T("settings.mic_lost");
+  else if (st.open) note = T("settings.mic_open", {{"device", st.name}});
+  dl_.text(x, y, skin_->fit(note, 11, 0, rw), 11, th.dim, Align::Left, rw);
+  y += 24;
 }
 
 void App::draw_controller_section(float x, float& y, float rw) {

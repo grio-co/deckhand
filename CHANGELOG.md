@@ -6,6 +6,15 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Microphone channel: input device chooser, level, EQ, noise gate, talkover ducking, optional
+  headphone monitoring; included in recordings and the stream output; controls in the API,
+  skin and controller mappings. The input is only opened after a device is chosen.
+- HID controllers: `.dhmap` rules for HID reports (buttons, absolute values, wrapping jog
+  counters, touch, LED output reports, init reports), learn for HID, platform layers for macOS,
+  Linux and Windows. Keyboards and mice are always refused.
+- USB export: structural validator, comparison tool for a reference export, experimental
+  `exportExt.pdb`, atomic staging with rollback; index-page header and colour-preview layout
+  corrected against the public documentation.
 - Library sync keeps what it had published when a library is restored from an older backup; the source-library
   import no longer starts by itself without its key file
 - Library sync: optional passphrase encryption of the sync folder (AES-256-GCM, scrypt; Settings, Library sync);

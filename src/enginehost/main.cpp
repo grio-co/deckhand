@@ -120,6 +120,7 @@ class Host final : public ControlSink {
   void pump_stream();
   void publish_views();
   void publish_device();
+  void publish_input();
   void publish_hub();
   void hub_tick();
   bool open_device(OutputConfig cfg, std::string& error);
@@ -136,8 +137,9 @@ class Host final : public ControlSink {
   Listener listener_;
   std::unique_ptr<ControllerHub> hub_;
   std::unique_ptr<MidiIO> midi_;
+  std::unique_ptr<HidIO> hid_;
 
-  std::mutex dev_mutex_, rec_mutex_, event_mutex_, hub_mutex_;
+  std::mutex dev_mutex_, rec_mutex_, event_mutex_, hub_mutex_, input_mutex_, input_pub_mutex_;
   OutputConfig last_cfg_;
   bool want_open_ = false;
   std::string choice_, rec_path_;
@@ -194,6 +196,14 @@ bool Host::init(std::string& error) {
           recheck_ = true;
         });
     hub_->set_io(midi_.get());
+    hid_ = create_hid_io(
+        [this](const std::string& id, int report, const std::uint8_t* data, std::size_t n) {
+          if (hub_) hub_->hid(id, report, data, n);
+        },
+        [this] {
+          if (hub_) hub_->devices_changed();
+        });
+    if (hid_) hub_->set_hid_io(hid_.get());
   }
   publish_hub();
   sh_->hdr.engine_state.store(kRunning);
@@ -236,6 +246,8 @@ void Host::shutdown(int fade_ms) {
       std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1, fade_ms / steps)));
     }
   }
+  if (hub_) hub_->set_hid_io(nullptr);
+  hid_.reset();
   if (hub_) hub_->set_io(nullptr);
   midi_.reset();
   service_stop_ = true;
@@ -355,6 +367,7 @@ void Host::publish_views() {
     sh_->meta[i].write(m);
   }
   sh_->mixer.write(engine_.mixer());
+  publish_input();
   for (int i = 0; i < kSamplerSlots; ++i) sh_->sampler[i].write(engine_.sampler(i));
   RecInfo r;
   r.st = engine_.recorder_status();
@@ -378,6 +391,21 @@ void Host::publish_device() {
   std::memcpy(d.name, name.data(), d.name_len);
   dev_ = d;
   sh_->device.write(d);
+}
+
+void Host::publish_input() {
+  std::lock_guard<std::mutex> lock(input_pub_mutex_);  // one writer at a time for the seqlock
+  const InputStatus st = engine_.input_status();
+  InputInfo in;
+  in.open = st.open ? 1 : 0;
+  in.lost = st.lost ? 1 : 0;
+  in.sample_rate = st.sample_rate;
+  in.latency_ms = st.latency_ms;
+  in.underruns = st.underruns;
+  in.overruns = st.overruns;
+  in.name_len = static_cast<std::uint32_t>(std::min<std::size_t>(st.name.size(), sizeof in.name - 1));
+  std::memcpy(in.name, st.name.data(), in.name_len);
+  sh_->input.write(in);
 }
 
 void Host::publish_hub() {
@@ -601,15 +629,48 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
     case kReqRecOpen: {
       const std::string path = rd.str();
       const bool pre = rd.u8() != 0;
+      const bool with_mic = rd.u8() != 0;
       std::string error;
       if (!rd.ok() || path.empty() || path.size() > 1000 || !is_absolute_path(path) || path.find('\0') != std::string::npos) {
         out.u8(0), out.str("bad recording path");
         return;
       }
       std::lock_guard<std::mutex> lock(rec_mutex_);
-      const bool ok = engine_.record_open(path, pre, error);
+      const bool ok = engine_.record_open(path, pre, error, with_mic);
       if (ok) rec_path_ = path;
       out.u8(ok ? 1 : 0), out.str(error);
+      return;
+    }
+    case kReqOpenInput: {
+      InputConfig cfg;
+      cfg.device_hint = rd.str();
+      const std::int32_t channel = rd.i32();
+      cfg.stereo = rd.u8() != 0;
+      if (!rd.ok() || cfg.device_hint.size() > 200 || cfg.device_hint.find('\0') != std::string::npos || channel < 0 || channel > 62) {
+        out.u8(0), out.str("bad request");
+        return;
+      }
+      cfg.channel = channel;
+      cfg.null_backend = opt_.null_audio;  // tests never touch a real capture device
+      std::string error;
+      std::lock_guard<std::mutex> lock(input_mutex_);
+      const bool ok = engine_.open_input(cfg, error);
+      publish_input();
+      out.u8(ok ? 1 : 0), out.str(error);
+      return;
+    }
+    case kReqCloseInput: {
+      std::lock_guard<std::mutex> lock(input_mutex_);
+      engine_.close_input();
+      publish_input();
+      return;
+    }
+    case kReqInputDevices: {
+      std::vector<std::string> d;
+      if (opt_.null_audio) d.push_back("Null Input");
+      else d = engine_.input_devices();
+      out.u32(static_cast<std::uint32_t>(std::min<std::size_t>(d.size(), 256)));
+      for (std::size_t i = 0; i < d.size() && i < 256; ++i) out.str(d[i]);
       return;
     }
     case kReqRecStop: engine_.record_stop(); return;
@@ -676,8 +737,8 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
       return;
     }
     case kReqStreamEnable: {
-      const bool on = rd.u8() != 0, pre = rd.u8() != 0;
-      engine_.stream_enable(on, pre);
+      const bool on = rd.u8() != 0, pre = rd.u8() != 0, with_mic = rd.u8() != 0;
+      engine_.stream_enable(on, pre, with_mic);
       stream_on_ = on;
       return;
     }

@@ -16,6 +16,7 @@
 #include "dsp.hpp"
 #include "fx.hpp"
 #include "miniaudio.h"
+#include "mic.hpp"
 #include "recorder.hpp"
 #include "stretch.hpp"
 
@@ -316,10 +317,36 @@ struct Engine::Impl {
   Snapshot<SamplerView> sampler_views[kSamplerSlots];
 
   Recorder rec;
-  bool rec_pre = false;
+  bool rec_pre = false, rec_mic = true;
   FrameRing stream;
   std::atomic<bool> stream_on{false};
-  bool stream_pre = false;
+  bool stream_pre = false, stream_mic = true;
+
+  // ---- microphone ----------------------------------------------------------------------
+  MicChannel mic;
+  MicClock mic_in;
+  std::atomic<bool> mic_open{false};      // input feeding the channel (device or offline feed)
+  std::atomic<bool> mic_in_use{false};    // the output thread is inside mic_in.pull (a closer waits for it)
+  std::atomic<bool> in_lost_pub{false};
+  std::atomic<std::uint32_t> in_rate_pub{0};
+  std::mutex name_mutex;
+  std::string in_name_pub;
+  const float* inject_in = nullptr;       // offline: this chunk's microphone frames (render_with_input)
+  bool inject_seen = false;
+  float mic_mon_prev = 0;
+  mutable std::mutex input_mutex;         // non-real-time: open / close / status
+  ma_context cap_ctx{};
+  ma_device cap_dev{};
+  bool cap_ctx_ok = false, cap_dev_ok = false, cap_offline = false;
+  InputConfig in_cfg;
+  bool in_wanted = false, in_lost = false;
+  std::string in_name;
+  int cap_channels = 1, cap_first = 0;
+  bool cap_stereo = false;
+  std::atomic<std::uint64_t> cap_pushes{0};
+  std::atomic<bool> cap_stopped{false};
+  std::uint64_t seen_pushes = 0;
+  std::chrono::steady_clock::time_point seen_at{}, retry_at{};
   std::atomic<std::uint64_t> stream_dropped{0};
 
   // ---- engine clock and scheduled commands ---------------------------------------
@@ -358,6 +385,8 @@ struct Engine::Impl {
     for (Deck& d : decks) d.st.prepare(sr);
     for (FxBus& b : fxb) b.prepare(sr);
     master_fx.prepare(sr);
+    mic.prepare(sr);
+    if (mic_in.ready()) mic_in.set_out_rate(sr);
     std::size_t cap = 1;
     while (cap < static_cast<std::size_t>(sr) * 3) cap <<= 1;
     if (stream.capacity() != cap) stream.init(cap);
@@ -791,9 +820,21 @@ struct Engine::Impl {
       case Op::SamplerSync: if (c.deck < kSamplerSlots) sampler_slots[c.deck].sync = c.i != 0; return true;
       case Op::SamplerLoop: if (c.deck < kSamplerSlots) sampler_slots[c.deck].loop = c.i != 0; return true;
       case Op::SamplerGain: if (c.deck < kSamplerSlots) sampler_slots[c.deck].gain = std::clamp(c.f, 0.0f, 1.0f); return true;
-      case Op::RecStart: rec_pre = c.f > 0.5f; rec.start(); return true;
+      case Op::RecStart: rec_pre = c.f > 0.5f; rec_mic = (c.i & 1) == 0; rec.start(); return true;
       case Op::RecStop: rec.stop(); return true;
-      case Op::StreamEnable: stream_pre = c.f > 0.5f; stream_on.store(c.i != 0); return true;
+      case Op::StreamEnable:
+        stream_pre = c.f > 0.5f;
+        stream_mic = (c.i & 2) == 0;
+        stream_on.store((c.i & 1) != 0);
+        return true;
+      case Op::MicOn: mic.on = flag(mic.on, c.i); return true;
+      case Op::MicLevel: mic.level = std::clamp(c.f, 0.0f, 1.0f); return true;
+      case Op::MicEqLow: mic.eq_low = std::clamp(c.f, 0.0f, 1.0f); mic.eq_update(); return true;
+      case Op::MicEqHigh: mic.eq_high = std::clamp(c.f, 0.0f, 1.0f); mic.eq_update(); return true;
+      case Op::MicTalkover: mic.talkover = c.i == 2 ? 2 : c.i < 0 ? (mic.talkover ? 0 : 1) : (c.i != 0 ? 1 : 0); return true;
+      case Op::MicTalkoverDepth: mic.depth_db = std::clamp(c.f, -24.0f, 0.0f); return true;
+      case Op::MicMonitor: mic.monitor = flag(mic.monitor, c.i); return true;
+      case Op::MicGate: mic.gate_db = std::clamp(c.f, -80.0f, -20.0f); return true;
       case Op::SchedInsert: sched_accept(c.i); return true;
       case Op::SchedCancel: sched_cancel(static_cast<std::uint64_t>(c.d)); return true;
       case Op::SchedCancelAll: sched_cancel_all(); return true;
@@ -1386,6 +1427,26 @@ struct Engine::Impl {
       master_fx.run_slots(master, n, cx);
     }
 
+    // microphone channel: its own clock-joined input (or the offline feed), processed, mixed into the master bus
+    float micb[kChunk * 2], duck[kChunk];
+    {
+      float raw[kChunk * 2];
+      const float* src = nullptr;
+      if (inject_in) {
+        src = inject_in;
+      } else if (mic_open.load(std::memory_order_acquire)) {
+        mic_in_use.store(true, std::memory_order_seq_cst);
+        if (mic_open.load(std::memory_order_seq_cst)) {
+          mic_in.pull(raw, n);
+          src = raw;
+        }
+        mic_in_use.store(false, std::memory_order_release);
+      }
+      mic.process(src, micb, duck, n);
+    }
+    const float mon1 = mic.monitor ? 1.0f : 0.0f, mon0 = mic_mon_prev;
+    mic_mon_prev = mon1;
+
     const float mg1 = level_gain(master_level), mg0 = g_master_prev;
     const float hg1 = level_gain(head_level), hg0 = g_head_prev;
     g_master_prev = mg1;
@@ -1397,24 +1458,40 @@ struct Engine::Impl {
     for (int i = 0; i < n; ++i) {
       const float t = static_cast<float>(i) * inv_n;
       const float mg = mg0 + (mg1 - mg0) * t, hg = hg0 + (hg1 - hg0) * t;
-      const float ml = soft_clip(master[i * 2] * mg), mr = soft_clip(master[i * 2 + 1] * mg);
+      const float dk = duck[i];
+      const float mixl = master[i * 2] * dk + micb[i * 2], mixr = master[i * 2 + 1] * dk + micb[i * 2 + 1];
+      const float ml = soft_clip(mixl * mg), mr = soft_clip(mixr * mg);
+      const float mn = mon0 + (mon1 - mon0) * t;
       float* frame = out + static_cast<std::size_t>(i) * static_cast<std::size_t>(channels);
-      tap_pre[i * 2] = master[i * 2] * mg;
-      tap_pre[i * 2 + 1] = master[i * 2 + 1] * mg;
+      tap_pre[i * 2] = mixl * mg;
+      tap_pre[i * 2 + 1] = mixr * mg;
       tap_post[i * 2] = ml;
       tap_post[i * 2 + 1] = mr;
       frame[master_ch] = ml;
       frame[master_ch + 1] = mr;
       if (phones_ch >= 0) {
-        frame[phones_ch] = soft_clip((cue[i * 2] * (1 - mix) + master[i * 2] * mix) * hg);
-        frame[phones_ch + 1] = soft_clip((cue[i * 2 + 1] * (1 - mix) + master[i * 2 + 1] * mix) * hg);
+        frame[phones_ch] = soft_clip((cue[i * 2] * (1 - mix) + master[i * 2] * mix + micb[i * 2] * mn) * hg);
+        frame[phones_ch + 1] = soft_clip((cue[i * 2 + 1] * (1 - mix) + master[i * 2 + 1] * mix + micb[i * 2 + 1] * mn) * hg);
       }
       pl = std::max(pl, std::fabs(ml));
       pr = std::max(pr, std::fabs(mr));
     }
-    if (rec.recording()) rec.push(rec_pre ? tap_pre : tap_post, static_cast<std::size_t>(n));
-    if (stream_on.load(std::memory_order_relaxed)) {
-      const std::size_t wr = stream.push(stream_pre ? tap_pre : tap_post, static_cast<std::size_t>(n));
+    const bool rec_on = rec.recording(), stream_now = stream_on.load(std::memory_order_relaxed);
+    float alt_pre[kChunk * 2], alt_post[kChunk * 2];  // taps without the microphone (and without its ducking)
+    if ((rec_on && !rec_mic) || (stream_now && !stream_mic)) {
+      for (int i = 0; i < n; ++i) {
+        const float t = static_cast<float>(i) * inv_n;
+        const float mg = mg0 + (mg1 - mg0) * t;
+        for (int c = 0; c < 2; ++c) {
+          alt_pre[i * 2 + c] = master[i * 2 + c] * mg;
+          alt_post[i * 2 + c] = soft_clip(alt_pre[i * 2 + c]);
+        }
+      }
+    }
+    if (rec_on) rec.push(rec_mic ? (rec_pre ? tap_pre : tap_post) : (rec_pre ? alt_pre : alt_post), static_cast<std::size_t>(n));
+    if (stream_now) {
+      const float* tap = stream_mic ? (stream_pre ? tap_pre : tap_post) : (stream_pre ? alt_pre : alt_post);
+      const std::size_t wr = stream.push(tap, static_cast<std::size_t>(n));
       if (wr < static_cast<std::size_t>(n)) stream_dropped.fetch_add(static_cast<std::size_t>(n) - wr, std::memory_order_relaxed);
     }
     const float decay = static_cast<float>(std::exp(-static_cast<double>(n) / (0.3 * sr)));
@@ -1478,6 +1555,18 @@ struct Engine::Impl {
     m.sampler_level = sampler_level;
     m.master_bpm = master_bpm;
     m.stream_enabled = stream_on.load();
+    m.mic_on = mic.on;
+    m.mic_monitor = mic.monitor;
+    m.mic_present = mic_open.load(std::memory_order_relaxed) || inject_seen;
+    m.mic_ducking = mic.ducking();
+    m.mic_talkover = static_cast<std::uint8_t>(mic.talkover);
+    m.mic_level = mic.level;
+    m.mic_eq_low = mic.eq_low;
+    m.mic_eq_high = mic.eq_high;
+    m.mic_depth_db = mic.depth_db;
+    m.mic_gate_db = mic.gate_db;
+    m.mic_peak = mic.peak();
+    m.mic_duck_db = mic.duck_db();
     for (int k = 0; k < kSamplerSlots; ++k) {
       const SamplerSlot& s = sampler_slots[k];
       SamplerView sv;
@@ -1492,7 +1581,7 @@ struct Engine::Impl {
     mixer_view.write(m);
   }
 
-  void render(float* out, std::uint32_t frames) {
+  void render(float* out, std::uint32_t frames, const float* mic_frames = nullptr) {
     if (timing_on) note_callback_time();
     Command c;
     while (commands.pop(c)) apply(c);
@@ -1501,12 +1590,156 @@ struct Engine::Impl {
     while (done < frames) {
       int n = static_cast<int>(std::min<std::uint32_t>(kChunk, frames - done));
       if (n_clock + n_deck > 0) sched_begin_chunk(n);  // may shorten the chunk to land a trigger on its first sample
+      inject_in = mic_frames ? mic_frames + static_cast<std::size_t>(done) * 2 : nullptr;
       render_chunk(out + static_cast<std::size_t>(done) * static_cast<std::size_t>(channels), n);
       done += static_cast<std::uint32_t>(n);
       clock += static_cast<std::uint64_t>(n);
     }
+    inject_seen = mic_frames != nullptr;
+    inject_in = nullptr;
     publish();
     clock_pub.store(clock, std::memory_order_release);
+  }
+
+
+  // ---- microphone input (non-real-time; input_mutex held) --------------------------------------------------------
+  void capture(const float* in, ma_uint32 frames) {
+    float buf[256 * 2];
+    const int C = cap_channels, f0 = cap_first;
+    const bool st = cap_stereo;
+    for (ma_uint32 done = 0; done < frames;) {
+      const ma_uint32 n = std::min<ma_uint32>(256, frames - done);
+      for (ma_uint32 k = 0; k < n; ++k) {
+        const float* fr = in + static_cast<std::size_t>(done + k) * static_cast<std::size_t>(C) + f0;
+        buf[2 * k] = fr[0];
+        buf[2 * k + 1] = st ? fr[1] : fr[0];
+      }
+      mic_in.push(buf, n);
+      done += n;
+    }
+    cap_pushes.fetch_add(1, std::memory_order_relaxed);
+  }
+  static void capture_callback(ma_device* device, void*, const void* input, ma_uint32 frames) {
+    if (input) static_cast<Impl*>(device->pUserData)->capture(static_cast<const float*>(input), frames);
+  }
+  static void capture_notification(const ma_device_notification* n) {
+    if (n->type == ma_device_notification_type_stopped) static_cast<Impl*>(n->pDevice->pUserData)->cap_stopped.store(true);
+  }
+
+  // Stops feeding the channel (waits until the output thread has left the buffer) and releases the device.
+  void close_device() {
+    mic_open.store(false, std::memory_order_seq_cst);
+    for (int i = 0; i < 400 && mic_in_use.load(std::memory_order_acquire); ++i) std::this_thread::sleep_for(std::chrono::microseconds(500));
+    if (cap_dev_ok) ma_device_uninit(&cap_dev);
+    if (cap_ctx_ok) ma_context_uninit(&cap_ctx);
+    cap_dev_ok = cap_ctx_ok = cap_offline = false;
+    in_rate_pub.store(0);
+    std::lock_guard<std::mutex> lock(name_mutex);
+    in_name_pub.clear();
+  }
+
+  bool open_device(std::string& error) {
+    close_device();
+    cap_stopped.store(false);
+    if (init_context(&cap_ctx, in_cfg.null_backend) != MA_SUCCESS) {
+      error = "could not initialise the audio system";
+      return false;
+    }
+    cap_ctx_ok = true;
+    ma_device_info* infos = nullptr;
+    ma_uint32 count = 0;
+    ma_context_get_devices(&cap_ctx, nullptr, nullptr, &infos, &count);
+    const ma_device_id* id = nullptr;
+    std::string name = "system default input";
+    const std::string hint = lower(in_cfg.device_hint);
+    for (ma_uint32 i = 0; i < count; ++i) {
+      if (!hint.empty() && lower(infos[i].name).find(hint) != std::string::npos) {
+        id = &infos[i].id;
+        name = infos[i].name;
+        break;
+      }
+      if (hint.empty() && infos[i].isDefault) name = infos[i].name;
+    }
+    if (!hint.empty() && !id && !in_cfg.null_backend) {  // an explicit pick is never replaced by another device
+      error = "input device not found: " + in_cfg.device_hint;
+      close_device();
+      return false;
+    }
+    ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
+    cfg.capture.pDeviceID = id;
+    cfg.capture.format = ma_format_f32;
+    cfg.capture.channels = 0;  // the device's own layout; the wanted channel(s) are picked in the callback
+    cfg.sampleRate = 0;
+    cfg.periodSizeInMilliseconds = 10;
+    cfg.performanceProfile = ma_performance_profile_low_latency;
+    cfg.dataCallback = &Impl::capture_callback;
+    cfg.notificationCallback = &Impl::capture_notification;
+    cfg.pUserData = this;
+    if (ma_device_init(&cap_ctx, &cfg, &cap_dev) != MA_SUCCESS) {
+      error = "could not open input device: " + name;
+      close_device();
+      return false;
+    }
+    cap_dev_ok = true;
+    const int have = static_cast<int>(cap_dev.capture.channels);
+    const int want = std::clamp(in_cfg.channel, 0, 62), need = want + (in_cfg.stereo ? 2 : 1);
+    if (need > have) {
+      error = "input device " + name + " has only " + std::to_string(have) + " channel" + (have == 1 ? "" : "s");
+      close_device();
+      return false;
+    }
+    cap_channels = have;
+    cap_first = want;
+    cap_stereo = in_cfg.stereo;
+    const std::uint32_t isr = cap_dev.sampleRate;
+    const std::uint32_t period_in = cap_dev.capture.internalPeriodSizeInFrames ? cap_dev.capture.internalPeriodSizeInFrames : isr / 100;
+    const std::uint32_t period_out = dev_ok && dev.playback.internalPeriodSizeInFrames ? dev.playback.internalPeriodSizeInFrames : 512;
+    const double out_in_in = static_cast<double>(period_out) * isr / std::max<std::uint32_t>(sr, 8000);
+    const std::size_t target = static_cast<std::size_t>(std::clamp(2.0 * period_in + 2.0 * out_in_in, 0.02 * isr, 0.1 * isr));
+    mic_in.init(isr, sr, target);
+    cap_pushes.store(0);
+    seen_pushes = 0;
+    seen_at = std::chrono::steady_clock::now();
+    if (ma_device_start(&cap_dev) != MA_SUCCESS) {
+      error = "could not start input device: " + name;
+      close_device();
+      return false;
+    }
+    in_rate_pub.store(isr);
+    {
+      std::lock_guard<std::mutex> lock(name_mutex);
+      in_name_pub = name;
+    }
+    in_lost_pub.store(false);
+    mic_open.store(true, std::memory_order_seq_cst);
+    DH_LOG(Info, "input: %s, ch %d%s of %d, %u Hz, period %u, buffer %zu frames", name.c_str(), want, in_cfg.stereo ? "+1" : "", have, isr,
+           period_in, target);
+    return true;
+  }
+
+  // Hot-unplug and reopening, called from collect_garbage (a regular non-real-time thread).
+  void poll_input() {
+    std::unique_lock<std::mutex> lock(input_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (cap_dev_ok) {
+      const std::uint64_t pushes = cap_pushes.load(std::memory_order_relaxed);
+      if (pushes != seen_pushes) {
+        seen_pushes = pushes;
+        seen_at = now;
+      }
+      if (cap_stopped.load() || now - seen_at > std::chrono::milliseconds(1500)) {
+        DH_LOG(Warn, "input: %s went away; the output keeps running", in_cfg.device_hint.c_str());
+        close_device();  // the output never waits for this: the channel just turns silent
+        in_lost = true;
+        in_lost_pub.store(true);
+        retry_at = now + std::chrono::seconds(3);
+      }
+    } else if (in_wanted && in_lost && now >= retry_at) {
+      std::string error;
+      if (open_device(error)) in_lost = false;
+      else retry_at = now + std::chrono::seconds(3);
+    }
   }
 
   static void data_callback(ma_device* device, void* output, const void*, ma_uint32 frames) {
@@ -1521,6 +1754,7 @@ Engine::Engine() : impl_(std::make_unique<Impl>()) {
 
 Engine::~Engine() {
   stop();
+  close_input();
   Command c;
   impl_->rec.abort();
   while (impl_->commands.pop(c)) {
@@ -1753,11 +1987,12 @@ void Engine::sampler_load(int slot, std::unique_ptr<LoadedSample> sample) {
   send(c);
 }
 
-bool Engine::record_open(const std::string& path, bool pre_clip, std::string& error) {
+bool Engine::record_open(const std::string& path, bool pre_clip, std::string& error, bool include_mic) {
   if (!impl_->rec.open(path, impl_->sr, error)) return false;
   Command c;
   c.op = Op::RecStart;
   c.f = pre_clip ? 1.0f : 0.0f;
+  c.i = include_mic ? 0 : 1;
   send(c);
   return true;
 }
@@ -1786,10 +2021,10 @@ RecorderStatus Engine::recorder_status() const {
   st.bytes = r.bytes();
   return st;
 }
-void Engine::stream_enable(bool on, bool pre_clip) {
+void Engine::stream_enable(bool on, bool pre_clip, bool include_mic) {
   Command c;
   c.op = Op::StreamEnable;
-  c.i = on ? 1 : 0;
+  c.i = (on ? 1 : 0) | (include_mic ? 0 : 2);
   c.f = pre_clip ? 1.0f : 0.0f;
   send(c);
 }
@@ -1801,6 +2036,7 @@ MixerView Engine::mixer() const { return impl_->mixer_view.read(); }
 bool Engine::poll(EngineEvent& out) { return impl_->events.pop(out); }
 
 void Engine::collect_garbage() {
+  impl_->poll_input();
   LoadedTrack* t = nullptr;
   while (impl_->garbage.pop(t)) delete t;
   LoadedSample* ls = nullptr;
@@ -1816,5 +2052,83 @@ void Engine::configure_offline(std::uint32_t sample_rate, int channels) {
 }
 
 void Engine::render(float* out, std::uint32_t frames) { impl_->render(out, frames); }
+
+// ---- microphone input ------------------------------------------------------------------------------------------
+bool Engine::open_input(const InputConfig& config, std::string& error) {
+  Impl& s = *impl_;
+  std::lock_guard<std::mutex> lock(s.input_mutex);
+  s.in_cfg = config;
+  s.in_cfg.channel = std::clamp(config.channel, 0, 62);
+  s.in_wanted = true;
+  s.in_lost = false;
+  s.in_lost_pub.store(false);
+  error.clear();
+  if (s.open_device(error)) return true;
+  // The device is not there (yet): keep trying quietly, like a hot-unplugged one.
+  s.in_lost = true;
+  s.in_lost_pub.store(true);
+  s.retry_at = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  return false;
+}
+
+void Engine::close_input() {
+  Impl& s = *impl_;
+  std::lock_guard<std::mutex> lock(s.input_mutex);
+  s.in_wanted = false;
+  s.in_lost = false;
+  s.in_lost_pub.store(false);
+  s.close_device();
+}
+
+std::vector<std::string> Engine::input_devices() {
+  std::vector<std::string> names;
+  ma_context ctx;
+  if (init_context(&ctx) != MA_SUCCESS) return names;
+  ma_device_info* infos = nullptr;
+  ma_uint32 count = 0;
+  if (ma_context_get_devices(&ctx, nullptr, nullptr, &infos, &count) == MA_SUCCESS)
+    for (ma_uint32 i = 0; i < count; ++i) names.emplace_back(infos[i].name);
+  ma_context_uninit(&ctx);
+  return names;
+}
+
+InputStatus Engine::input_status() const {
+  const Impl& s = *impl_;
+  InputStatus st;
+  st.open = s.mic_open.load(std::memory_order_acquire);
+  st.lost = s.in_lost_pub.load();
+  st.sample_rate = s.in_rate_pub.load();
+  if (st.open && s.mic_in.in_rate() > 0) st.latency_ms = 1000.0 * static_cast<double>(s.mic_in.fill_frames()) / s.mic_in.in_rate();
+  st.underruns = s.mic_in.underruns();
+  st.overruns = s.mic_in.overruns();
+  {
+    std::lock_guard<std::mutex> lock(const_cast<Impl&>(s).name_mutex);
+    st.name = s.in_name_pub;
+  }
+  return st;
+}
+
+void Engine::configure_offline_input(std::uint32_t input_sample_rate) {
+  Impl& s = *impl_;
+  std::lock_guard<std::mutex> lock(s.input_mutex);
+  s.close_device();
+  s.mic_in.init(input_sample_rate, s.sr, static_cast<std::size_t>(0.03 * input_sample_rate));
+  s.cap_offline = true;
+  s.in_rate_pub.store(input_sample_rate);
+  {
+    std::lock_guard<std::mutex> nl(s.name_mutex);
+    s.in_name_pub = "offline input";
+  }
+  s.mic_open.store(true, std::memory_order_seq_cst);
+}
+
+std::size_t Engine::feed_input(const float* interleaved_stereo, std::size_t frames) {
+  Impl& s = *impl_;
+  s.mic_in.push(interleaved_stereo, frames);
+  return frames;
+}
+
+void Engine::render_with_input(float* out, const float* in, std::uint32_t frames) { impl_->render(out, frames, in); }
+
 
 }  // namespace deckhand

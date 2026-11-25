@@ -1,4 +1,6 @@
 #pragma once
+// Marker for modules that map the microphone commands (Op::MicOn ...).
+#define DECKHAND_ENGINE_HAS_MIC 1
 // Real-time audio engine: decks, mixer, cue bus. The audio callback takes no locks,
 // allocates nothing and does no I/O; everything reaches it through wait-free queues.
 #include <chrono>
@@ -97,9 +99,19 @@ enum class Op : std::uint8_t {
   SamplerSync,   // deck = slot, i = 1 follow master tempo, 0 = off
   SamplerLoop,   // deck = slot, i = 1 loop, 0 one-shot
   SamplerGain,   // deck = slot, f = 0..1 slot level (0.8 = unity)
-  RecStart,      // f = 1 tap before the master soft clip, 0 after; needs Engine::record_open first
+  RecStart,      // f = 1 tap before the master soft clip, 0 after, i bit 0 = 1 leaves the microphone out; needs Engine::record_open first
   RecStop,       // stops recording; the writer thread finalises the file
-  StreamEnable,  // i = 1 on / 0 off, f = 1 pre-soft-clip tap; feeds Engine::stream_read
+  StreamEnable,  // i bit 0 = 1 on / 0 off, bit 1 = 1 leaves the microphone out; f = 1 pre-soft-clip tap; feeds Engine::stream_read
+  // ---- microphone channel (needs an input opened with open_input; routed to the master bus) ----
+  MicOn,            // i = 1 on, 0 off, -1 toggle
+  MicLevel,         // f = 0..1 (0.8 = unity)
+  MicEqLow,         // f = 0..1 (0.5 = flat, +-12 dB)
+  MicEqHigh,        // f = 0..1 (0.5 = flat, +-12 dB)
+  MicTalkover,      // i = 1 on (ducks the music while the microphone is above the threshold), 0 off, -1 toggle on/off,
+                    //   2 = always duck while set
+  MicTalkoverDepth, // f = ducking in dB, 0 .. -24
+  MicMonitor,       // i = 1 on, 0 off, -1 toggle (microphone also on the headphone cue bus)
+  MicGate,          // f = noise gate threshold in dB, -80 .. -20; <= -80 = gate off
   // ---- internal (scheduling); never pass these to send() / schedule() ----
   SchedInsert,     // i = payload slot handed over by Engine::schedule
   SchedCancel,     // d = schedule id
@@ -247,7 +259,24 @@ struct MixerView {
   float sampler_level = 0.8f;
   double master_bpm = 0;       // BPM driving master effects and sampler sync (0 = unknown)
   bool stream_enabled = false;
+  // appended: microphone channel
+  bool mic_on = false, mic_monitor = false;
+  bool mic_present = false;    // an input is open and feeding the channel
+  bool mic_ducking = false;    // the music is being ducked right now
+  std::uint8_t mic_talkover = 0;  // 0 off, 1 on (voice-activated), 2 always
+  float mic_level = 0.8f, mic_eq_low = 0.5f, mic_eq_high = 0.5f;
+  float mic_depth_db = -12.0f;    // talkover ducking, 0 .. -24
+  float mic_gate_db = -80.0f;     // <= -80: off
+  float mic_peak = 0;             // post-level peak, 0..1
+  float mic_duck_db = 0;          // current gain applied to the music, <= 0
+  float mic_pad = 0;
 };
+
+// Microphone channel tuning that is not a command.
+constexpr double kMicTalkoverAttack = 0.025;   // seconds (time constant of the duck gain when it goes down)
+constexpr double kMicTalkoverRelease = 0.5;    // seconds (time constant when it recovers)
+constexpr float kMicTalkoverThresholdDb = -40.0f;  // voice detection: microphone peak above this (after level and gate)
+constexpr float kMicHighPassHz = 80.0f;
 
 struct SamplerView {
   bool loaded = false, playing = false, loop = false, sync = false;
@@ -273,6 +302,23 @@ struct OutputConfig {
   bool null_backend = false;       // tests: miniaudio's null device (paced like a real one, produces no sound)
 };
 
+// Capture device for the microphone channel. Without one the channel is silent and no capture device is ever opened.
+struct InputConfig {
+  std::string device_hint;  // case-insensitive substring of the device name; empty = system default input
+  int channel = 0;          // first device channel (0-based)
+  bool stereo = false;      // use channel and channel + 1 as a stereo pair; false = mono, sent to both sides
+  bool null_backend = false;  // tests: miniaudio's null capture device (paced like a real one, delivers silence); the hint is ignored
+};
+
+struct InputStatus {
+  bool open = false;        // a capture device (or an offline feed) is open and feeding the channel
+  bool lost = false;        // the device went away; the engine keeps trying to reopen it
+  std::string name;
+  std::uint32_t sample_rate = 0;   // of the capture device
+  double latency_ms = 0;           // buffered between the capture and the output clocks
+  std::uint64_t underruns = 0, overruns = 0;  // clock-drift buffer: expected 0
+};
+
 // The engine as the application sees it. Implemented by the in-process Engine below and by RemoteEngine
 // (deckhand/audio/remote_engine.hpp), a proxy for the engine running in its own process.
 class IEngine {
@@ -294,15 +340,23 @@ class IEngine {
   virtual SamplerView sampler(int slot) const = 0;
   virtual void sampler_load(int slot, std::unique_ptr<LoadedSample> sample) = 0;
 
-  virtual bool record_open(const std::string& path, bool pre_clip, std::string& error) = 0;
+  // include_mic: the microphone channel is part of the recording / stream tap (default).
+  virtual bool record_open(const std::string& path, bool pre_clip, std::string& error, bool include_mic = true) = 0;
   virtual void record_stop() = 0;
   virtual void record_close() = 0;
   virtual RecorderStatus recorder_status() const = 0;
   virtual std::string recorder_path() const { return {}; }  // file being written, when known
 
-  virtual void stream_enable(bool on, bool pre_clip = false) = 0;
+  virtual void stream_enable(bool on, bool pre_clip = false, bool include_mic = true) = 0;
   virtual std::size_t stream_read(float* interleaved_stereo, std::size_t max_frames) = 0;
   virtual std::uint64_t stream_dropped_frames() const = 0;
+
+  // Microphone input. Nothing is opened until open_input; a second capture device runs on its own clock and a
+  // drift-compensating resampler joins it to the output clock. Safe from any non-real-time thread.
+  virtual bool open_input(const InputConfig& config, std::string& error) = 0;
+  virtual void close_input() = 0;
+  virtual std::vector<std::string> input_devices() = 0;  // capture devices currently present
+  virtual InputStatus input_status() const = 0;
 
   virtual std::uint64_t clock_frames() const = 0;
   virtual double clock_seconds() const = 0;
@@ -349,16 +403,24 @@ class Engine final : public IEngine {
   // second, so a crash still leaves a playable file). record_open opens the file and the writer thread and
   // starts recording (Op::RecStart is sent for you). Op::RecStop / record_stop ends it; the writer then
   // finalises the file. record_close waits for that and releases the writer (call before opening again).
-  bool record_open(const std::string& path, bool pre_clip, std::string& error) override;
+  bool record_open(const std::string& path, bool pre_clip, std::string& error, bool include_mic = true) override;
   void record_stop() override;
   void record_close() override;
   RecorderStatus recorder_status() const override;
 
   // Stream bus: a second master tap for the broadcast module. Enable with Op::StreamEnable (or
   // stream_enable), then pull interleaved stereo float frames from one non-real-time thread.
-  void stream_enable(bool on, bool pre_clip = false) override;
+  void stream_enable(bool on, bool pre_clip = false, bool include_mic = true) override;
   std::size_t stream_read(float* interleaved_stereo, std::size_t max_frames) override;
   std::uint64_t stream_dropped_frames() const override;
+
+  // ---- microphone input ----
+  // Opens the capture device `config` names (replacing an open one). A device that goes away is closed without
+  // touching the output and reopened when it returns (see InputStatus::lost). Error text in `error` on failure.
+  bool open_input(const InputConfig& config, std::string& error) override;
+  void close_input() override;
+  std::vector<std::string> input_devices() override;
+  InputStatus input_status() const override;
 
   // ---- engine clock and sample-accurate scheduling ----
   // Output frames rendered so far (monotonic, any thread; advances once per callback).
@@ -383,6 +445,13 @@ class Engine final : public IEngine {
   // Offline rendering without a device (tests, tools). Interleaved float output.
   void configure_offline(std::uint32_t sample_rate, int channels);
   void render(float* out, std::uint32_t frames);
+  // Offline microphone: `in` is `frames` interleaved stereo frames at the output rate, used as the microphone input
+  // of this block exactly (no device, no resampling). Counts as an open input.
+  void render_with_input(float* out, const float* in, std::uint32_t frames);
+  // Offline microphone on its own clock: opens a device-less input of `input_sample_rate` Hz that feed_input fills
+  // (as the capture callback would); render() then resamples it to the output clock like a real device.
+  void configure_offline_input(std::uint32_t input_sample_rate);
+  std::size_t feed_input(const float* interleaved_stereo, std::size_t frames);
 
  private:
   struct Impl;
