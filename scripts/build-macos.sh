@@ -3,6 +3,9 @@
 #
 # Signing identity (never ad-hoc): set DECKHAND_SIGN_IDENTITY, or put the identity name on
 # the first line of .signing.local in the repository root (that file is not committed).
+#
+# CI only: DECKHAND_SKIP_SIGN=1 builds the bundle without any signing (no identity needed) and prints
+# "UNSIGNED CI BUILD". Without it the script still refuses to build unsigned and never signs ad hoc.
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -15,7 +18,9 @@ IDENTITY=${DECKHAND_SIGN_IDENTITY:-}
 if [ -z "$IDENTITY" ] && [ -f "$ROOT/.signing.local" ]; then
   IDENTITY=$(sed -n '1p' "$ROOT/.signing.local")
 fi
-if [ -z "$IDENTITY" ]; then
+SKIP_SIGN=0
+[ "${DECKHAND_SKIP_SIGN:-}" = 1 ] && SKIP_SIGN=1
+if [ -z "$IDENTITY" ] && [ "$SKIP_SIGN" = 0 ]; then
   echo "error: no signing identity. Set DECKHAND_SIGN_IDENTITY or create .signing.local" >&2
   exit 1
 fi
@@ -56,6 +61,10 @@ sed -e "s/@BUNDLE_ID@/$BUNDLE_ID/" -e "s/@VERSION@/$VERSION/g" \
 # The audio engine runs as a helper process beside the app (see ARCHITECTURE.md). It is signed first, with the same
 # identity and hardened runtime and no entitlements: shared memory and Unix sockets between the two processes need none.
 cp "$BUILD/deckhand-engine" "$APP/Contents/MacOS/deckhand-engine"
+if [ "$SKIP_SIGN" = 1 ]; then
+  echo "UNSIGNED CI BUILD (DECKHAND_SKIP_SIGN=1): $APP is not signed and must not be shipped"
+  exit 0
+fi
 codesign --force --options runtime --timestamp --identifier "$BUNDLE_ID.engine" --sign "$IDENTITY" "$APP/Contents/MacOS/deckhand-engine"
 codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
 codesign --verify --strict "$APP"

@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+    branches: [main, ci-setup]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS (Apple silicon)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SQLCipher (Homebrew)
+        run: brew install sqlcipher
+      - name: Configure
+        run: |
+          # Use whichever OpenSSL the SQLCipher bottle links against, so libcrypto matches.
+          SQLCIPHER=$(brew --prefix sqlcipher)
+          CRYPTO=$(otool -L "$SQLCIPHER/lib/libsqlcipher.dylib" | awk '/libcrypto/ {print $1; exit}')
+          OSSL=$(cd "$(dirname "$CRYPTO")/.." && pwd -P)
+          echo "SQLCipher: $SQLCIPHER  OpenSSL: $OSSL"
+          ls "$OSSL/lib/libcrypto.a" "$OSSL/lib/libssl.a"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DSQLCIPHER_ROOT="$SQLCIPHER" -DOPENSSL_ROOT="$OSSL" -DOPENSSL_CRYPTO="$OSSL/lib/libcrypto.a"
+      - name: Build (core, tests, deckhand-engine, deckhandctl)
+        run: cmake --build build -j "$(sysctl -n hw.ncpu)"
+      - name: Test
+        run: cd build && ctest --output-on-failure -j 2 --timeout 600
+      - name: Build the Swift shell (unsigned)
+        run: DECKHAND_SKIP_SIGN=1 scripts/build-macos.sh
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-macos
+          path: |
+            build/Testing/Temporary/
+            build/build.log
+          if-no-files-found: ignore
+
+  linux:
+    name: Linux (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SDL_TAG: release-3.4.20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config git ca-certificates curl \
+            libsqlcipher-dev libssl-dev zlib1g-dev \
+            libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libasound2-dev \
+            libpango1.0-dev libcairo2-dev libfontconfig-dev \
+            libgl-dev libegl-dev libgles-dev libgbm-dev libdrm-dev libudev-dev libdbus-1-dev libxkbcommon-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev \
+            libwayland-dev libwayland-bin wayland-protocols libdecor-0-dev \
+            fonts-dejavu-core fonts-noto-core xvfb xauth libgl1-mesa-dri ffmpeg
+      - name: Cache SDL3
+        id: sdl-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/sdl3
+          key: sdl3-${{ runner.os }}-${{ runner.arch }}-${{ env.SDL_TAG }}-v1
+      - name: Build SDL3 (not packaged on 24.04)
+        if: steps.sdl-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$SDL_TAG" https://github.com/libsdl-org/SDL "$RUNNER_TEMP/sdl"
+          cmake -S "$RUNNER_TEMP/sdl" -B "$RUNNER_TEMP/sdl/b" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$HOME/sdl3" -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_CAMERA=OFF -DSDL_VULKAN=OFF
+          cmake --build "$RUNNER_TEMP/sdl/b"
+          cmake --install "$RUNNER_TEMP/sdl/b"
+      - name: Configure and build
+        run: |
+          BUILD_DIR="$PWD/build-linux" CMAKE_ARGS="-DCMAKE_PREFIX_PATH=$HOME/sdl3" scripts/build-linux.sh
+      - name: Test
+        run: |
+          # No sound device on purpose (as scripts/linux/smoke.sh): empty ALSA config, no sound server.
+          : > "$RUNNER_TEMP/empty-alsa.conf"
+          export ALSA_CONFIG_PATH="$RUNNER_TEMP/empty-alsa.conf" PULSE_SERVER=unix:/nonexistent/dh-pulse
+          export LIBGL_ALWAYS_SOFTWARE=1 LANG=C.UTF-8 LD_LIBRARY_PATH="$HOME/sdl3/lib:${LD_LIBRARY_PATH:-}"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"; mkdir -m 700 -p "$XDG_RUNTIME_DIR"
+          cd build-linux
+          xvfb-run -a -s "-screen 0 1600x1000x24" ctest --output-on-failure -j 2 --timeout 600
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-linux
+          path: build-linux/Testing/Temporary/
+          if-no-files-found: ignore
+
+  windows:
+    name: Windows (MSVC)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\.vcpkg-bincache
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Restore vcpkg binary cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .vcpkg-bincache
+          key: vcpkg-bin-${{ runner.os }}-x64-windows-static-v1-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-bin-${{ runner.os }}-x64-windows-static-v1-
+      - name: Build (vcpkg ports, configure, build Release)
+        shell: pwsh
+        run: scripts\build-windows.ps1 -Config Release
+      - name: Save vcpkg binary cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .vcpkg-bincache
+          key: vcpkg-bin-${{ runner.os }}-x64-windows-static-v1-${{ github.run_id }}
+      - name: Test
+        shell: pwsh
+        run: |
+          cd build-windows
+          ctest -C Release --output-on-failure --timeout 600
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-windows
+          path: build-windows/Testing/Temporary/
+          if-no-files-found: ignore
