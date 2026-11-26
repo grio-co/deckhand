@@ -27,7 +27,10 @@ static void test_backups() {
     Library lib(db);
     CHECK(lib.db().handle() != nullptr);
     Stmt s(lib.db(), "SELECT max(version) FROM schema_version");
-    CHECK(s.step() && s.i64(0) == kLibrarySchemaVersion);  // bump the constant with migrate()
+    // Bump the constant with migrate(). Without FTS5 in the SQLite build the last step (the
+    // search index) is skipped by design and the schema stays one version behind.
+    CHECK(s.step() && s.i64(0) == (lib.search_indexed() ? kLibrarySchemaVersion : kLibrarySchemaVersion - 1));
+    if (!lib.search_indexed()) std::puts("note: this SQLite build has no FTS5; search index tests run on the fallback");
   }
   CHECK(library_backups(db).empty());  // a new library needs no copy
 
@@ -57,20 +60,25 @@ static void test_backups() {
     CHECK(lib.track_count() == 1 && lib.track_ids(0, "Alpha").size() == 1 && lib.track_ids(0, "Bravo").empty());
   }
   restore_library(db, saved);  // and back again
+  bool indexed = false;
   {
     Library lib(db);
     CHECK(lib.track_count() == 2);
-    // Turn it into a version 2 library, as an older DeckHand left it.
-    lib.db().exec(
-        "DROP TRIGGER tracks_fts_ai; DROP TRIGGER tracks_fts_ad; DROP TRIGGER tracks_fts_au; DROP TABLE tracks_fts;"
-        "UPDATE schema_version SET version = 2;");
+    indexed = lib.search_indexed();
+    // Turn it into a version 2 library, as an older DeckHand left it. (Without FTS5 there is no
+    // version 3 to upgrade to, so the copy-before-upgrade path cannot be exercised.)
+    if (indexed)
+      lib.db().exec(
+          "DROP TRIGGER tracks_fts_ai; DROP TRIGGER tracks_fts_ad; DROP TRIGGER tracks_fts_au; DROP TABLE tracks_fts;"
+          "UPDATE schema_version SET version = 2;");
   }
   {
     Library lib(db);  // upgrades, after copying
   }
   all = library_backups(db);
-  CHECK(all[0].reason == "upgrade" && all[0].schema_version == 2 && all[0].tracks == 2);
+  if (indexed) CHECK(all[0].reason == "upgrade" && all[0].schema_version == 2 && all[0].tracks == 2);
   const std::size_t count = all.size();
+  const int upgrade_copies = indexed ? 1 : 0;
   {
     Library lib(db);  // nothing to upgrade, no new copy
   }
@@ -79,7 +87,7 @@ static void test_backups() {
   for (int i = 0; i < kUpgradeBackupsKept + 2; ++i) backup_library(db, "upgrade");
   int upgrades = 0, others = 0;
   for (const auto& b : library_backups(db)) (b.reason == "upgrade" ? upgrades : others)++;
-  CHECK(upgrades == kUpgradeBackupsKept && others == static_cast<int>(count) - 1);
+  CHECK(upgrades == kUpgradeBackupsKept && others == static_cast<int>(count) - upgrade_copies);
 
   // The sync passphrase set since the copy was made survives a restore, and only the owner can read the copies.
   {

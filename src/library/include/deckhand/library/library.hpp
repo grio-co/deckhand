@@ -132,6 +132,10 @@ class Library {
   std::string setting(const std::string& key, const std::string& fallback = {});
   void set_setting(const std::string& key, const std::string& value);
 
+  // True when the substring search index exists. SQLite builds without FTS5 (some distribution
+  // packages) run without it: search falls back to a scan and the schema stays at version 2.
+  bool search_indexed() const { return fts_; }
+
  private:
   void migrate();
   bool use_fts(const std::string& search) const;
