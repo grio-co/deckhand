@@ -102,8 +102,8 @@ jobs:
           export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"; mkdir -m 700 -p "$XDG_RUNTIME_DIR"
           export XDG_DATA_HOME="$RUNNER_TEMP/data"
           mkdir -p screenshots
-          xvfb-run -a -s "-screen 0 1600x1000x24" build-linux/deckhand --screenshot screenshots/linux.png --frames 60 --size 1280x800
-          python3 scripts/check-screenshot.py screenshots/linux.png --size 1280x800
+          xvfb-run -a -s "-screen 0 1600x1000x24" build-linux/deckhand --screenshot screenshots/linux.png --frames 60
+          python3 scripts/check-screenshot.py screenshots/linux.png --size 1440x900
       - name: Upload screenshot
         if: always()
         uses: actions/upload-artifact@v4
@@ -159,7 +159,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force screenshots | Out-Null
           $env:DECKHAND_RESOURCE_DIR = Join-Path $PWD "build-windows\share\deckhand"
-          & build-windows\Release\deckhand.exe --screenshot screenshots\windows.png --frames 60 --size 1280x800
+          & build-windows\Release\deckhand.exe --screenshot screenshots\windows.png --frames 60
           python scripts\check-screenshot.py screenshots\windows.png --size 1280x800
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload screenshot

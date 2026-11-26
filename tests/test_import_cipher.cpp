@@ -27,7 +27,8 @@ int main() {
 #else
   CHECK(import_v6_available());
   const fs::path dir = fs::temp_directory_path() / "deckhand_test_import_cipher";
-  fs::remove_all(dir);
+  std::error_code ec0;
+  fs::remove_all(dir, ec0);
   fs::create_directories(dir);
   const std::string src = (dir / "source.db").string();
   const std::string key = "test-key-not-a-real-one";
@@ -115,7 +116,8 @@ int main() {
     CHECK(failed);
   }
 
-  fs::remove_all(dir);
+  std::error_code ec;  // cleanup is best effort: Windows may still hold a freshly closed file for a moment
+  fs::remove_all(dir, ec);
   std::puts("import cipher tests passed");
   return 0;
 #endif
