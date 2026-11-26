@@ -330,7 +330,9 @@ static void test_smart_playlists() {
   CHECK(q({rule(F::Genre, 0, 0, "dub"), rule(F::Rating, 4)}, false) == sorted({t1, t4}));   // any
   CHECK(q({rule(F::Genre, 0, 0, "house")}, true, "midn").empty());                          // plus the text search
   CHECK(q({rule(F::Genre, 0, 0, "house")}, true, "lost") == V{t3});
-  CHECK(q({rule(F::Genre, 0, 0, "house")}, true, "lo") == V{t3});                           // short term: LIKE path
+  // Short term: LIKE path. The term must not occur in the temp folder the test files live in
+  // (search also matches the file path; "lo" matched ...\AppData\Local\... on Windows).
+  CHECK(q({rule(F::Genre, 0, 0, "house")}, true, "cy") == V{t3});
   // the quick filter's tempo rule: within 6 % of a tempo, its half or its double
   CHECK(q({rule(F::BpmNear, 120, 0.06)}) == sorted({t1, t3}));          // 124 and 126; 132 is 10 % away, 70 is no half or double
   CHECK(q({rule(F::BpmNear, 142, 0.06)}) == V{t4});                      // 70 is about half of 142
