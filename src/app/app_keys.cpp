@@ -198,6 +198,10 @@ void App::run_key_call(const KeyCall& c) {
   }
   int deck = 0, slot = 0;
   std::string action, error;
+  if (parse_automix_control(c.control, action)) {
+    if (!automix_control(action, c.has_value, c.value, error) && !error.empty()) status_note_ = error;
+    return;
+  }
   if (parse_prep_control(c.control, deck, action, slot)) {
     PrepArgs a;
     a.has_value = c.has_value;
@@ -277,6 +281,8 @@ void App::do_ui_action(const std::string& name, bool has_value, double value) {
       const double now_s = pv.position / std::max(1.0, pv.sample_rate);
       apply_control(*engine_, "preview.seek", true, std::max(0.0, now_s + value), error);
     }
+  } else if (n == "queue_add" || n == "queue_play_next") {
+    queue_selected(n == "queue_play_next");
   } else if (n == "add_to_prepare") {
     std::int64_t target = 0;
     for (const PlaylistNode& p : lib_->playlists())

@@ -25,6 +25,10 @@ std::vector<ControlInfo> list_controls();
 // name api_prep takes ("grid.shift", "cue.memory_set"...).
 bool parse_prep_control(std::string_view name, int& deck, std::string& action, int& slot);
 
+// Automix and play-queue controls (automix.run, automix.skip, automix.next_type ...). The application carries them out
+// (apply_control refuses them); `action` is the part after "automix.".
+bool parse_automix_control(std::string_view name, std::string& action);
+
 // Applies a control. has_value = false means "press" for triggers/buttons and "toggle" for toggles.
 // Returns false and sets error when the name or value is not valid.
 bool apply_control(IEngine& engine, std::string_view name, bool has_value, double value, std::string& error);

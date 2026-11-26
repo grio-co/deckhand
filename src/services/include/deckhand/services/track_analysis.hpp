@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "deckhand/analysis/analysis.hpp"
 #include "deckhand/audio/track.hpp"
 #include "deckhand/library/library.hpp"
 
@@ -17,7 +18,13 @@ struct TrackAnalysis {
   bool has_audible = false;
   double first_audible_ms = 0, last_audible_ms = 0;
   double suggested_cue_ms = 0;  // load cue: first confident downbeat at or after the first sound
+  bool has_phrases = false;     // phrase analysis succeeded (a track too short or silent has none)
+  StoredPhrases phrases;        // shaped for Library::set_phrases
 };
+
+// Phrase data between the analysis module and the library's stored form.
+StoredPhrases to_stored_phrases(const PhraseAnalysis& p);
+PhraseAnalysis from_stored_phrases(const StoredPhrases& s);
 
 TrackAnalysis analyse_track(const TrackAudio& audio);
 

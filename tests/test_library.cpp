@@ -1,4 +1,5 @@
 // Library editing: playlists, sorting, tags, relinking, history, settings, migration.
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -32,9 +33,15 @@ static void test_backups() {
 #ifdef DECKHAND_VENDORED_SQLITE
     CHECK(lib.search_indexed());
 #endif
-    CHECK(s.step() && s.i64(0) == kLibrarySchemaVersion && kLibrarySchemaVersion == 6);
+    CHECK(s.step() && s.i64(0) == kLibrarySchemaVersion && kLibrarySchemaVersion == 8);
     Stmt cols(lib.db(), "SELECT count(*) FROM pragma_table_info('tracks') WHERE name IN ('file_size', 'content_hash')");
     CHECK(cols.step() && cols.i64(0) == 2);  // schema 6: duplicate finder columns
+    Stmt auto7(lib.db(), "SELECT (SELECT count(*) FROM pragma_table_info('tracks') WHERE name = 'last_sound_ms'),"
+                         " (SELECT count(*) FROM pragma_table_info('automix_points')), (SELECT count(*) FROM pragma_table_info('play_queue')),"
+                         " (SELECT count(*) FROM pragma_table_info('play_queue_history'))");
+    CHECK(auto7.step() && auto7.i64(0) == 1 && auto7.i64(1) == 6 && auto7.i64(2) == 10 && auto7.i64(3) == 4);  // schema 7: automix, play queue
+    Stmt ph8(lib.db(), "SELECT (SELECT count(*) FROM pragma_table_info('track_phrases')), (SELECT count(*) FROM pragma_table_info('phrase_sections'))");
+    CHECK(ph8.step() && ph8.i64(0) == 10 && ph8.i64(1) == 14);  // schema 8: phrases
     if (!lib.search_indexed()) std::puts("note: this SQLite build has no FTS5; search index tests run on the fallback");
   }
   CHECK(library_backups(db).empty());  // a new library needs no copy
@@ -376,7 +383,80 @@ static void test_smart_playlists() {
   std::printf("smart playlists ok (search index %s)\n", lib.search_indexed() ? "on" : "off");
 }
 
+// Schema 8: phrases round trip, removal, and the migration from a schema 7 library.
+static void test_phrases_storage() {
+  const std::string path = (std::filesystem::temp_directory_path() / "deckhand_test_library_phrases.db").string();
+  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
+  std::int64_t id = 0;
+  {
+    Library lib(path);
+    NewTrack t;
+    t.path = "/music/p.mp3";
+    t.title = "P";
+    id = lib.upsert_track(t);
+    CHECK(!lib.phrases(id).has_value());
+    StoredPhrases p;
+    p.gridded = true;
+    p.origin_ms = 123.5;
+    p.pickup_ms = 12.25;
+    p.bar_ms = 1875;
+    p.total_bars = 3;
+    p.bar_starts_ms = {123.5, 1998.5, 3873.5, 5748.5};
+    p.bar_energy = {0.25f, 0.5f, 1.0f};
+    StoredPhraseSection a, b;
+    a.start_ms = 123.5;
+    a.end_ms = 3873.5;
+    a.start_bar = 0;
+    a.end_bar = 2;
+    a.bars = 2;
+    a.energy = 3;
+    a.label = "intro";
+    a.kind = "intro";
+    a.label_confidence = 0.75;
+    a.boundary_confidence = 1;
+    a.phrase_aligned = true;
+    a.kick = 0.5;
+    b = a;
+    b.start_ms = 3873.5;
+    b.end_ms = 5748.5;
+    b.start_bar = 2;
+    b.end_bar = 3;
+    b.bars = 1;
+    b.label = "drop";
+    b.kind = "chorus";
+    b.energy = 9;
+    p.sections = {a, b};
+    lib.set_phrases(id, p);
+    lib.set_phrases(id, p);  // replaces, never duplicates
+    const auto r = lib.phrases(id);
+    CHECK(r && r->version == kPhraseAnalysisVersion && r->gridded && !r->time_based && r->total_bars == 3);
+    CHECK(r && r->sections.size() == 2 && r->sections[1].label == "drop" && r->sections[1].energy == 9 && r->sections[0].phrase_aligned);
+    CHECK(r && r->bar_starts_ms.size() == 4 && std::abs(r->bar_starts_ms[1] - 1998.5) < 0.01 && r->bar_energy.size() == 3 &&
+          std::abs(r->bar_energy[0] - 0.25f) < 0.001f);
+    CHECK(lib.tracks_with_phrases().size() == 1);
+    StripKinds k;
+    k.phrases = true;
+    const StripResult dry = lib.strip_analysis({id}, k, false, true);
+    CHECK(dry.cleared.count("phrases") && lib.phrases(id).has_value());
+    const StripResult real = lib.strip_analysis({id}, k);
+    CHECK(real.cleared.count("phrases") && !lib.phrases(id).has_value() && lib.tracks_with_phrases().empty());
+    lib.set_phrases(id, p);
+    // Downgrade to schema 7 as an older DeckHand left it.
+    lib.db().exec("DROP TABLE track_phrases; DROP TABLE phrase_sections; UPDATE schema_version SET version = 7;");
+  }
+  {
+    Library lib(path);  // migrates 7 -> 8
+    Stmt s(lib.db(), "SELECT max(version) FROM schema_version");
+    CHECK(s.step() && s.i64(0) == 8);
+    CHECK(!lib.phrases(id).has_value());  // tracks analysed before get phrases on their next analysis
+    lib.set_phrases(id, StoredPhrases{});
+    CHECK(lib.phrases(id).has_value());
+  }
+  for (const char* suffix : {"", "-wal", "-shm"}) std::remove((path + suffix).c_str());
+}
+
 int main() {
+  test_phrases_storage();
   const std::string path = (std::filesystem::temp_directory_path() / "deckhand_test_library_edit.db").string();
   std::remove(path.c_str());
   std::remove((path + "-wal").c_str());

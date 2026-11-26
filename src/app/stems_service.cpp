@@ -125,6 +125,7 @@ StemService::Result StemService::install(const std::string& model_id, bool accep
   install_cancel_ = false;
   install_thread_ = std::thread([this, entry] {
     stems::InstallHooks hooks;
+    hooks.download = downloader_;
     if (entry.kind == "demucs") hooks.convert = stems::demucs_converter(data_dir_, fs::path(resource_dir_) / "stem-models" / "skeletons");
     float last = -1;
     const stems::InstallResult res = stems::install_model(

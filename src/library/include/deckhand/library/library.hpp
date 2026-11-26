@@ -35,6 +35,50 @@ struct TrackCues {
   std::optional<double> main_cue_ms;    // set by the user (the main cue point)
   std::optional<double> load_cue_ms;    // analysis: first confident downbeat at or after the first sound
   std::optional<double> first_sound_ms; // analysis: first audible moment
+  std::optional<double> last_sound_ms;  // analysis: end of the last audible sound (schema 7); automix uses it for the default mix-out
+};
+
+// ---- automix (schema 7) --------------------------------------------------------------------------------------------
+// Phrase analysis as stored per track (schema 8). Plain data so the library needs no analysis module.
+constexpr int kPhraseAnalysisVersion = 1;  // bump when the phrase algorithm changes: older rows are re-analysed lazily
+struct StoredPhraseSection {
+  double start_ms = 0, end_ms = 0;
+  int start_bar = -1, end_bar = -1, bars = 0, energy = 5;
+  std::string label, kind;
+  double label_confidence = 0, boundary_confidence = 0, kick = 0;
+  bool phrase_aligned = false;
+};
+struct StoredPhrases {
+  int version = kPhraseAnalysisVersion;
+  bool gridded = false, time_based = false;
+  double origin_ms = 0, pickup_ms = 0, bar_ms = 0;
+  int total_bars = 0;
+  std::vector<double> bar_starts_ms;
+  std::vector<float> bar_energy;
+  std::vector<StoredPhraseSection> sections;
+};
+
+// Per-track mixing points and the same fields as per-queue-entry overrides. Every field is optional: unset = automatic
+// (mix-in: main cue, else load cue; mix-out: N bars before the last audible sound; length and type: the global setting).
+struct AutomixPoints {
+  std::optional<double> mix_in_ms;           // where the track starts playing when it is mixed in
+  std::optional<double> mix_out_ms;          // where the track has been mixed out completely (the transition ends here)
+  std::optional<double> transition_beats;    // preferred transition length
+  std::optional<std::string> transition_type;  // "crossfade" | "cut" | "fade" | "echo_out"
+  std::optional<double> max_play_ms;         // longest time the track plays, counted from its mix-in
+  bool empty() const { return !mix_in_ms && !mix_out_ms && !transition_beats && !transition_type && !max_play_ms; }
+};
+
+// One row of the persisted play queue. `pending` is the entry whose transition has been scheduled but has not started
+// (it is put back at the front when the application restarts).
+struct QueueRow {
+  std::int64_t entry_id = 0, track_id = 0;
+  bool play_next = false;
+  bool pending = false;
+  AutomixPoints overrides;
+};
+struct QueueHistoryRow {
+  std::int64_t id = 0, entry_id = 0, track_id = 0, played_at_ms = 0;
 };
 
 struct PlaylistNode {
@@ -305,6 +349,25 @@ class Library {
   TrackCues track_cues(std::int64_t track_id);
   void set_main_cue_ms(std::int64_t track_id, std::optional<double> ms);
   void set_analysis_cues(std::int64_t track_id, std::optional<double> load_cue_ms, std::optional<double> first_sound_ms);
+  void set_last_sound_ms(std::int64_t track_id, std::optional<double> ms);  // not journalled (derived data)
+  // Phrase sections and compact per-bar data (derived data, not journalled). nullopt when never analysed.
+  std::optional<StoredPhrases> phrases(std::int64_t track_id);
+  void set_phrases(std::int64_t track_id, const StoredPhrases& p);
+  void clear_phrases(std::int64_t track_id);
+  std::vector<std::int64_t> tracks_with_phrases();  // ids, for the cue-habit summary
+  // Automix points of a track (empty when none are set); set with an empty value removes them. Not journalled.
+  AutomixPoints automix_points(std::int64_t track_id);
+  void set_automix_points(std::int64_t track_id, const AutomixPoints& points);
+  // The play queue: the rows in play order (the pending one first), replaced as a whole. Rows of tracks that no longer
+  // exist are kept (the player skips them).
+  std::vector<QueueRow> play_queue();
+  void save_play_queue(const std::vector<QueueRow>& rows);
+  // What was played, oldest first in storage; queue_history returns the newest `limit` entries newest first.
+  std::int64_t add_queue_history(std::int64_t entry_id, std::int64_t track_id, std::int64_t played_at_ms);
+  std::vector<QueueHistoryRow> queue_history(int limit = 100);
+  std::optional<QueueHistoryRow> pop_queue_history();  // removes and returns the newest entry
+  void clear_queue_history();
+  std::int64_t max_queue_entry_id();  // highest entry id in the queue and its history (0 when empty)
   void replace_beatgrid(std::int64_t track_id, const std::vector<BeatSection>& grid);
   // A hand-edited grid, as one journalled batch: sections, tempo (`bpm`, when given), lock (when given) and, by `mode`,
   // the cues that follow it (Always: moved now; Ask: only proposed, apply_cue_follow() moves them; Never: left).

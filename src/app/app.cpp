@@ -3,6 +3,7 @@
 // code-drawn fallback in app_legacy.cpp.
 #include "deckhand/sync/sync.hpp"
 #include "app_impl.hpp"
+#include "deckhand/analysis/analysis.hpp"
 
 #include <cctype>
 
@@ -57,6 +58,7 @@ App::App(const dh_platform& platform, const dh_config& config)
   input_channel_ = std::clamp(std::atoi(lib_->setting("audio.input_channel", "1").c_str()) - 1, 0, 61);
   input_stereo_ = lib_->setting("audio.input_stereo", "0") == "1";
   talk_depth_ = std::clamp(static_cast<float>(std::atof(lib_->setting("audio.mic_depth", "-12").c_str())), -24.0f, 0.0f);
+  show_phrases_ = lib_->setting("ui.show_phrases", "1") != "0";
   variant_ = lib_->setting("ui.layout", "main") == "four" ? "four" : "main";
   load_prep_settings();
   load_keymap();
@@ -82,6 +84,7 @@ App::App(const dh_platform& platform, const dh_config& config)
     start_audio();
   }
   apply_input(false);
+  setup_automix();
   loader_ = std::thread([this] { loader_main(); });
   control_ = std::thread([this] { control_main(); });
   if (remote_ && remote_->attached_existing()) {
@@ -396,6 +399,7 @@ void App::control_main() {
     EngineEvent e;
     while (engine_->poll(e)) {
       if (e.type == EventType::ScheduledFired || e.type == EventType::ScheduledDropped) {
+        if (automix_) automix_->on_engine_event(e);
         if (api_) api_->engine_event(e);  // only ever produced by API requests, so api_ exists
         continue;
       }
@@ -428,6 +432,7 @@ void App::control_main() {
         }
       }
     }
+    if (automix_) automix_->tick();
     DeckView views[kMaxDecks];
     for (int i = 0; i < kMaxDecks; ++i) views[i] = engine_->deck(i);
     const double now = now_seconds();
@@ -596,6 +601,8 @@ void App::run_job(Library& lib, const Job& j) {
     }
     case Job::SaveTrackColor: lib.set_track_color(j.track_id, j.color); rows_dirty_ = true; break;
     case Job::Reanalyse: reanalyse(lib, j.deck, j.track_id); break;
+    case Job::SuggestCues: suggest_cues_job(lib, j.deck, j.track_id, j.flag); break;
+    case Job::SyncCues: sync_deck_cues(lib, j.track_id); break;
     case Job::PreviewLoad: load_preview(lib, j.track_id, j.flag); break;
     case Job::Export: {
       {
@@ -766,6 +773,10 @@ void App::restore_sampler(Library& lib, bool reload) {
 
 void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_only) {
   const auto row = lib.track(track_id);
+  if (deck >= 0 && deck < kMaxDecks && !row) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    load_failed_[deck] = track_id;
+  }
   if (!row || deck < 0 || deck >= kMaxDecks) return;
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
@@ -777,6 +788,7 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
   if (!audio) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     decks_[deck].loading = false;
+    load_failed_[deck] = track_id;
     decks_[deck].error = std::filesystem::exists(row->path) ? error : T("deck.file_not_found", {{"path", row->path}});
     DH_LOG(Warn, "deck %d: %s", deck + 1, decks_[deck].error.c_str());
     return;
@@ -794,7 +806,10 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
   if (grid.empty() || !gain) {  // not analysed yet: do it once and keep the result
     const TrackAnalysis a = analyse_track(*audio);
     EditScope analysis_scope("analysis");  // what is stored below is DeckHand's own result, not a user edit
-    if (a.has_audible) lib.set_analysis_cues(track_id, a.suggested_cue_ms, a.first_audible_ms);
+    if (a.has_audible) {
+      lib.set_analysis_cues(track_id, a.suggested_cue_ms, a.first_audible_ms);
+      if (a.last_audible_ms > 0) lib.set_last_sound_ms(track_id, a.last_audible_ms);
+    }
     if (grid.empty() && a.has_grid && !grid_locked) {  // a locked grid is never replaced by analysis
       grid = a.grid;
       lib.replace_beatgrid(track_id, grid);
@@ -805,12 +820,17 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
       key_text = a.key;
       lib.set_key(track_id, key_text);
     }
+    if (a.has_phrases) lib.set_phrases(track_id, a.phrases);
     if (a.has_gain) {
       gain = a.gain_db;
       lib.set_gain_db(track_id, a.gain_db);
     }
     rows_dirty_ = true;
     DH_LOG(Info, "analysed %s: %.2f BPM, key %s, gain %+.1f dB", row->title.c_str(), a.bpm, a.key.c_str(), a.gain_db);
+  }
+  if (!lib.track_cues(track_id).last_sound_ms && !audio->pcm.empty()) {  // automix's default mix-out needs the end of the last sound
+    const AudibleRange range = find_audible_range(audio->pcm.data(), audio->frames, audio->sample_rate);
+    if (range.ok) lib.set_last_sound_ms(track_id, range.last_ms);
   }
   loaded->cue_point = initial_cue_ms(lib, track_id, *audio) / 1000.0 * sr;
   for (const BeatSection& b : grid) {
@@ -837,6 +857,7 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
   std::sort(loaded->memory_cues.begin(), loaded->memory_cues.end());
   std::sort(info.mem.begin(), info.mem.end(), [](const MemCue& a, const MemCue& b) { return a.frame < b.frame; });
   info.grid_locked = grid_locked;
+  if (auto sp = lib.phrases(track_id)) info.phrases = std::move(*sp);
 
   info.row = *row;
   info.row.key = key_text;

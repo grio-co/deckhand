@@ -56,13 +56,13 @@ Skin names are the public API; the application translates them to its control ta
               tempo (fader, -1..1)  tempo_range (button: steps 6/10/16/100 %, label shows the range)
               key_shift (label)  key_shift.minus .plus .reset (buttons)
               fx[S].select (button: steps through the effects, shows the name)  fx[S].on  fx[S].wet (fader)
-              jog  waveform (mode=zoomed|overview; overview seeks on click/drag)  pads (hot cues, cols= rows=)
+              jog  waveform (mode=zoomed|overview; overview seeks on click/drag; phrases=off hides the phrase-section bands, which Settings can also hide)  pads (hot cues, cols= rows=)
               load (button: loads the selected library track)
               metronome (button: click on every grid beat, headphones only)
               grid.edit (button + `show=`: edit mode, the waveform draws the grid heavily)  grid.bpm (label)  grid.lock (button)
               grid.shift_m10 .shift_m1 .shift_p1 .shift_p10 (ms)  grid.first_beat .downbeat .cycle  grid.bpm_m01 .bpm_m001 .bpm_p001 .bpm_p01
               grid.half .double .tap .reanalyse .undo .add_section .remove_section (buttons; they edit the loaded track's grid)
-              cue.memory_set .memory_delete .memory_prev .memory_next .loop_save .loop_recall (buttons)
+              cue.memory_set .memory_delete .memory_prev .memory_next .loop_save .loop_recall .suggest (buttons; suggest fills free hot slots from the phrase analysis)
     mixer.    crossfader master.level (meter) master.volume headphone.volume headphone.mix sampler.level
               ch[N].  trim eq.high eq.mid eq.low filter fader (knobs, faders)  level (meter)  cue (headphone cue)
               metronome.level (fader)

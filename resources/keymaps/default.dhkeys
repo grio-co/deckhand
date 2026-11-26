@@ -44,6 +44,7 @@ bind shift+a deck1.cue_set desc="Set the main cue point at the playhead"
 bind shift+s deck1.pfl
 bind shift+d deck1.key_lock
 bind shift+f deck1.tempo 0 desc="Reset the tempo fader to zero"
+bind mod+g deck1.suggest_cues desc="Suggest cues for deck 1 from the phrase analysis (free hot slots only)"
 bind shift+g deck1.memory_cue_delete desc="Delete the memory cue nearest the playhead"
 bind z deck1.loop_in
 bind x deck1.loop_out
@@ -86,6 +87,7 @@ bind shift+semicolon deck2.cue_set desc="Set the main cue point at the playhead"
 bind shift+l deck2.pfl
 bind shift+k deck2.key_lock
 bind shift+j deck2.tempo 0 desc="Reset the tempo fader to zero"
+bind mod+j deck2.suggest_cues desc="Suggest cues for deck 2 from the phrase analysis (free hot slots only)"
 bind shift+h deck2.memory_cue_delete desc="Delete the memory cue nearest the playhead"
 bind slash deck2.loop_in
 bind period deck2.loop_out
@@ -128,6 +130,7 @@ bind alt+shift+a deck3.cue_set desc="Set the main cue point at the playhead"
 bind alt+shift+s deck3.pfl
 bind alt+shift+d deck3.key_lock
 bind alt+shift+f deck3.tempo 0 desc="Reset the tempo fader to zero"
+bind mod+shift+g deck3.suggest_cues desc="Suggest cues for deck 3 from the phrase analysis (free hot slots only)"
 bind alt+shift+g deck3.memory_cue_delete desc="Delete the memory cue nearest the playhead"
 bind alt+z deck3.loop_in
 bind alt+x deck3.loop_out
@@ -170,6 +173,7 @@ bind alt+shift+semicolon deck4.cue_set desc="Set the main cue point at the playh
 bind alt+shift+l deck4.pfl
 bind alt+shift+k deck4.key_lock
 bind alt+shift+j deck4.tempo 0 desc="Reset the tempo fader to zero"
+bind mod+shift+j deck4.suggest_cues desc="Suggest cues for deck 4 from the phrase analysis (free hot slots only)"
 bind alt+shift+h deck4.memory_cue_delete desc="Delete the memory cue nearest the playhead"
 bind alt+slash deck4.loop_in
 bind alt+period deck4.loop_out
@@ -224,6 +228,12 @@ bind mod+shift+p ui.add_to
 bind mod+i ui.edit_track
 bind mod+z ui.undo_edit context=browser
 
+# ---- play queue and automix
+bind mod+e ui.queue_add desc="Add the selected tracks to the end of the play queue"
+bind mod+shift+e ui.queue_play_next desc="Play the selected tracks next"
+bind mod+shift+a automix.run desc="Start or stop automix"
+bind mod+shift+k automix.pause desc="Pause or resume automix"
+bind mod+shift+n automix.skip desc="Automix: start the next transition now, on the next bar"
 # ---- mixer
 bind mod+left mixer.crossfader 0 desc="Crossfader fully left"
 bind mod+right mixer.crossfader 1 desc="Crossfader fully right"

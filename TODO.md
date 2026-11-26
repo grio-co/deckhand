@@ -75,9 +75,11 @@ them in [CHANGELOG.md](CHANGELOG.md).
 Library and discovery
 - [x] Analysis: BPM, variable beat grid, key, loudness, three-band waveforms
 - [x] First-sound load cue (user's main cue remembered), grid drift fix, downbeat tests (synthetic audio only)
-- [ ] Phrase analysis (intro / verse / chorus / breakdown / outro) shown on the waveform
+- [~] Phrase analysis shown on the waveform (tuned on synthetic tracks; unseen on screen; builds at
+      150 BPM and above can read as drops)
 - [ ] Vocal position detection on the waveform (falls out of stems)
-- [ ] Automatic hot cue and memory cue suggestions from phrases and from the user's own cue habits
+- [~] Cue suggestions from phrases and the user's habits (free slots only, undoable; suggested cues
+      currently feed back into the habit summary)
 - [ ] Track suggestions from the library by tempo, key, genre, energy and play history
 - [~] Two-player audition for set preparation (preview player exists; add a second player, EQ, crossfader)
 - [~] Browser: column view, filters and smart playlists exist; add layout presets, a second browser
@@ -126,8 +128,8 @@ Gaps in the incumbent that DeckHand should close (owner's list, 2026-11-26)
       needed (within ~10 ms on synthetic tests); untested on real recordings
 - [x] Cues follow the grid (API; the in-app confirm is still a status line only)
 - [x] Remove analysis selectively across many tracks (API and CLI)
-- [ ] Automix with per-track in/out points, play length, transition type and beat-matched hand-over;
-      queue with "play next" insertion instead of append-only
+- [~] Automix and play queue with per-track points and "play next" (simulation-tested; never heard;
+      untested with the separate engine process; fader/EQ moves are quarter-beat steps)
 - [x] Duplicate finder with merge (panel, API, CLI)
 - [ ] Opt-in metadata and key fill from an open music database
 - [~] Effect chains per deck/master/mic/sampler (engine, controls, API; no chain editor on screen

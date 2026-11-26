@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -690,9 +692,16 @@ void test_speed() {
     (void)i;
     break;
   }
+  AnalysisOptions no_phr;
+  no_phr.phrases = false;
+  const auto t00 = std::chrono::steady_clock::now();
+  AnalysisResult r0 = analyse(p.d.data(), p.frames, kRate, no_phr);
+  const double s0 = std::chrono::duration<double>(std::chrono::steady_clock::now() - t00).count();
   const auto t0 = std::chrono::steady_clock::now();
   AnalysisResult r = analyse(p.d.data(), p.frames, kRate);
   const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("  phrases off: %.3f s, on: %.3f s (phrases ok=%d, %zu sections)\n", s0, s, r.phrases.ok, r.phrases.sections.size());
+  CHECK(r0.beats.ok);
   const double track_s = static_cast<double>(p.frames) / kRate;
   std::printf("  6-minute track: %.3f s (%.0fx real time), bpm %.2f, sections %zu, ok=%d\n", s, track_s / std::max(s, 1e-9),
               r.beats.bpm, r.beats.sections.size(), r.ok);
@@ -702,6 +711,409 @@ void test_speed() {
   // 6-minute track). Machines and compilers differ by 3x or more (3.3 s was measured under MSVC Release on a desktop PC), a
   // shared CI runner is slower still, and an accidental O(n^2) would take minutes, so this still catches that.
   CHECK(s < track_s / 30.0);
+}
+
+// ---------------------------------------------------------------- phrases and cue suggestions
+// Synthetic arrangements built from parts. Real music is much harder (vocals, fills, gradual changes, sections that
+// differ only in melody); these numbers show the plumbing works and the heuristics are sane, not how they do on a library.
+
+enum Part { kKick = 1, kHat = 2, kBass = 4, kPad = 8, kRiser = 16, kLead = 32, kClap = 64 };
+
+struct SecSpec {
+  const char* label;  // expected rich label
+  int bars;
+  int parts;
+};
+
+struct Layout {
+  std::vector<double> start;  // seconds, bar starts (size = bars + 1)
+  std::vector<double> beat;   // beat length of each bar, seconds
+};
+
+Layout make_layout(double bpm0, double bpm1, double first_bar_s, int bars) {
+  Layout L;
+  double t = first_bar_s;
+  for (int b = 0; b < bars; ++b) {
+    const double bpm = bpm0 + (bpm1 - bpm0) * double(b) / std::max(1, bars - 1);
+    L.start.push_back(t);
+    L.beat.push_back(60.0 / bpm);
+    t += 4 * 60.0 / bpm;
+  }
+  L.start.push_back(t);
+  return L;
+}
+
+void add_riser(Pcm& p, double t0, double dur, float amp) {
+  const std::size_t n = static_cast<std::size_t>(dur * kRate);
+  float prev = 0;
+  for (std::size_t i = 0; i < n; ++i) {
+    const float x = float(i) / float(n);
+    const float n0 = noise();
+    p.add(t0, i, amp * x * x * (n0 - 0.7f * prev));
+    prev = n0;
+  }
+}
+
+void render_bar(Pcm& p, double t0, double T, int parts, int bar_in_sec, int sec_bars, int chord) {
+  static const int chords[4][3] = {{57, 60, 64}, {53, 57, 60}, {48, 52, 55}, {55, 59, 62}};
+  static const int roots[4] = {45, 41, 48, 43};
+  const bool kick = parts & kKick;
+  for (int k = 0; k < 4; ++k) {
+    const double t = t0 + k * T;
+    if (kick) add_kick(p, t, 0.9f);
+    if (parts & kHat) add_hat(p, t + T / 2, 0.6f);
+    if ((parts & kClap) && (k == 1 || k == 3)) add_snare(p, t, 0.5f);
+    if (parts & kBass) add_note(p, t + T / 2, T * 0.4, midi_hz(roots[chord]), 0.28f, 2);
+    if (parts & kLead) {
+      add_note(p, t, T * 0.2, midi_hz(chords[chord][(k + bar_in_sec) % 3] + 24), 0.07f, 2);
+      add_note(p, t + T / 2, T * 0.2, midi_hz(chords[chord][(k + bar_in_sec + 1) % 3] + 24), 0.07f, 2);
+    }
+  }
+  if (parts & kPad) {
+    const float amp = (parts & kKick) ? 0.05f : 0.11f;
+    for (int n = 0; n < 3; ++n) add_note(p, t0, 4 * T * 0.99, midi_hz(chords[chord][n]), amp, 3);
+  }
+  if ((parts & kRiser) && bar_in_sec == 0) add_riser(p, t0, 4 * T * sec_bars, 0.3f);
+}
+
+struct Rendered {
+  Pcm pcm;
+  Layout L;
+  AnalysisResult r;
+  std::vector<SecSpec> secs;
+  std::vector<int> start_bar;  // of each section
+  explicit Rendered(double seconds) : pcm(seconds) {}
+};
+
+std::vector<SecSpec> classic(int unit, int drop_len, int breakdown_len) {
+  return {{"intro", unit, kKick | kHat},
+          {"build", unit, kKick | kHat | kPad | kRiser},
+          {"drop", drop_len, kKick | kHat | kBass | kPad | kLead | kClap},
+          {"breakdown", breakdown_len, kPad},
+          {"drop", drop_len, kKick | kHat | kBass | kPad | kLead | kClap},
+          {"outro", unit, kKick | kHat}};
+}
+
+// pickup_beats: kick-only beats before the first downbeat (audio starts at 0).
+std::unique_ptr<Rendered> render_arrangement(double bpm0, double bpm1, const std::vector<SecSpec>& secs, int pickup_beats,
+                                             double lead_s) {
+  int bars = 0;
+  for (const auto& s : secs) bars += s.bars;
+  const double T0 = 60.0 / bpm0;
+  const double first = pickup_beats > 0 ? pickup_beats * T0 : lead_s;
+  Layout L = make_layout(bpm0, bpm1, first, bars);
+  auto R = std::make_unique<Rendered>(L.start.back() + 1.0);
+  for (int k = 0; k < pickup_beats; ++k) {
+    add_kick(R->pcm, k * T0, 0.9f);
+    add_hat(R->pcm, k * T0 + T0 / 2, 0.6f);
+  }
+  int bar = 0;
+  for (const auto& s : secs) {
+    R->start_bar.push_back(bar);
+    for (int b = 0; b < s.bars; ++b, ++bar)
+      render_bar(R->pcm, L.start[static_cast<std::size_t>(bar)], L.beat[static_cast<std::size_t>(bar)], s.parts, b, s.bars, bar % 4);
+  }
+  R->L = std::move(L);
+  R->secs = secs;
+  return R;
+}
+
+struct PhraseScore {
+  int bound_total = 0, bound_hit = 0, extra = 0, label_total = 0, label_hit = 0, kind_hit = 0;
+};
+
+PhraseScore score_phrases(const char* name, const Rendered& R) {
+  PhraseScore sc;
+  const PhraseAnalysis& pa = R.r.phrases;
+  for (std::size_t i = 1; i < R.secs.size(); ++i) {
+    const std::size_t bar = static_cast<std::size_t>(R.start_bar[i]);
+    const double want = R.L.start[bar] * 1000.0, beat_ms = R.L.beat[bar] * 1000.0;
+    ++sc.bound_total;
+    for (const auto& s : pa.sections)
+      if (std::fabs(s.start_ms - want) <= beat_ms) {
+        ++sc.bound_hit;
+        break;
+      }
+  }
+  sc.extra = std::max(0, int(pa.sections.size()) - 1 - sc.bound_hit);
+  for (std::size_t i = 0; i < R.secs.size(); ++i) {
+    const std::size_t a = static_cast<std::size_t>(R.start_bar[i]);
+    const std::size_t b = a + static_cast<std::size_t>(R.secs[i].bars);
+    const double mid = 0.5 * (R.L.start[a] + R.L.start[b]) * 1000.0;
+    for (const auto& s : pa.sections)
+      if (mid >= s.start_ms && mid < s.end_ms) {
+        ++sc.label_total;
+        if (s.label == R.secs[i].label) ++sc.label_hit;
+        break;
+      }
+  }
+  std::printf("  %-28s boundaries %d/%d within a beat, %d extra; labels %d/%d; sections=%zu%s%s\n", name, sc.bound_hit,
+              sc.bound_total, sc.extra, sc.label_hit, sc.label_total, pa.sections.size(), pa.gridded ? "" : " (ungridded)",
+              R.r.beats.steady ? "" : " (fluid grid)");
+  for (const auto& s : pa.sections)
+    std::printf("      %7.2f-%7.2f s  bars %3d..%3d  e%-2d %-9s (%.2f) kind=%s\n", s.start_ms / 1000, s.end_ms / 1000, s.start_bar,
+                s.end_bar, s.energy, s.label.c_str(), s.label_confidence, s.kind.c_str());
+  return sc;
+}
+
+const CueSuggestion* find_cue(const std::vector<CueSuggestion>& v, const char* type) {
+  for (const auto& c : v)
+    if (c.type == type) return &c;
+  return nullptr;
+}
+
+void check_cue_invariants(const AnalysisResult& r, const std::vector<CueSuggestion>& cues) {
+  const double bar_ms = r.phrases.bar_ms;
+  int prev_rank = 0;
+  for (std::size_t i = 0; i < cues.size(); ++i) {
+    CHECK(cues[i].rank == prev_rank + 1);  // ranks consecutive from 1, list sorted by rank
+    prev_rank = cues[i].rank;
+    CHECK(cues[i].position_ms >= r.first_audible_ms - 1.0 && cues[i].position_ms < r.last_audible_ms);
+    for (std::size_t j = i + 1; j < cues.size(); ++j) CHECK(std::fabs(cues[i].position_ms - cues[j].position_ms) >= bar_ms);
+  }
+}
+
+// Classic arrangement; returns the score. `expect_all` boundaries must be found.
+std::unique_ptr<Rendered> run_phrase_track(const char* name, double bpm0, double bpm1, const std::vector<SecSpec>& secs,
+                                           int pickup_beats, double lead_s, PhraseScore* out_score) {
+  auto R = render_arrangement(bpm0, bpm1, secs, pickup_beats, lead_s);
+  R->r = analyse(R->pcm.d.data(), R->pcm.frames, kRate);
+  *out_score = score_phrases(name, *R);
+  return R;
+}
+
+void phrase_basic_checks(const Rendered& R, const PhraseScore& sc, int min_hits) {
+  const PhraseAnalysis& pa = R.r.phrases;
+  CHECK(pa.ok);
+  CHECK(sc.bound_hit >= min_hits);
+  // energy ordering: every drop section outranks every breakdown section
+  int drop_min = 11, brk_max = 0;
+  for (std::size_t i = 0; i < R.secs.size(); ++i) {
+    const std::size_t a = static_cast<std::size_t>(R.start_bar[i]);
+    const double mid = 0.5 * (R.L.start[a] + R.L.start[a + static_cast<std::size_t>(R.secs[i].bars)]) * 1000.0;
+    for (const auto& s : pa.sections)
+      if (mid >= s.start_ms && mid < s.end_ms) {
+        if (std::string(R.secs[i].label) == "drop") drop_min = std::min(drop_min, s.energy);
+        if (std::string(R.secs[i].label) == "breakdown") brk_max = std::max(brk_max, s.energy);
+      }
+  }
+  CHECK(drop_min > brk_max);
+  for (const auto& s : pa.sections) CHECK(s.energy >= 1 && s.energy <= 10);
+}
+
+// One classic arrangement (intro, build, drop, breakdown, drop, outro) of the given section lengths, checked against where
+// the sections really start. Returns the rendering so later tests can reuse it instead of synthesizing it again.
+std::unique_ptr<Rendered> test_phrases_classic(double bpm, int unit, int drop_len, int bk_len, int mix_out_bars, PhraseScore* total) {
+  char nm[96];
+  std::snprintf(nm, sizeof nm, "classic %d bars @%.2f", unit * 3 + drop_len * 2 + bk_len, bpm);
+  PhraseScore sc;
+  auto R = run_phrase_track(nm, bpm, bpm, classic(unit, drop_len, bk_len), 0, 0.5, &sc);
+  total->bound_total += sc.bound_total;
+  total->bound_hit += sc.bound_hit;
+  total->label_total += sc.label_total;
+  total->label_hit += sc.label_hit;
+  total->extra += sc.extra;
+  phrase_basic_checks(*R, sc, 4);
+  const PhraseAnalysis& pa = R->r.phrases;
+  CHECK(pa.sections.front().label == "intro");
+  CueOptions base;
+  base.mix_out_bars = mix_out_bars;
+  const auto cues = suggest_cues(R->r, base);
+  check_cue_invariants(R->r, cues);
+  const auto cues2 = suggest_cues(R->r, base);
+  CHECK(cues.size() == cues2.size());
+  for (std::size_t i = 0; i < cues.size(); ++i) CHECK(cues[i].position_ms == cues2[i].position_ms && cues[i].type == cues2[i].type);
+  const double beat_ms = R->L.beat[0] * 1000.0;
+  auto at_bar = [&](int bar) { return R->L.start[static_cast<std::size_t>(bar)] * 1000.0; };
+  const int drop1 = 2 * unit, brk = drop1 + drop_len, drop2 = brk + bk_len, outro = drop2 + drop_len;
+  const CueSuggestion* mi = find_cue(cues, "mix_in");
+  const CueSuggestion* fd = find_cue(cues, "first_drop");
+  const CueSuggestion* bk = find_cue(cues, "breakdown");
+  const CueSuggestion* ld = find_cue(cues, "last_drop");
+  const CueSuggestion* mo = find_cue(cues, "mix_out");
+  std::printf("      cues:");
+  for (const auto& c : cues) std::printf(" %s%s@%.1fs#%d", c.memory ? "m:" : "", c.type.c_str(), c.position_ms / 1000, c.rank);
+  std::printf("\n");
+  CHECK(mi && std::fabs(mi->position_ms - at_bar(0)) <= beat_ms);
+  CHECK(fd && std::fabs(fd->position_ms - at_bar(drop1)) <= beat_ms);
+  CHECK(bk && std::fabs(bk->position_ms - at_bar(brk)) <= beat_ms);
+  CHECK(ld && std::fabs(ld->position_ms - at_bar(drop2)) <= beat_ms);
+  CHECK(mo && std::fabs(mo->position_ms - at_bar(outro)) <= beat_ms);
+  CHECK(mo->position_ms > ld->position_ms && fd->position_ms > mi->position_ms);
+  // top-N: asking for 3 gives the 3 best-ranked hot cues
+  CueOptions o3 = base;
+  o3.max_hot_cues = 3;
+  const auto c3 = suggest_cues(R->r, o3);
+  int hot = 0;
+  for (const auto& c : c3) hot += c.memory ? 0 : 1;
+  CHECK(hot == 3);
+  for (int i = 0; i < 3; ++i) CHECK(c3[static_cast<std::size_t>(i)].type == cues[static_cast<std::size_t>(i)].type);
+  // mix-out distance option: 32 bars before the end must still start >= 32 bars before the last audible bar
+  CueOptions o32;
+  o32.mix_out_bars = 32;
+  const auto c32 = suggest_cues(R->r, o32);
+  const CueSuggestion* mo32 = find_cue(c32, "mix_out");
+  CHECK(mo32 && mo32->position_ms <= R->L.start.back() * 1000.0 - 32 * 4 * R->L.beat[0] * 1000.0 + beat_ms);
+  return R;
+}
+
+void test_phrase_habit(const std::unique_ptr<Rendered>& Rp) {
+  const std::unique_ptr<Rendered>& R = Rp;  // the classic arrangement synthesized for the section tests
+  const PhraseAnalysis& pa = R->r.phrases;
+  CueOptions off;
+  const auto base = suggest_cues(R->r, off);
+  const CueSuggestion* b_drop = find_cue(base, "first_drop");
+  CHECK(b_drop != nullptr);
+  const double bar_ms = pa.bar_ms;
+  // a user who sets a cue 4 bars before the first drop on six tracks (same structure here)
+  std::vector<HabitSample> samples;
+  for (int i = 0; i < 6; ++i) {
+    HabitSample hs;
+    hs.phrases = pa;
+    hs.cue_ms = {b_drop->position_ms - 4 * bar_ms};
+    samples.push_back(hs);
+  }
+  const CueHabit h = build_cue_habit(samples);
+  std::printf("  habit: samples=%d drop_samples=%d mean_bars_before_drop=%.2f hist[-4]=%d\n", h.samples, h.drop_samples,
+              h.mean_bars_before_drop, h.bar_offset_hist[12]);
+  CHECK(h.drop_samples == 6 && std::fabs(h.mean_bars_before_drop - 4.0) < 0.01);
+  CHECK(h.bar_offset_hist[12] == 6);  // offset -4 -> index 12
+  CueOptions on;
+  on.use_habit = true;
+  on.habit = h;
+  const auto biased = suggest_cues(R->r, on);
+  check_cue_invariants(R->r, biased);
+  const CueSuggestion* n_drop = find_cue(biased, "first_drop");
+  CHECK(n_drop && std::fabs(n_drop->position_ms - (b_drop->position_ms - 4 * bar_ms)) < 1.0);
+  CHECK(n_drop->bar_shift == -4 && std::fabs(n_drop->anchor_ms - b_drop->position_ms) < 1.0);
+  // the whole histogram mode (-4) also moves the breakdown, while load and mix-in stay inside the audible range
+  const CueSuggestion* n_bk = find_cue(biased, "breakdown");
+  const CueSuggestion* b_bk = find_cue(base, "breakdown");
+  CHECK(n_bk && b_bk && std::fabs(n_bk->position_ms - (b_bk->position_ms - 4 * bar_ms)) < 1.0);
+  const CueSuggestion* n_in = find_cue(biased, "mix_in");
+  CHECK(n_in && n_in->position_ms >= R->r.first_audible_ms - 1.0);
+  // too few samples: no bias
+  CueHabit weak = h;
+  weak.samples = 2;
+  weak.drop_samples = 2;
+  CueOptions w;
+  w.use_habit = true;
+  w.habit = weak;
+  const auto wb = suggest_cues(R->r, w);
+  CHECK(find_cue(wb, "first_drop")->position_ms == b_drop->position_ms);
+}
+
+void test_phrase_ambient() {
+  Pcm p(150.0);
+  for (int i = 0; i < 3; ++i) {
+    const double t0 = i * 50.0;
+    const int chord[3][4] = {{57, 60, 64, 0}, {50, 57, 62, 65}, {45, 52, 57, 0}};
+    for (int n = 0; n < 4; ++n)
+      if (chord[i][n]) add_note(p, t0, 50.0, midi_hz(chord[i][n]), i == 1 ? 0.12f : 0.06f, 3);
+  }
+  AnalysisResult r = analyse(p.d.data(), p.frames, kRate);
+  const PhraseAnalysis& pa = r.phrases;
+  std::printf("  beatless ambient 150 s: ok=%d ungridded=%d sections=%zu\n", pa.ok, pa.time_based, pa.sections.size());
+  for (const auto& s : pa.sections)
+    std::printf("      %7.2f-%7.2f s e%-2d %s (%.2f)\n", s.start_ms / 1000, s.end_ms / 1000, s.energy, s.label.c_str(), s.label_confidence);
+  CHECK(pa.ok && pa.time_based && !pa.gridded);
+  int hits = 0;
+  for (double want : {50000.0, 100000.0})
+    for (const auto& s : pa.sections)
+      if (std::fabs(s.start_ms - want) <= 3000.0) {
+        ++hits;
+        break;
+      }
+  std::printf("  ambient boundaries within 3 s: %d/2\n", hits);
+  CHECK(hits >= 1);
+  const auto cues = suggest_cues(r);
+  for (const auto& c : cues) CHECK(c.type != "mix_in");
+  check_cue_invariants(r, cues);
+}
+
+void test_phrase_short() {
+  Pcm p = make_beat_track(128.0, 0.1, 20.0, true);
+  AnalysisResult r = analyse(p.d.data(), p.frames, kRate);
+  std::printf("  20 s clip: phrases ok=%d sections=%zu\n", r.phrases.ok, r.phrases.sections.size());
+  CHECK(!r.phrases.ok && r.phrases.sections.empty());
+  CHECK(suggest_cues(r).empty());
+  AnalysisOptions off;
+  off.phrases = false;
+  Pcm q = make_beat_track(128.0, 0.1, 60.0, true);
+  AnalysisResult r2 = analyse(q.d.data(), q.frames, kRate, off);
+  CHECK(!r2.phrases.ok && r2.phrases.sections.empty());
+}
+
+// The default run keeps every arrangement shape at 64 to 68 bars and faster tempi (minutes of audio were too slow for CI);
+// DH_FULL_PHRASES=1 runs the original full-length matrix (128-bar arrangements at 124, 128 and 135.55 BPM and so on).
+void test_phrases() {
+  const bool full = std::getenv("DH_FULL_PHRASES") != nullptr;
+  using Clock = std::chrono::steady_clock;
+  const auto lap = [](const char* what, Clock::time_point& t) {
+    const auto now = Clock::now();
+    std::printf("      [%s: %.1f s]\n", what, std::chrono::duration<double>(now - t).count());
+    t = now;
+  };
+  auto t = Clock::now();
+  PhraseScore total;
+  std::unique_ptr<Rendered> kept;  // synthesized once, shared with the habit test
+  // The full matrix (every tempo, plus the 64-bar arrangement) behind DH_FULL_PHRASES; the default run keeps one tempo from
+  // each end of the range the section labels are tuned for (the synthetic build reads as a drop at 150 BPM and above) and
+  // shares the 128 BPM rendering with the habit test.
+  for (double bpm : full ? std::vector<double>{124.0, 128.0, 135.55} : std::vector<double>{128.0, 135.55}) {
+    auto R = test_phrases_classic(bpm, 16, 32, 16, 16, &total);
+    if (bpm == 128.0) kept = std::move(R);
+    lap("classic 128 bars", t);
+  }
+  PhraseScore sc;
+  if (full) {
+    auto R = run_phrase_track("8-bar phrases (64 bars) @128", 128.0, 128.0, classic(8, 16, 8), 0, 0.5, &sc);
+    phrase_basic_checks(*R, sc, 3);
+    const auto cues = suggest_cues(R->r);
+    check_cue_invariants(R->r, cues);
+    lap("8-bar phrases", t);
+  }
+  {
+    // 12-bar breakdown: the second drop starts after intro, build, drop and the odd-length breakdown
+    const int u = 16, d = 32;
+    auto R = run_phrase_track("12-bar breakdown", 126.0, 126.0, classic(u, d, 12), 0, 0.5, &sc);
+    phrase_basic_checks(*R, sc, 4);
+    const auto cues = suggest_cues(R->r);
+    check_cue_invariants(R->r, cues);
+    const CueSuggestion* ld = find_cue(cues, "last_drop");
+    CHECK(ld && std::fabs(ld->position_ms - R->L.start[static_cast<std::size_t>(2 * u + d + 12)] * 1000.0) <= R->L.beat[0] * 1000.0);
+    lap("12-bar breakdown", t);
+  }
+  {
+    const double bpm = 128.0;
+    const int u = 16, d = 32;
+    auto R = run_phrase_track("3-beat pickup", bpm, bpm, classic(u, d, u), 3, 0, &sc);
+    phrase_basic_checks(*R, sc, 4);
+    const PhraseAnalysis& pa = R->r.phrases;
+    std::printf("      pickup_ms=%.0f origin=%.0f (expected %.0f)\n", pa.pickup_ms, pa.origin_ms, R->L.start[0] * 1000);
+    const auto cues = suggest_cues(R->r);
+    check_cue_invariants(R->r, cues);
+    const CueSuggestion* ld = find_cue(cues, "load");
+    const CueSuggestion* mi = find_cue(cues, "mix_in");
+    const CueSuggestion* any = ld ? ld : mi;
+    CHECK(any && std::fabs(any->position_ms - R->L.start[0] * 1000.0) <= R->L.beat[0] * 1000.0);
+    lap("pickup", t);
+  }
+  {
+    auto R = run_phrase_track("tempo ramp 122->128", 122.0, 128.0, classic(8, 16, 8), 0, 0.5, &sc);
+    std::printf("      grid steady=%d sections=%zu\n", R->r.beats.steady, R->r.beats.sections.size());
+    phrase_basic_checks(*R, sc, 3);
+    check_cue_invariants(R->r, suggest_cues(R->r));
+    lap("tempo ramp", t);
+  }
+  test_phrase_ambient();
+  lap("ambient", t);
+  test_phrase_short();
+  lap("short clip", t);
+  test_phrase_habit(kept);
+  lap("habit", t);
+  std::printf("  classic arrangements overall: boundaries %d/%d within a beat (%d extra), labels %d/%d\n", total.bound_hit,
+              total.bound_total, total.extra, total.label_hit, total.label_total);
 }
 
 void demo_track(const std::string& path, double expect_bpm) {
@@ -717,11 +1129,19 @@ void demo_track(const std::string& path, double expect_bpm) {
   std::printf("\n    downbeat conf %.2f, beat conf %.2f, key %s %s (conf %.2f, tuning %.0f c), %.1f LUFS, peak %.1f dBFS\n",
               r.beats.downbeat_confidence, r.beats.confidence, r.key.name.c_str(), r.key.wheel.c_str(), r.key.confidence,
               r.key.tuning_cents, r.loudness.integrated_lufs, r.loudness.sample_peak_dbfs);
+  // Real music, no ground truth here: print the structure for eyeballing (not asserted).
+  for (const auto& s : r.phrases.sections)
+    std::printf("    phrase %6.1f-%6.1f s bars %3d..%3d e%-2d %-9s (%.2f) boundary %.2f\n", s.start_ms / 1000, s.end_ms / 1000,
+                s.start_bar, s.end_bar, s.energy, s.label.c_str(), s.label_confidence, s.boundary_confidence);
 }
 
 }  // namespace
 
 int main() {
+  if (std::getenv("DH_ONLY_PHRASES")) {  // quick iteration on the phrase tests
+    test_phrases();
+    return 0;
+  }
   std::printf("steady tempo\n");
   for (double bpm : {90.0, 120.0, 128.0, 140.0, 174.0}) {
     test_steady(bpm, false);
@@ -768,6 +1188,8 @@ int main() {
   test_degenerate();
   std::printf("speed\n");
   test_speed();
+  std::printf("phrases and cue suggestions\n");
+  test_phrases();
   std::printf("demo tracks\n");
   demo_track("/Users/grio/Music/PioneerDJ/Demo Tracks/Demo Track 1.mp3", 128.0);
   demo_track("/Users/grio/Music/PioneerDJ/Demo Tracks/Demo Track 2.mp3", 120.0);

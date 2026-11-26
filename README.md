@@ -30,6 +30,10 @@ full control API.
 - Effects: chains of up to eight effects in any order per deck, master, microphone and sampler.
 - Library tools: cues that follow a grid change, selective removal of analysis, duplicate finder
   with merge, trash and edit history.
+- Automix: a play queue with "play next", per-track mix points and beat-matched transitions.
+- Structure: phrase sections on the waveform and cue suggestions.
+- Stems: offline four-stem separation with a built-in engine and a cache (you install a model
+  yourself; none ships). Not yet playable on the decks.
 - Keyboard: customisable shortcuts with two-handed defaults ([docs/SHORTCUTS.md](docs/SHORTCUTS.md)).
 - Decks: MP3, AAC, FLAC, WAV, AIFF; scrolling three-band waveforms with beat grid; cue, hot cues,
   loops, beat jump, tempo, beat sync, scratch and nudge; key lock and key shift; quantise; slip;

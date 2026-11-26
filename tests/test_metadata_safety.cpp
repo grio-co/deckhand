@@ -274,7 +274,7 @@ static void test_schema4_migration() {
   }
   {
     Library lib(path);
-    CHECK(count(lib, "SELECT max(version) FROM schema_version") == kLibrarySchemaVersion && kLibrarySchemaVersion == 6);
+    CHECK(count(lib, "SELECT max(version) FROM schema_version") == kLibrarySchemaVersion && kLibrarySchemaVersion == 8);
     const auto copies = library_backups(path);
     CHECK(!copies.empty() && copies[0].reason == "upgrade" && copies[0].schema_version == 4 && copies[0].tracks == 1);
     CHECK(lib.track_count() == 1 && lib.track(a)->title == "Alpha" && lib.track(a)->bpm == 126);
@@ -307,7 +307,7 @@ static void test_schema5_migration() {
   }
   {
     Library lib(path);
-    CHECK(count(lib, "SELECT max(version) FROM schema_version") == 6);
+    CHECK(count(lib, "SELECT max(version) FROM schema_version") == kLibrarySchemaVersion);
     const auto copies = library_backups(path);
     CHECK(!copies.empty() && copies[0].reason == "upgrade" && copies[0].schema_version == 5);
     CHECK(count(lib, "SELECT count(*) FROM pragma_table_info('tracks') WHERE name IN ('file_size', 'content_hash')") == 2);
@@ -320,6 +320,71 @@ static void test_schema5_migration() {
   }
 }
 
+// Schema 6 -> 7: automix points, the play queue and the last-sound column appear, nothing is lost, a copy is taken.
+static void test_schema6_migration() {
+  const std::string path = fresh("deckhand_test_meta_migrate6.db");
+  std::int64_t a = 0;
+  {
+    Library lib(path);
+    NewTrack t;
+    t.path = "/m/a.mp3";
+    t.title = "Alpha";
+    a = lib.upsert_track(t);
+    lib.set_analysis_cues(a, 1000, 500);
+    lib.set_main_cue_ms(a, 1234);
+    // As schema 6 left it: no automix tables, no last_sound_ms column (not in the trash either).
+    lib.db().exec("DROP TABLE automix_points; DROP TABLE play_queue; DROP TABLE play_queue_history;"
+                  "ALTER TABLE tracks DROP COLUMN last_sound_ms; ALTER TABLE trash_tracks DROP COLUMN last_sound_ms;"
+                  "UPDATE schema_version SET version = 6;");
+  }
+  {
+    Library lib(path);
+    CHECK(count(lib, "SELECT max(version) FROM schema_version") == 8 && kLibrarySchemaVersion == 8);
+    const auto copies = library_backups(path);
+    CHECK(!copies.empty() && copies[0].reason == "upgrade" && copies[0].schema_version == 6);
+    CHECK(count(lib, "SELECT count(*) FROM pragma_table_info('tracks') WHERE name = 'last_sound_ms'") == 1);
+    CHECK(count(lib, "SELECT count(*) FROM pragma_table_info('trash_tracks') WHERE name = 'last_sound_ms'") == 1);
+    CHECK(lib.track(a)->title == "Alpha");
+    const TrackCues c = lib.track_cues(a);
+    CHECK(c.main_cue_ms && *c.main_cue_ms == 1234 && c.load_cue_ms && *c.load_cue_ms == 1000 && !c.last_sound_ms);
+    // The new tables work: points round-trip, an empty set removes the row, the queue and its history persist.
+    CHECK(lib.automix_points(a).empty());
+    AutomixPoints p;
+    p.mix_in_ms = 2500;
+    p.mix_out_ms = 150000;
+    p.transition_beats = 8;
+    p.transition_type = "cut";
+    p.max_play_ms = 90000;
+    lib.set_automix_points(a, p);
+    const AutomixPoints q = lib.automix_points(a);
+    CHECK(q.mix_in_ms && *q.mix_in_ms == 2500 && q.mix_out_ms && *q.mix_out_ms == 150000 && q.transition_beats && *q.transition_beats == 8);
+    CHECK(q.transition_type && *q.transition_type == "cut" && q.max_play_ms && *q.max_play_ms == 90000);
+    p.mix_in_ms.reset();
+    lib.set_automix_points(a, p);
+    CHECK(!lib.automix_points(a).mix_in_ms && lib.automix_points(a).mix_out_ms);
+    lib.set_automix_points(a, AutomixPoints{});
+    CHECK(count(lib, "SELECT count(*) FROM automix_points") == 0);
+    lib.set_last_sound_ms(a, 200000);
+    CHECK(lib.track_cues(a).last_sound_ms && *lib.track_cues(a).last_sound_ms == 200000);
+    lib.remove_track(a);  // the trash keeps the column, a restore brings it back
+    CHECK(lib.restore_track(a) && lib.track_cues(a).last_sound_ms && *lib.track_cues(a).last_sound_ms == 200000);
+    std::vector<QueueRow> rows(2);
+    rows[0].entry_id = 5;
+    rows[0].track_id = a;
+    rows[0].pending = true;
+    rows[1].entry_id = 6;
+    rows[1].track_id = 99;
+    rows[1].overrides.max_play_ms = 1000;
+    lib.save_play_queue(rows);
+    const auto back = lib.play_queue();
+    CHECK(back.size() == 2 && back[0].entry_id == 5 && back[0].pending && back[1].overrides.max_play_ms && lib.max_queue_entry_id() == 6);
+    lib.add_queue_history(5, a, 100);
+    lib.add_queue_history(6, 99, 200);
+    CHECK(lib.queue_history(10).size() == 2 && lib.queue_history(10)[0].track_id == 99 && lib.max_queue_entry_id() == 6);
+    CHECK(lib.pop_queue_history() && lib.queue_history(10).size() == 1);
+  }
+}
+
 int main() {
   test_journal_and_undo();
   test_analysis_source_and_cues();
@@ -328,6 +393,7 @@ int main() {
   test_trash();
   test_schema4_migration();
   test_schema5_migration();
+  test_schema6_migration();
   std::puts("test_metadata_safety ok");
   return 0;
 }

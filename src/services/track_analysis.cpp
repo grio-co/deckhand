@@ -6,6 +6,66 @@
 
 namespace deckhand {
 
+StoredPhrases to_stored_phrases(const PhraseAnalysis& p) {
+  StoredPhrases s;
+  s.version = kPhraseAnalysisVersion;
+  s.gridded = p.gridded;
+  s.time_based = p.time_based;
+  s.origin_ms = p.origin_ms;
+  s.pickup_ms = p.pickup_ms;
+  s.bar_ms = p.bar_ms;
+  s.total_bars = p.total_bars;
+  s.bar_starts_ms = p.bar_starts_ms;
+  s.bar_energy = p.bar_energy;
+  for (const PhraseSection& x : p.sections) {
+    StoredPhraseSection o;
+    o.start_ms = x.start_ms;
+    o.end_ms = x.end_ms;
+    o.start_bar = x.start_bar;
+    o.end_bar = x.end_bar;
+    o.bars = x.bars;
+    o.energy = x.energy;
+    o.label = x.label;
+    o.kind = x.kind;
+    o.label_confidence = x.label_confidence;
+    o.boundary_confidence = x.boundary_confidence;
+    o.phrase_aligned = x.phrase_aligned;
+    o.kick = x.kick;
+    s.sections.push_back(std::move(o));
+  }
+  return s;
+}
+
+PhraseAnalysis from_stored_phrases(const StoredPhrases& s) {
+  PhraseAnalysis p;
+  p.ok = !s.sections.empty();
+  p.gridded = s.gridded;
+  p.time_based = s.time_based;
+  p.origin_ms = s.origin_ms;
+  p.pickup_ms = s.pickup_ms;
+  p.bar_ms = s.bar_ms;
+  p.total_bars = s.total_bars;
+  p.bar_starts_ms = s.bar_starts_ms;
+  p.bar_energy = s.bar_energy;
+  for (const StoredPhraseSection& x : s.sections) {
+    PhraseSection o;
+    o.start_ms = x.start_ms;
+    o.end_ms = x.end_ms;
+    o.start_bar = x.start_bar;
+    o.end_bar = x.end_bar;
+    o.bars = x.bars;
+    o.energy = x.energy;
+    o.label = x.label;
+    o.kind = x.kind;
+    o.label_confidence = x.label_confidence;
+    o.boundary_confidence = x.boundary_confidence;
+    o.phrase_aligned = x.phrase_aligned;
+    o.kick = x.kick;
+    p.sections.push_back(std::move(o));
+  }
+  return p;
+}
+
 TrackAnalysis analyse_track(const TrackAudio& audio) {
   TrackAnalysis out;
   if (audio.frames == 0 || audio.pcm.empty()) return out;
@@ -47,6 +107,10 @@ TrackAnalysis analyse_track(const TrackAudio& audio) {
   out.first_audible_ms = r.first_audible_ms;
   out.last_audible_ms = r.last_audible_ms;
   out.suggested_cue_ms = r.suggested_cue_ms;
+  if (r.phrases.ok && !r.phrases.sections.empty()) {
+    out.phrases = to_stored_phrases(r.phrases);
+    out.has_phrases = true;
+  }
   if (r.loudness.ok) {
     out.gain_db = auto_gain_db(r.loudness);
     out.has_gain = true;

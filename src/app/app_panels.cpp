@@ -164,7 +164,7 @@ void App::open_panel(Panel p) {
       output_devices_ = engine_->devices();
       input_devices_ = engine_->input_devices();
       for (const auto& kv : std::vector<std::pair<const char*, const char*>>{{"api.enabled", "1"}, {"api.port", "7373"}, {"stream.files", "0"},
-                                                                          {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"preview.master", "0"}, {"browser.key_musical", "0"}, {"obs.host", "127.0.0.1"},
+                                                                          {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"preview.master", "0"}, {"browser.key_musical", "0"}, {"ui.show_phrases", "1"}, {"obs.host", "127.0.0.1"},
                                                                           {"obs.port", "4455"}, {"obs.text_source", ""}, {"sync.folder", ""}})
         sv_[kv.first] = lib_->setting(kv.first, kv.second);
       sv_["sync.device_name"] = lib_->setting("sync.device_name", host_name());
@@ -576,6 +576,13 @@ void App::draw_settings(const Rect& m) {
       sv_["browser.key_musical"] = musical ? "0" : "1";
       save_setting("browser.key_musical", sv_["browser.key_musical"]);
       key_musical_ = !musical;
+    }
+    y += line;
+    const bool phr = sv_["ui.show_phrases"] != "0";
+    if (ui_toggle({x, y, rw, 24}, T("settings.show_phrases"), phr)) {
+      sv_["ui.show_phrases"] = phr ? "0" : "1";
+      save_setting("ui.show_phrases", sv_["ui.show_phrases"]);
+      show_phrases_ = !phr;
     }
     y += line;
   }

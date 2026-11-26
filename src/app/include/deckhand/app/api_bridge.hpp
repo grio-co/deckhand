@@ -10,6 +10,7 @@
 namespace deckhand {
 
 class StemService;
+class AutomixService;
 
 // Arguments of a track-preparation action (grid editing, cues, loops). Which fields an action reads is in docs/API.md.
 struct PrepArgs {
@@ -35,6 +36,8 @@ class ApiHost {
   // The compatibility report of the last export as JSON ({"report", "converted", "remaining_will_not_play"}), or empty.
   virtual std::string api_export_report() { return {}; }
   virtual void api_library_changed() = 0;
+  // Cues of these tracks were written to the library by the API: decks holding them follow (default: nothing to do).
+  virtual void api_cues_changed(const std::vector<std::int64_t>& track_ids) { (void)track_ids; }
   // start = true begins recording the master output; path receives the file in both cases.
   virtual bool api_record(bool start, std::string& path, std::string& error) = 0;
   virtual void api_load_sample(int slot, const std::string& path) = 0;
@@ -57,6 +60,14 @@ class ApiHost {
   }
   // Stem separation (models, queue, cache); null when the host has none.
   virtual StemService* api_stems() { return nullptr; }
+  // Automix and the play queue (service owns the queue); null when the host has none.
+  virtual AutomixService* api_automix() { return nullptr; }
+  // An automix.* control (action = the part after "automix."): start, stop, pause, skip, next_type ...
+  virtual bool api_automix_control(const std::string& action, bool has_value, double value, std::string& error) {
+    (void)action; (void)has_value; (void)value;
+    error = "automix is not available";
+    return false;
+  }
   virtual std::string api_status() = 0;
   virtual std::string api_audio_device() = 0;
   // Debug (admin scope): the windows the UI has (JSON array) and what a click at (x, y) of a window would do (JSON object).

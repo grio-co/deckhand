@@ -63,6 +63,8 @@ class StemService {
   using EventFn = std::function<void(const std::string& type, const std::string& id, const std::string& state, float progress,
                                      const std::string& error)>;
   void set_event_sink(EventFn fn);
+  // Replaces the downloader of model installs (tests use local files); empty = the default downloader.
+  void set_downloader(stems::DownloadFn fn) { downloader_ = std::move(fn); }
 
   bool available(std::string* why = nullptr) const;
   StemStatus status();
@@ -105,6 +107,7 @@ class StemService {
 
   std::mutex install_mu_;
   StemInstallState install_;
+  stems::DownloadFn downloader_;
   std::atomic<bool> install_cancel_{false};
   std::thread install_thread_;
 

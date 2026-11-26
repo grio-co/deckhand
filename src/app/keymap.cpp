@@ -377,6 +377,8 @@ std::vector<UiActionInfo> list_ui_actions() {
   add("ui.preview_toggle", "trigger", "none", "Pre-listen to the selected track (or pause it), in the headphones");
   add("ui.preview_stop", "trigger", "none", "Stop pre-listening");
   add("ui.preview_seek", "value", "seconds, signed, relative to the pre-listen position", "Skip around in the pre-listened track");
+  add("ui.queue_add", "trigger", "none", "Add the selected tracks to the end of the play queue");
+  add("ui.queue_play_next", "trigger", "none", "Play the selected tracks next (behind earlier play-next entries)");
   add("ui.add_to_prepare", "trigger", "none", "Add the selected tracks to the playlist named Prepare (if there is one)");
   add("ui.add_to", "trigger", "none", "Open the add-to-playlist menu for the selected tracks");
   add("ui.rate", "value", "0..5 stars", "Rate the selected track");

@@ -194,6 +194,8 @@ tags:
   - {name: Preparation, description: Beat grid editing, cues, saved loops and hot cue names / colours of the loaded track.}
   - {name: Preview, description: Pre-listen in the headphones without loading a deck.}
   - {name: Mixer}
+  - {name: Queue, description: "The persisted play queue: ordering, play next, per-entry overrides, duplicates policy, endless mode."}
+  - {name: Automix, description: "Automatic transitions between queued tracks, with per-track mix points."}
   - {name: Effect chains, description: "Ordered effect units per deck, master, microphone, sampler or stem."}
   - {name: Stems, description: "Offline stem separation: models, queue and cache."}
   - {name: Controls}
@@ -1696,6 +1698,456 @@ paths:
         "400": {$ref: "#/components/responses/BadRequest"}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/queue:
+    get:
+      tags: [Queue]
+      operationId: getQueue
+      summary: The play queue
+      description: "Required scope: `read`. `current` is playing now, `pending` has its transition scheduled, `upcoming` is in play order."
+      x-scope: read
+      responses:
+        "200":
+          description: The queue.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Queue"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/queue/add:
+    post:
+      tags: [Queue]
+      operationId: addToQueue
+      summary: Add tracks to the queue
+      description: |
+        Required scope: `control`. Name the tracks with `track_ids`, `track_id`, `playlist`, `smart_playlist` or `search`.
+        `mode` end (default), next (play next: behind earlier play-next entries, before the rest) or at (+ `position`).
+        `replace` / `shuffle` fill the queue from the tracks (mode end). The duplicates policy refuses tracks played
+        recently or already queued unless `force` is true.
+      x-scope: control
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                track_ids: {type: array, items: {type: integer, format: int64}}
+                track_id: {type: integer, format: int64}
+                playlist: {type: integer, format: int64}
+                smart_playlist: {type: integer, format: int64}
+                search: {type: string}
+                limit: {type: integer}
+                mode: {type: string, enum: [end, next, at], default: end}
+                position: {type: integer}
+                replace: {type: boolean, default: false}
+                shuffle: {type: boolean, default: false}
+                force: {type: boolean, default: false}
+      responses:
+        "200":
+          description: Entries created and tracks refused by the duplicates policy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entry_ids: {type: array, items: {type: integer, format: int64}}
+                  added: {type: integer}
+                  skipped: {type: integer}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/queue/move:
+    post:
+      tags: [Queue]
+      operationId: moveQueueEntry
+      summary: Move an upcoming entry
+      description: "Required scope: `control`. `position` is the new index among the upcoming entries."
+      x-scope: control
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entry_id, position]
+              properties:
+                entry_id: {type: integer, format: int64}
+                position: {type: integer}
+      responses:
+        "200":
+          description: The queue.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Queue"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/queue/entries/{id}:
+    delete:
+      tags: [Queue]
+      operationId: removeQueueEntry
+      summary: Remove an upcoming entry
+      description: "Required scope: `control`."
+      x-scope: control
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+      responses:
+        "200": {description: Removed.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Queue]
+      operationId: updateQueueEntry
+      summary: Set the automix overrides of an entry (and optionally move it)
+      description: "Required scope: `control`. Keys that are missing keep their value, `null` makes one automatic again. e.g. `{\"max_play_ms\": 90000}` plays only 90 seconds of this entry."
+      x-scope: control
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/AutomixPoints"}
+                - type: object
+                  properties:
+                    position: {type: integer, description: Also move the entry to this index.}
+      responses:
+        "200":
+          description: The entry's overrides.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entry_id: {type: integer, format: int64}
+                  overrides: {$ref: "#/components/schemas/AutomixPoints"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/queue/clear:
+    post:
+      tags: [Queue]
+      operationId: clearQueue
+      summary: Empty the queue (the track playing is not touched)
+      description: "Required scope: `control`."
+      x-scope: control
+      responses:
+        "200": {description: Done.}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/queue/shuffle:
+    post:
+      tags: [Queue]
+      operationId: shuffleQueue
+      summary: Shuffle the entries behind the play-next block
+      description: "Required scope: `control`."
+      x-scope: control
+      responses:
+        "200":
+          description: The queue.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Queue"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/queue/skip:
+    post:
+      tags: [Queue]
+      operationId: skipQueueEntry
+      summary: Drop the next entry without playing it
+      description: "Required scope: `control`. To start the next transition now use `POST /v1/automix/skip`."
+      x-scope: control
+      responses:
+        "200": {description: The dropped entry.}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/queue/back:
+    post:
+      tags: [Queue]
+      operationId: queueBack
+      summary: Go back to the previous track
+      description: "Required scope: `control`. The previous track goes to the front, the one playing now behind it, and automix starts the transition at the next bar."
+      x-scope: control
+      responses:
+        "200":
+          description: The queue.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Queue"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/queue/history:
+    get:
+      tags: [Queue]
+      operationId: getQueueHistory
+      summary: What was played from the queue, newest first
+      description: "Required scope: `read`."
+      x-scope: read
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, default: 50, maximum: 500}}
+      responses:
+        "200":
+          description: History.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        entry_id: {type: integer, format: int64}
+                        track_id: {type: integer, format: int64}
+                        played_at_ms: {type: integer, format: int64}
+                        title: {type: string}
+                        artist: {type: string}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/queue/settings:
+    get:
+      tags: [Queue]
+      operationId: getQueueSettings
+      summary: Duplicates policy and endless mode
+      description: "Required scope: `read`."
+      x-scope: read
+      responses:
+        "200":
+          description: Settings.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/QueueSettings"}
+        default: {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Queue]
+      operationId: updateQueueSettings
+      summary: Change the duplicates policy or endless mode
+      description: "Required scope: `control`. Endless mode keeps `keep` entries queued from `source` (`playlist:<id>`, `smart:<id>` or `search:<text>`)."
+      x-scope: control
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/QueueSettings"}
+      responses:
+        "200":
+          description: Settings.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/QueueSettings"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/automix:
+    get:
+      tags: [Automix]
+      operationId: getAutomix
+      summary: Automix state
+      description: "Required scope: `read`. `state` is stopped, idle, playing, armed (transition handed to the engine), transition, paused or finishing."
+      x-scope: read
+      responses:
+        "200":
+          description: State and settings.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AutomixState"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/automix/{action}:
+    post:
+      tags: [Automix]
+      operationId: automixAction
+      summary: Start, stop, pause, resume or skip automix
+      description: |
+        Required scope: `control`. start plays the queue (or carries on from what is playing); stop leaves the decks as they
+        are and lets a running transition finish; pause stops new transitions from starting; skip starts the next transition
+        now, on the next bar (409 when automix is not running or a transition is under way).
+      x-scope: control
+      parameters:
+        - name: action
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [start, stop, pause, resume, skip]
+      responses:
+        "200":
+          description: State after the action.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AutomixState"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/automix/settings:
+    get:
+      tags: [Automix]
+      operationId: getAutomixSettings
+      summary: Automix settings
+      description: "Required scope: `read`."
+      x-scope: read
+      responses:
+        "200":
+          description: Settings.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AutomixSettings"}
+        default: {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Automix]
+      operationId: updateAutomixSettings
+      summary: Change automix settings
+      description: "Required scope: `control`. Only the keys given change."
+      x-scope: control
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AutomixSettings"}
+      responses:
+        "200":
+          description: Settings.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AutomixSettings"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks/{id}/automix:
+    get:
+      tags: [Automix, Library]
+      operationId: getTrackAutomix
+      summary: A track's automix points
+      description: "Required scope: `library:read`. `null` means automatic. `effective` shows the mix-in and mix-out automix would use (without queue overrides)."
+      x-scope: library:read
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+      responses:
+        "200":
+          description: Points.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AutomixPoints"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Automix, Library]
+      operationId: setTrackAutomix
+      summary: Replace a track's automix points
+      description: "Required scope: `library:write`. All five fields are replaced; a missing or null field is automatic again, so `{}` clears them."
+      x-scope: library:write
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AutomixPoints"}
+      responses:
+        "200":
+          description: Points.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AutomixPoints"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks/{id}/phrases:
+    get:
+      tags: [Library]
+      operationId: getTrackPhrases
+      summary: A track's phrase sections
+      description: "Required scope: `library:read`. The stored phrase analysis: sections (start/end ms and bars, energy 1..10, label with `label_confidence`, safe `kind`, `boundary_confidence`, `kick`) and the bar grid they sit on. `bars=1` adds the compact per-bar data (`bar_starts_ms`, `bar_energy`). `analysed` is false for a track that has not been analysed since phrases exist (it gets them on its next analysis)."
+      x-scope: library:read
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+        - {name: bars, in: query, required: false, schema: {type: integer, enum: [0, 1]}}
+      responses:
+        "200":
+          description: Phrases.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks/{id}/cue-suggestions:
+    get:
+      tags: [Library]
+      operationId: getTrackCueSuggestions
+      summary: Suggested cues from the phrase analysis
+      description: "Required scope: `library:read`. Hot-cue suggestions ranked best first (`max` 0..8, default 8; `mix_out_bars` 8, 16 or 32), plus memory-cue candidates at phrase boundaries with `memory=1`. `habit=1` biases the positions toward where this user usually cues (learned from the cued tracks that have phrases; ignored until there are enough). Nothing is written."
+      x-scope: library:read
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+        - {name: max, in: query, required: false, schema: {type: integer, minimum: 0, maximum: 8}}
+        - {name: mix_out_bars, in: query, required: false, schema: {type: integer, enum: [8, 16, 32]}}
+        - {name: habit, in: query, required: false, schema: {type: integer, enum: [0, 1]}}
+        - {name: memory, in: query, required: false, schema: {type: integer, enum: [0, 1]}}
+      responses:
+        "200":
+          description: Suggestions.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks/{id}/cue-suggestions/apply:
+    post:
+      tags: [Library]
+      operationId: applyTrackCueSuggestions
+      summary: Write suggested cues into free slots
+      description: "Required scope: `library:write`. Writes the top `max` hot-cue suggestions into FREE hot slots only (`memory: true` adds memory cues at the phrase boundaries); an existing cue is never moved, replaced or deleted. One journalled batch (`batch_id`, undo with `POST /v1/library/edit-batches/{id}/undo`). `dry_run` reports what would be written. `written` lists each cue with its 1-based `slot`; `skipped` says why (`no_free_slot`, `cue_exists`). A deck holding the track follows."
+      x-scope: library:write
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CueSuggestionApply"}
+      responses:
+        "200":
+          description: What was (or would be) written.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/cue-suggestions/apply:
+    post:
+      tags: [Library]
+      operationId: applyCueSuggestionsBatch
+      summary: Write suggested cues for many tracks
+      description: "Required scope: `library:write`. The same as the single-track form over `ids`, or a `playlist_id` and/or `search` (at most 5000 tracks). One journal batch and one transaction cover every track; `dry_run` changes nothing. Tracks without phrases are counted in `tracks_without_phrases`."
+      x-scope: library:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CueSuggestionApply"}
+      responses:
+        "200":
+          description: Totals and the per-track detail.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/debug/windows:
     get:
       tags: [Settings]
@@ -2580,6 +3032,102 @@ components:
           type: array
           items: {$ref: "#/components/schemas/SmartRule"}
         track_count: {type: integer, description: Tracks matching now (list and get only).}
+    CueSuggestionApply:
+      type: object
+      description: Options of the apply calls; every field is optional.
+      properties:
+        max: {type: integer, minimum: 0, maximum: 8, description: "Hot cues to write (default 8; never more than the free slots)."}
+        mix_out_bars: {type: integer, enum: [8, 16, 32], description: "How many bars the mix-out phrase must leave (default 16)."}
+        habit: {type: boolean, description: "Bias toward where this user usually cues."}
+        memory: {type: boolean, description: "Also write memory cues at the phrase boundaries."}
+        dry_run: {type: boolean}
+        ids: {type: array, items: {type: integer, format: int64}, description: "Batch form only."}
+        playlist_id: {type: integer, format: int64, description: "Batch form only."}
+        search: {type: string, description: "Batch form only."}
+    AutomixPoints:
+      type: object
+      description: Every field is optional; null or missing means automatic.
+      properties:
+        mix_in_ms: {type: [number, "null"], description: Where the track starts playing when mixed in (default the main cue, else the analysis load cue).}
+        mix_out_ms: {type: [number, "null"], description: Where the track is completely mixed out (default N bars before the last audible sound).}
+        transition_beats: {type: [number, "null"], minimum: 1, maximum: 64}
+        transition_type: {type: [string, "null"], enum: [crossfade, cut, fade, echo_out, null]}
+        max_play_ms: {type: [number, "null"], description: Longest the track plays, counted from the mix-in.}
+        effective:
+          type: object
+          description: GET only. What automix would use now.
+          properties:
+            mix_in_ms: {type: number}
+            mix_out_ms: {type: number}
+            mix_out_automatic: {type: boolean}
+            last_sound_ms: {type: number}
+    QueueEntry:
+      type: object
+      properties:
+        entry_id: {type: integer, format: int64}
+        track_id: {type: integer, format: int64}
+        play_next: {type: boolean}
+        overrides: {$ref: "#/components/schemas/AutomixPoints"}
+        title: {type: string}
+        artist: {type: string}
+        duration_ms: {type: integer, format: int64}
+    Queue:
+      type: object
+      properties:
+        revision: {type: integer, format: int64}
+        current: {oneOf: [{$ref: "#/components/schemas/QueueEntry"}, {type: "null"}]}
+        pending: {oneOf: [{$ref: "#/components/schemas/QueueEntry"}, {type: "null"}]}
+        upcoming:
+          type: array
+          items: {$ref: "#/components/schemas/QueueEntry"}
+        duplicates: {type: string, enum: [allow, skip_recent]}
+        duplicates_window: {type: integer}
+    QueueSettings:
+      type: object
+      properties:
+        duplicates: {type: string, enum: [allow, skip_recent], description: skip_recent refuses a track played within the last duplicates_window tracks or already queued.}
+        duplicates_window: {type: integer, minimum: 1, maximum: 1000}
+        endless:
+          type: object
+          properties:
+            enabled: {type: boolean}
+            source: {type: string, description: "playlist:<id>, smart:<id> or search:<text>"}
+            keep: {type: integer, minimum: 1, maximum: 100, description: Entries kept queued.}
+            order: {type: string, enum: [sequential, shuffle]}
+    AutomixSettings:
+      type: object
+      properties:
+        transition_type: {type: string, enum: [crossfade, cut, fade, echo_out]}
+        unsynced_type: {type: string, enum: [cut, fade, echo_out], description: Used when the tempo gap is above max_sync_gap_pct or a track has no beat grid.}
+        transition_beats: {type: number, minimum: 1, maximum: 64}
+        mix_out_bars: {type: number, minimum: 0, maximum: 128, description: Default mix-out is this many bars before the last audible sound.}
+        max_sync_gap_pct: {type: number, minimum: 0, maximum: 50}
+        bass_swap: {type: boolean}
+        override_mode: {type: string, enum: [yield, hands_off]}
+        on_empty: {type: string, enum: [finish, fade]}
+        fade_seconds: {type: number, minimum: 1, maximum: 60}
+        endless: {$ref: "#/components/schemas/QueueSettings/properties/endless"}
+    AutomixState:
+      type: object
+      properties:
+        state: {type: string, enum: [stopped, idle, playing, armed, transition, paused, finishing]}
+        running: {type: boolean}
+        paused: {type: boolean}
+        resume_available: {type: boolean}
+        current_deck: {type: [integer, "null"]}
+        next_deck: {type: [integer, "null"]}
+        current_track_id: {type: [integer, "null"], format: int64}
+        next_track_id: {type: [integer, "null"], format: int64}
+        current_entry_id: {type: [integer, "null"], format: int64}
+        next_entry_id: {type: [integer, "null"], format: int64}
+        seconds_to_transition: {type: [number, "null"]}
+        transition_type: {type: [string, "null"]}
+        transition_beats: {type: number}
+        synced: {type: boolean}
+        planned_mix_out_ms: {type: [number, "null"]}
+        note: {type: string}
+        queue_revision: {type: integer, format: int64}
+        settings: {$ref: "#/components/schemas/AutomixSettings"}
     Preview:
       type: object
       required: [loaded, playing, on_master, level, headphone_output]

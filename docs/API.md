@@ -71,7 +71,7 @@ Send `Authorization: Bearer <token>`. Bodies and replies are JSON.
 | `GET /v1/library/tracks/{id}/history`, `GET /v1/library/edits` | `library:read` | Edit journal: every changed field with old and new value, source (`user`, `api`, `import`, `sync`, `undo`, `analysis`; the last is hidden unless `include_analysis=1`) and batch; 200 entries kept per track |
 | `POST /v1/library/edits/{id}/undo`, `POST /v1/library/edit-batches/{id}/undo` | `library:write` | Restore the old value(s); 409 if a field changed again since (nothing is undone) |
 | `POST /v1/library/tracks/{id}/grid`, `POST /v1/library/tracks/{id}/cues/follow-grid` | `library:write` | Replace a track's grid; cues that were on the old grid (15 ms of a beat, half or quarter beat) keep their beat position (loops keep their length in beats; halve/double leaves positions; off-grid cues stay and are listed). Body: `sections`, `bpm`, `lock`, `cues_follow` (`ask` default, `always`, `never`; setting `cues_follow_grid`), `dry_run`. With `ask` the response holds the proposal and `batch_id`; `follow-grid` with that `batch_id` applies it inside the same edit batch, so one undo restores grid and cues |
-| `POST /v1/library/analysis/strip` | `library:write` | Clear derived data only: `kinds` of grid, key, loudness, waveform, first_sound, phrases, vocals, stems for `ids`, a `playlist_id`/`search`, or `all`; `force`, `dry_run`. Tags, cues, playlists and the main cue are never touched; locked grids and hand-set keys are skipped unless forced. Undo (edit batch) restores grid, tempo, key and lock; loudness, waveform and first-sound/load cue are not undoable |
+| `POST /v1/library/analysis/strip` | `library:write` | Clear derived data only: `kinds` of grid, key, loudness, waveform, first_sound, phrases, vocals, stems for `ids`, a `playlist_id`/`search`, or `all`; `force`, `dry_run`. Tags, cues, playlists and the main cue are never touched; locked grids and hand-set keys are skipped unless forced. Undo (edit batch) restores grid, tempo, key and lock; loudness, waveform, phrases and first-sound/load cue are not undoable |
 | `GET /v1/library/duplicates`, `POST /v1/library/duplicates/hash`, `POST /v1/library/duplicates/merge` | `library:read` / `library:write` | Duplicate groups (`exact` by file hash, `likely` by artist, title and length, with confidence, differences and a `suggested_keep`), a bounded hashing step, and `merge` (`keep_id`, `remove_ids`, `options`: `copy_cues`, `fill_metadata`, `combine_history`, `dry_run`): playlists re-pointed without doubles, cues/grid copied where missing, history combined, removed tracks to the trash, audio files never touched |
 | `GET /v1/library/trash`, `POST /v1/library/trash/{id}/restore` | `library:read` / `library:write` | Removed tracks (kept 30 days) and restoring one with its cues, grid and playlist places |
 | `POST /v1/library/export/xml`, `POST /v1/library/playlists/{id}/export/m3u8`, `POST /v1/library/export/m3u8` | `export` | Write the library as DJ library XML, or playlists as M3U8, to a server-side path ([INTERCHANGE.md](INTERCHANGE.md)) |
@@ -85,6 +85,13 @@ Send `Authorization: Bearer <token>`. Bodies and replies are JSON.
 | `GET /v1/debug/windows`, `GET /v1/debug/hit?window=&x=&y=` | `admin` | The UI's windows, and what a click at a point of a (shaped, transparent) window would do: none / drag / control / resize / solid |
 | `GET /v1/preview`, `POST /v1/preview/load`, `POST /v1/preview/{control}` | `read`, `control` | Pre-listen in the headphones (`play`, `stop`, `seek`, `level`, `master`); refused without a headphone output unless `preview.master` is on |
 | `GET /v1/history`, `GET /v1/history/{session}` | `library:read` | Play history |
+| `GET /v1/queue`, `POST /v1/queue/add`, `POST /v1/queue/move`, `DELETE`/`PATCH /v1/queue/entries/{id}`, `POST /v1/queue/{clear,shuffle,skip,back}`, `GET /v1/queue/history`, `GET`/`PATCH /v1/queue/settings` | `read`, `control` | The play queue (persisted; survives a restart). `add` takes `track_ids` / `track_id` / `playlist` / `smart_playlist` / `search` and `mode` (`end`, `next` = play next, behind earlier play-nexts, or `at` + `position`), plus `shuffle`, `replace`, `limit`, `force` (ignore the duplicates policy). Entries carry optional per-entry overrides (`mix_in_ms`, `mix_out_ms`, `transition_beats`, `transition_type`, `max_play_ms`; `null` = automatic). Settings: `duplicates` (`allow` / `skip_recent`) with `duplicates_window`, and `endless` (`enabled`, `source` = `playlist:<id>` / `smart:<id>` / `search:<text>`, `keep`, `order`) |
+| `GET /v1/automix`, `POST /v1/automix/{start,stop,pause,resume,skip}`, `GET`/`PATCH /v1/automix/settings` | `read`, `control` | Automix: state, transport and settings (transition type and length, mix-out bars, tempo-gap limit, bass swap, `override_mode` yield / hands_off, `on_empty` finish / fade). Controls: `automix.run`, `automix.start`, `.stop`, `.pause`, `.skip`, `.next_type`, `.next_length`, `.queue_clear`, `.queue_shuffle`, `.queue_skip`, `.queue_back` (`POST /v1/controls/{name}`) |
+| `GET`/`PUT /v1/library/tracks/{id}/automix` | `library:read`, `library:write` | A track's automix points: `mix_in_ms`, `mix_out_ms`, `transition_beats`, `transition_type`, `max_play_ms` (`null` / missing = automatic; PUT replaces all five). GET adds `effective`: the mix-in and mix-out automix would use. Unset points default to the phrase analysis's mix-in and mix-out when the track has phrases (the main cue still wins for the mix-in), else to the load cue and "N bars before the last sound" |
+| `GET /v1/library/tracks/{id}/phrases` | `library:read` | The stored phrase analysis: sections (start/end ms and bars, energy 1..10, label + `label_confidence`, `kind`, `boundary_confidence`, `kick`); `bars=1` adds `bar_starts_ms` and `bar_energy` |
+| `GET /v1/library/tracks/{id}/cue-suggestions` | `library:read` | Hot-cue suggestions from the phrases, best first: `max` (0..8), `mix_out_bars` (8, 16, 32), `habit=1` (bias toward this user's cueing, learned from their cued tracks), `memory=1` (boundary candidates too). Writes nothing |
+| `POST /v1/library/tracks/{id}/cue-suggestions/apply` | `library:write` | Writes the top `max` suggestions into FREE hot slots only (`memory: true` adds boundary memory cues); never touches an existing cue. One journalled batch (`batch_id`, undo via `POST /v1/library/edit-batches/{id}/undo`); `dry_run`; returns `written` (with 1-based `slot`) and `skipped` |
+| `POST /v1/library/cue-suggestions/apply` | `library:write` | The same over `ids`, or `playlist_id` / `search` (at most 5000 tracks) in one batch and one transaction; `dry_run`; reports `tracks_without_phrases` |
 | `POST /v1/export` | `export` | `{"destination": "/Volumes/STICK", "playlist_id": 3}` |
 | `GET`/`POST /v1/tokens`, `DELETE /v1/tokens/{id}` | `admin` | Token management |
 
@@ -118,3 +125,29 @@ sent ten times a second; `events` carries `deck.loaded`, `deck.play`, `deck.paus
     curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:7373/v1/decks/1/play
     curl -H "Authorization: Bearer $TOKEN" -X POST -d '{"value":1,"when":{"deck":1,"seconds":180}}' \
          http://127.0.0.1:7373/v1/decks/2/play
+
+## Play queue and automix
+
+Automix plays the play queue with two decks. While one plays, the next entry is loaded on the other and parked at its mix-in
+point (the entry's override, else the track's own point, else the user's main cue, else the analysis load cue). Shortly before
+the transition (about 4 s) the whole transition is handed to the engine as scheduled commands anchored to the playing deck's
+beats, so the incoming track starts on the exact sample of a bar line. The mix-out is the point where the outgoing track is
+completely gone: the entry's override, else the track's own, else `mix_out_bars` (16) bars before the last audible sound
+(`last_sound_ms`, stored by analysis; the file length when unknown), capped by `max_play_ms` counted from the mix-in. The
+transition starts `transition_beats` before the mix-out, on the nearest bar line (rounded down when `max_play_ms` limits it).
+
+Transitions: `crossfade` (equal power on the channel faders, bass swap halfway by the low EQ), `cut` (on the bar), `fade`
+(fade out, then the next fades in; used for tracks without a beat grid, timed in seconds), `echo_out` (the outgoing track is cut
+into an echo tail). The tempo of the incoming track starts at the outgoing tempo and ramps back to its own over the transition,
+unless the gap is above `max_sync_gap_pct` (8 %): then it keeps its own tempo and `unsynced_type` (cut by default) is used.
+Length and type come from the outgoing track's entry override, the incoming track's entry override, then their own points, then
+the global settings. Automix drives the channel faders and sets the crossfader to the centre; the crossfader is left at the
+centre while it runs. With `override_mode` `yield`, a control you touch during a transition (a fader, a bass knob, the
+incoming tempo, the crossfader) is left alone until the transition ends, and touching a deck's transport (pause, seek, loop,
+jog, load) abandons the transition; `hands_off` carries on regardless.
+
+WebSocket `events` topic: `queue.changed` (`revision`, `size`), `automix.state`, `automix.transition_start` (`type`,
+`from_deck`, `to_deck`, `from_track`, `to_track`, `beats`, `synced`), `automix.transition_end`, `automix.entry_failed`
+(a track that cannot be loaded is skipped), `automix.override`, `automix.finished`. After a restart the queue is restored
+(an entry whose transition was scheduled but had not started is first again) and automix waits for `start`; `resume_available`
+says it was running.

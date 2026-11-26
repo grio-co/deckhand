@@ -323,7 +323,7 @@ StripResult Library::strip_analysis(const std::vector<std::int64_t>& ids, const 
   for (const std::int64_t id : ids) {
     if (!seen.insert(id).second) continue;
     std::optional<double> bpm, gain;
-    bool locked = false, has_key = false, has_sound = false, has_wave = false;
+    bool locked = false, has_key = false, has_sound = false, has_wave = false, has_phrases = false;
     {
       Stmt s(db_, "SELECT bpm, gain_db, grid_locked, coalesce(key, '') != '', load_cue_ms IS NOT NULL OR first_sound_ms IS NOT NULL,"
                   " EXISTS(SELECT 1 FROM waveforms w WHERE w.track_id = tracks.id) FROM tracks WHERE id = ?1");
@@ -335,6 +335,11 @@ StripResult Library::strip_analysis(const std::vector<std::int64_t>& ids, const 
       has_key = s.i64(3) != 0;
       has_sound = s.i64(4) != 0;
       has_wave = s.i64(5) != 0;
+    }
+    {
+      Stmt s(db_, "SELECT 1 FROM track_phrases WHERE track_id = ?1");
+      s.bind(1, id);
+      has_phrases = s.step();
     }
     ++r.tracks;
     const std::vector<BeatSection> old_grid = beatgrid(id);
@@ -375,15 +380,18 @@ StripResult Library::strip_analysis(const std::vector<std::int64_t>& ids, const 
     }
     if (k.first_sound && has_sound) {
       count("first_sound");
-      if (!dry_run) exec1("UPDATE tracks SET load_cue_ms = NULL, first_sound_ms = NULL WHERE id = ?1", id);
+      if (!dry_run) exec1("UPDATE tracks SET load_cue_ms = NULL, first_sound_ms = NULL, last_sound_ms = NULL WHERE id = ?1", id);
+    }
+    if (k.phrases && has_phrases) {
+      count("phrases");
+      if (!dry_run) clear_phrases(id);
     }
     if (!dry_run) edit_journal(id, before);
     if (changed) ++r.tracks_changed;
   }
-  if (k.phrases) r.notes.push_back("phrases: no phrase data exists in this version; nothing to clear");
   if (k.vocals) r.notes.push_back("vocals: no vocal data exists in this version; nothing to clear");
   if (k.stems) r.notes.push_back("stems: not available; nothing cleared");
-  r.notes.push_back("undo (edit batch) restores grid, tempo, key and grid lock; loudness, waveform cache and first-sound / load cue are not undoable, the next analysis re-creates them");
+  r.notes.push_back("undo (edit batch) restores grid, tempo, key and grid lock; loudness, waveform cache, phrases and first-sound / load cue are not undoable, the next analysis re-creates them");
   r.batch_id = scope.batch();
   if (dry_run) tx.rollback();
   else tx.commit();

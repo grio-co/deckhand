@@ -1,4 +1,5 @@
 #include "deckhand/app/api_bridge.hpp"
+#include "deckhand/app/automix.hpp"
 
 #ifndef DECKHAND_WITH_API
 #define DECKHAND_WITH_API 1
@@ -19,6 +20,9 @@
 
 #include "deckhand/api/server.hpp"
 #include "deckhand/app/controls.hpp"
+#include "deckhand/app/cue_suggest.hpp"
+#include "deckhand/library/palette.hpp"
+#include "deckhand/services/track_analysis.hpp"
 #include "deckhand/app/stems_service.hpp"
 #include "deckhand/export/export_preflight.hpp"
 #include "deckhand/import/interchange.hpp"
@@ -189,6 +193,68 @@ Response undo_response(const UndoResult& u) {
 
 bool opt_bool(const Json& body, const char* key, bool def) { return body[key].is_bool() ? body[key].as_bool() : def; }
 
+// ---- cue suggestions ----
+bool check_suggest_options(SuggestOptions& o, std::string& error) {
+  if (o.max_hot < 0 || o.max_hot > 8) {
+    error = "max must be 0 to 8";
+    return false;
+  }
+  if (o.mix_out_bars != 8 && o.mix_out_bars != 16 && o.mix_out_bars != 32) {
+    error = "mix_out_bars must be 8, 16 or 32";
+    return false;
+  }
+  return true;
+}
+bool suggest_options_from_query(const Request& r, SuggestOptions& o, std::string& error) {
+  const auto get = [&](const char* k) { return r.query.count(k) ? r.query.at(k) : std::string(); };
+  if (!get("max").empty()) o.max_hot = std::atoi(get("max").c_str());
+  if (!get("mix_out_bars").empty()) o.mix_out_bars = std::atoi(get("mix_out_bars").c_str());
+  o.habit = get("habit") == "1" || get("habit") == "true";
+  o.memory = get("memory") == "1" || get("memory") == "true";
+  return check_suggest_options(o, error);
+}
+bool suggest_options_from_body(const Json& b, SuggestOptions& o, std::string& error) {
+  if (b["max"].is_number()) o.max_hot = static_cast<int>(b["max"].as_int());
+  if (b["mix_out_bars"].is_number()) o.mix_out_bars = static_cast<int>(b["mix_out_bars"].as_int());
+  o.habit = opt_bool(b, "habit", false);
+  o.memory = opt_bool(b, "memory", false);
+  return check_suggest_options(o, error);
+}
+Json suggestion_json(const CueSuggestion& c) {
+  Json j = Json::object();
+  j.set("position_ms", c.position_ms);
+  j.set("type", c.type);
+  j.set("name", c.name);
+  j.set("color", c.color);
+  j.set("color_rgb", static_cast<std::int64_t>(kPalette[std::clamp(c.color, 0, kPaletteSize - 1)]));
+  j.set("rank", c.rank);
+  j.set("memory", c.memory);
+  j.set("confidence", c.confidence);
+  j.set("bar", c.bar);
+  j.set("anchor_ms", c.anchor_ms);
+  j.set("bar_shift", c.bar_shift);
+  return j;
+}
+Json apply_json(const ApplyResult& res) {
+  Json j = Json::object(), written = Json::array(), skipped = Json::array();
+  j.set("analysed", res.has_phrases);
+  if (!res.note.empty()) j.set("note", res.note);
+  for (const AppliedCue& a : res.written) {
+    Json o = suggestion_json(a.suggestion);
+    o.set("kind", a.slot >= 0 ? "hot" : "memory");
+    if (a.slot >= 0) o.set("slot", a.slot + 1);  // 1-based like the rest of the API
+    written.push_back(std::move(o));
+  }
+  for (const SkippedCue& k : res.skipped) {
+    Json o = suggestion_json(k.suggestion);
+    o.set("reason", k.reason);
+    skipped.push_back(std::move(o));
+  }
+  j.set("written", std::move(written));
+  j.set("skipped", std::move(skipped));
+  return j;
+}
+
 Json export_stats_json(const InterchangeExportStats& s) {
   Json j = Json::object();
   j.set("tracks", s.tracks);
@@ -346,6 +412,7 @@ struct ApiBridge::Impl {
   std::string data_dir;
   std::mutex lib_mutex;
   Library lib;
+  HabitCache habit_cache;
   api::TokenStore tokens;
   std::unique_ptr<api::ApiServer> server;
   std::string description = "API off";
@@ -487,6 +554,16 @@ struct ApiBridge::Impl {
       int pdeck = 0, pslot = 0;
       std::string paction;
       if (parse_prep_control(name, pdeck, paction, pslot)) return prep_response(pdeck, paction, pslot, body);
+    }
+    {  // automix and queue controls are the application's
+      std::string action;
+      if (parse_automix_control(name, action)) {
+        std::string aerror;
+        if (!host.api_automix_control(action, has_value, v, aerror)) return Response::error(409, aerror);
+        Json j = Json::object();
+        j.set("control", name);
+        return Response::ok(std::move(j));
+      }
     }
     if (is_chain_control(name)) {  // effect chain edits: structural, applied at once, never scheduled
       if (body["in_ms"].is_number() || body["at_unix_ms"].is_number() || body["when"].is_object() || body["at_beat"].is_object() ||
@@ -704,6 +781,560 @@ struct ApiBridge::Impl {
     if (host.api_engine().fx_chain_edit(e, res)) return true;
     bad = Response::error(409, res.error.empty() ? "the engine refused the chain edit" : res.error);
     return false;
+  }
+
+
+  // ---- play queue and automix -------------------------------------------------------------------------------------------
+  static Json num_or_null(const std::optional<double>& v) { return v ? Json(*v) : Json(); }
+  static Json points_json(const AutomixPoints& p) {
+    Json j = Json::object();
+    j.set("mix_in_ms", num_or_null(p.mix_in_ms));
+    j.set("mix_out_ms", num_or_null(p.mix_out_ms));
+    j.set("transition_beats", num_or_null(p.transition_beats));
+    j.set("transition_type", p.transition_type ? Json(*p.transition_type) : Json());
+    j.set("max_play_ms", num_or_null(p.max_play_ms));
+    return j;
+  }
+  // Reads the five fields of `b` into `p`. With `merge` a missing key keeps the old value; otherwise it is unset. null always unsets.
+  static bool parse_points(const Json& b, AutomixPoints& p, bool merge, std::string& error) {
+    const auto number = [&](const char* key, std::optional<double>& out, double lo, double hi) {
+      if (!b.contains(key)) {
+        if (!merge) out.reset();
+        return true;
+      }
+      const Json& v = b[key];
+      if (v.is_null()) {
+        out.reset();
+        return true;
+      }
+      if (!v.is_number() || !(v.as_double() >= lo && v.as_double() <= hi)) {
+        error = std::string(key) + " must be a number " + std::to_string(static_cast<long long>(lo)) + ".." + std::to_string(static_cast<long long>(hi)) + " or null";
+        return false;
+      }
+      out = v.as_double();
+      return true;
+    };
+    if (!number("mix_in_ms", p.mix_in_ms, 0, 1e9) || !number("mix_out_ms", p.mix_out_ms, 0, 1e9) ||
+        !number("transition_beats", p.transition_beats, 1, 64) || !number("max_play_ms", p.max_play_ms, 1000, 1e9))
+      return false;
+    if (b.contains("transition_type")) {
+      const Json& v = b["transition_type"];
+      if (v.is_null()) {
+        p.transition_type.reset();
+      } else if (v.is_string() && AutomixSettings::valid_type(v.as_string())) {
+        p.transition_type = v.as_string();
+      } else {
+        error = "transition_type must be crossfade, cut, fade, echo_out or null";
+        return false;
+      }
+    } else if (!merge) {
+      p.transition_type.reset();
+    }
+    return true;
+  }
+  Json entry_json(const QueueEntry& e) {
+    Json j = Json::object();
+    j.set("entry_id", e.id);
+    j.set("track_id", e.track_id);
+    j.set("play_next", e.play_next);
+    j.set("overrides", points_json(e.overrides));
+    std::lock_guard<std::mutex> lock(lib_mutex);
+    if (const auto row = lib.track(e.track_id)) {
+      j.set("title", row->title);
+      j.set("artist", row->artist);
+      j.set("duration_ms", row->duration_ms);
+    }
+    return j;
+  }
+  Json queue_json(AutomixService& a) {
+    PlayQueue& q = a.queue();
+    Json j = Json::object();
+    j.set("revision", static_cast<std::int64_t>(q.revision()));
+    if (const auto c = q.current()) j.set("current", entry_json(*c));
+    else j.set("current", Json());
+    if (const auto p = q.pending()) j.set("pending", entry_json(*p));
+    else j.set("pending", Json());
+    Json up = Json::array();
+    for (const QueueEntry& e : q.upcoming()) up.push_back(entry_json(e));
+    j.set("upcoming", std::move(up));
+    const QueuePolicy pol = q.policy();
+    j.set("duplicates", pol.skip_recent ? "skip_recent" : "allow");
+    j.set("duplicates_window", pol.window);
+    return j;
+  }
+  static Json status_json(const AutomixStatus& s) {
+    Json j = Json::object();
+    j.set("state", s.state);
+    j.set("running", s.running);
+    j.set("paused", s.paused);
+    j.set("resume_available", s.resume_available);
+    j.set("current_deck", s.current_deck >= 0 ? Json(s.current_deck + 1) : Json());
+    j.set("next_deck", s.next_deck >= 0 ? Json(s.next_deck + 1) : Json());
+    j.set("current_track_id", s.current_track ? Json(s.current_track) : Json());
+    j.set("next_track_id", s.next_track ? Json(s.next_track) : Json());
+    j.set("current_entry_id", s.current_entry ? Json(s.current_entry) : Json());
+    j.set("next_entry_id", s.next_entry ? Json(s.next_entry) : Json());
+    j.set("seconds_to_transition", s.seconds_to_transition >= 0 ? Json(s.seconds_to_transition) : Json());
+    j.set("transition_type", s.transition_type.empty() ? Json() : Json(s.transition_type));
+    j.set("transition_beats", s.transition_beats);
+    j.set("synced", s.synced);
+    j.set("planned_mix_out_ms", s.planned_mix_out_ms >= 0 ? Json(s.planned_mix_out_ms) : Json());
+    j.set("note", s.note);
+    j.set("queue_revision", static_cast<std::int64_t>(s.queue_revision));
+    return j;
+  }
+  static Json settings_json(const AutomixSettings& st) {
+    Json j = Json::object();
+    j.set("transition_type", st.transition_type);
+    j.set("unsynced_type", st.unsynced_type);
+    j.set("transition_beats", st.transition_beats);
+    j.set("mix_out_bars", st.mix_out_bars);
+    j.set("max_sync_gap_pct", st.max_sync_gap_pct);
+    j.set("bass_swap", st.bass_swap);
+    j.set("override_mode", st.override_mode);
+    j.set("on_empty", st.on_empty);
+    j.set("fade_seconds", st.fade_seconds);
+    Json endless = Json::object();
+    endless.set("enabled", st.endless);
+    endless.set("source", st.endless_source);
+    endless.set("keep", st.endless_keep);
+    endless.set("order", st.endless_order);
+    j.set("endless", std::move(endless));
+    return j;
+  }
+  // Applies the keys of `b` that are present; false with an error text for a bad value.
+  static bool apply_settings(const Json& b, AutomixSettings& st, std::string& error) {
+    const auto num = [&](const char* k, double& v, double lo, double hi) {
+      if (!b.contains(k)) return true;
+      if (!b[k].is_number() || b[k].as_double() < lo || b[k].as_double() > hi) {
+        error = std::string(k) + " must be a number " + std::to_string(static_cast<long long>(lo)) + ".." + std::to_string(static_cast<long long>(hi));
+        return false;
+      }
+      v = b[k].as_double();
+      return true;
+    };
+    const auto choice = [&](const Json& src, const char* k, std::string& v, std::initializer_list<const char*> allowed) {
+      if (!src.contains(k)) return true;
+      for (const char* a : allowed)
+        if (src[k].is_string() && src[k].as_string() == a) {
+          v = a;
+          return true;
+        }
+      error = std::string(k) + " has an unknown value";
+      return false;
+    };
+    if (!choice(b, "transition_type", st.transition_type, {"crossfade", "cut", "fade", "echo_out"}) ||
+        !choice(b, "unsynced_type", st.unsynced_type, {"cut", "fade", "echo_out"}) ||
+        !choice(b, "override_mode", st.override_mode, {"yield", "hands_off"}) || !choice(b, "on_empty", st.on_empty, {"finish", "fade"}) ||
+        !num("transition_beats", st.transition_beats, 1, 64) || !num("mix_out_bars", st.mix_out_bars, 0, 128) ||
+        !num("max_sync_gap_pct", st.max_sync_gap_pct, 0, 50) || !num("fade_seconds", st.fade_seconds, 1, 60))
+      return false;
+    if (b.contains("bass_swap")) st.bass_swap = b["bass_swap"].as_bool(st.bass_swap);
+    if (b["endless"].is_object()) {
+      const Json& e = b["endless"];
+      if (e.contains("enabled")) st.endless = e["enabled"].as_bool(st.endless);
+      if (e["source"].is_string()) st.endless_source = e["source"].as_string().substr(0, 200);
+      if (e["keep"].is_number()) st.endless_keep = static_cast<int>(std::clamp<std::int64_t>(e["keep"].as_int(), 1, 100));
+      if (!choice(e, "order", st.endless_order, {"sequential", "shuffle"})) return false;
+    }
+    return true;
+  }
+  // Track ids named by an add / fill request body.
+  bool request_tracks(const Json& b, std::vector<std::int64_t>& ids, std::string& error) {
+    if (b["track_ids"].is_array()) {
+      for (std::size_t i = 0; i < b["track_ids"].size() && i < 5000; ++i) ids.push_back(b["track_ids"].at(i).as_int());
+    } else if (b["track_id"].is_number()) {
+      ids.push_back(b["track_id"].as_int());
+    } else {
+      std::string source;
+      if (b["playlist"].is_number()) source = "playlist:" + std::to_string(b["playlist"].as_int());
+      else if (b["smart_playlist"].is_number()) source = "smart:" + std::to_string(b["smart_playlist"].as_int());
+      else if (b["search"].is_string()) source = "search:" + b["search"].as_string();
+      else {
+        error = "give track_ids, track_id, playlist, smart_playlist or search";
+        return false;
+      }
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      ids = resolve_track_source(lib, source);
+    }
+    if (b["limit"].is_number() && b["limit"].as_int() > 0 && ids.size() > static_cast<std::size_t>(b["limit"].as_int())) ids.resize(static_cast<std::size_t>(b["limit"].as_int()));
+    return true;
+  }
+
+  void add_queue_routes() {
+    auto& s = *server;
+    const auto svc = [this]() { return host.api_automix(); };
+    s.add_route("GET", "/v1/queue", "read", [this, svc](const Request&) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      return Response::ok(queue_json(*a));
+    });
+    s.add_route("POST", "/v1/queue/add", "control", [this, svc](const Request& r) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      std::vector<std::int64_t> ids;
+      std::string error;
+      if (!request_tracks(r.body, ids, error)) return Response::error(400, error);
+      const std::string mode = r.body["mode"].is_string() ? r.body["mode"].as_string() : "end";
+      const bool force = r.body["force"].as_bool(false);
+      PlayQueue& q = a->queue();
+      QueueAdd res;
+      if (r.body["replace"].as_bool(false) || r.body["shuffle"].as_bool(false)) {
+        if (mode != "end") return Response::error(400, "replace and shuffle go with mode end");
+        res = q.fill(ids, r.body["shuffle"].as_bool(false), r.body["replace"].as_bool(false), force);
+      } else if (mode == "end") {
+        res = q.add_end(ids, force);
+      } else if (mode == "next") {
+        res = q.play_next(ids, force);
+      } else if (mode == "at") {
+        if (!r.body["position"].is_number()) return Response::error(400, "mode at needs position");
+        res = q.insert(ids, static_cast<int>(std::clamp<std::int64_t>(r.body["position"].as_int(), 0, 100000)), force);
+      } else {
+        return Response::error(400, "mode must be end, next or at");
+      }
+      a->flush_events();
+      Json j = Json::object();
+      Json created = Json::array();
+      for (const std::int64_t id : res.entry_ids) created.push_back(Json(id));
+      j.set("entry_ids", std::move(created));
+      j.set("added", static_cast<std::int64_t>(res.entry_ids.size()));
+      j.set("skipped", res.skipped);
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/queue/move", "control", [this, svc](const Request& r) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      if (!r.body["entry_id"].is_number() || !r.body["position"].is_number()) return Response::error(400, "give entry_id and position");
+      if (!a->queue().move(r.body["entry_id"].as_int(), static_cast<int>(std::clamp<std::int64_t>(r.body["position"].as_int(), 0, 100000)))) return Response::error(404, "no such entry in the upcoming queue");
+      a->flush_events();
+      return Response::ok(queue_json(*a));
+    });
+    s.add_route("DELETE", "/v1/queue/entries/{id}", "control", [this, svc](const Request& r) {
+      AutomixService* a = svc();
+      std::int64_t id = 0;
+      if (!a) return Response::error(503, "automix is not available");
+      if (!int_param(r, "id", id) || !a->queue().remove(id)) return Response::error(404, "no such entry in the upcoming queue");
+      a->flush_events();
+      return Response::ok();
+    });
+    s.add_route("PATCH", "/v1/queue/entries/{id}", "control", [this, svc](const Request& r) {
+      AutomixService* a = svc();
+      std::int64_t id = 0;
+      if (!a) return Response::error(503, "automix is not available");
+      if (!int_param(r, "id", id)) return Response::error(404, "no such entry");
+      PlayQueue& q = a->queue();
+      QueueEntry found;
+      bool have = false;
+      for (const QueueEntry& e : q.upcoming())
+        if (e.id == id) { found = e; have = true; }
+      if (!have) {
+        const auto c = q.current();
+        if (c && c->id == id) { found = *c; have = true; }
+      }
+      if (!have) return Response::error(404, "no such entry");
+      AutomixPoints p = found.overrides;
+      std::string error;
+      if (!parse_points(r.body, p, true, error)) return Response::error(400, error);
+      q.set_overrides(id, p);
+      if (r.body["position"].is_number()) q.move(id, static_cast<int>(std::clamp<std::int64_t>(r.body["position"].as_int(), 0, 100000)));
+      a->flush_events();
+      Json j = Json::object();
+      j.set("entry_id", id);
+      j.set("overrides", points_json(p));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/queue/clear", "control", [this, svc](const Request&) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      a->queue().clear();
+      a->flush_events();
+      return Response::ok();
+    });
+    s.add_route("POST", "/v1/queue/shuffle", "control", [this, svc](const Request&) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      a->queue().shuffle();
+      a->flush_events();
+      return Response::ok(queue_json(*a));
+    });
+    s.add_route("POST", "/v1/queue/skip", "control", [this, svc](const Request&) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      const auto e = a->queue().skip();
+      if (!e) return Response::error(409, "the queue is empty");
+      a->flush_events();
+      return Response::ok(entry_json(*e));
+    });
+    s.add_route("POST", "/v1/queue/back", "control", [this, svc](const Request&) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      if (!a->queue().back()) return Response::error(409, "nothing was played before");
+      a->skip();
+      a->flush_events();
+      return Response::ok(queue_json(*a));
+    });
+    s.add_route("GET", "/v1/queue/history", "read", [this, svc](const Request& r) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      const auto it = r.query.find("limit");
+      const int limit = it == r.query.end() ? 50 : static_cast<int>(std::clamp<long>(std::atol(it->second.c_str()), 1, 500));
+      Json items = Json::array();
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      for (const PlayedEntry& h : a->queue().history(limit)) {
+        Json e = Json::object();
+        e.set("entry_id", h.entry_id);
+        e.set("track_id", h.track_id);
+        e.set("played_at_ms", h.played_at_ms);
+        if (const auto row = lib.track(h.track_id)) {
+          e.set("title", row->title);
+          e.set("artist", row->artist);
+        }
+        items.push_back(std::move(e));
+      }
+      Json j = Json::object();
+      j.set("items", std::move(items));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("GET", "/v1/queue/settings", "read", [this, svc](const Request&) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      const QueuePolicy pol = a->queue().policy();
+      const AutomixSettings st = a->settings();
+      Json j = Json::object();
+      j.set("duplicates", pol.skip_recent ? "skip_recent" : "allow");
+      j.set("duplicates_window", pol.window);
+      j.set("endless", settings_json(st)["endless"]);
+      return Response::ok(std::move(j));
+    });
+    s.add_route("PATCH", "/v1/queue/settings", "control", [this, svc](const Request& r) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      QueuePolicy pol = a->queue().policy();
+      if (r.body.contains("duplicates")) {
+        const std::string d = r.body["duplicates"].as_string();
+        if (d != "allow" && d != "skip_recent") return Response::error(400, "duplicates must be allow or skip_recent");
+        pol.skip_recent = d == "skip_recent";
+      }
+      if (r.body["duplicates_window"].is_number()) pol.window = static_cast<int>(std::clamp<std::int64_t>(r.body["duplicates_window"].as_int(), 1, 1000));
+      AutomixSettings st = a->settings();
+      std::string error;
+      Json only = Json::object();
+      if (r.body["endless"].is_object()) only.set("endless", r.body["endless"]);
+      if (!apply_settings(only, st, error)) return Response::error(400, error);
+      a->queue().set_policy(pol);
+      a->set_settings(st);
+      a->flush_events();
+      Json j = Json::object();
+      j.set("duplicates", pol.skip_recent ? "skip_recent" : "allow");
+      j.set("duplicates_window", pol.window);
+      j.set("endless", settings_json(st)["endless"]);
+      return Response::ok(std::move(j));
+    });
+
+    // ---- automix ----
+    s.add_route("GET", "/v1/automix", "read", [this, svc](const Request&) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      Json j = status_json(a->status());
+      j.set("settings", settings_json(a->settings()));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/automix/{action}", "control", [this, svc](const Request& r) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      const std::string action = r.params.at("action");
+      std::string error;
+      if (action != "start" && action != "stop" && action != "pause" && action != "resume" && action != "skip") return Response::error(404, "unknown action");
+      const bool ok = action == "resume" ? host.api_automix_control("pause", true, 0, error) : host.api_automix_control(action, false, 0, error);
+      if (!ok) return Response::error(409, error);
+      return Response::ok(status_json(a->status()));
+    });
+    s.add_route("GET", "/v1/automix/settings", "read", [this, svc](const Request&) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      return Response::ok(settings_json(a->settings()));
+    });
+    s.add_route("PATCH", "/v1/automix/settings", "control", [this, svc](const Request& r) {
+      AutomixService* a = svc();
+      if (!a) return Response::error(503, "automix is not available");
+      AutomixSettings st = a->settings();
+      std::string error;
+      if (!apply_settings(r.body, st, error)) return Response::error(400, error);
+      a->set_settings(st);
+      return Response::ok(settings_json(st));
+    });
+    s.add_route("GET", "/v1/library/tracks/{id}/automix", "library:read", [this, svc](const Request& r) {
+      std::int64_t id = 0;
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      if (!int_param(r, "id", id) || !lib.track(id)) return Response::error(404, "no such track");
+      Json j = points_json(lib.automix_points(id));
+      AutomixService* a = svc();
+      const TrackFacts f = read_track_facts(lib, id);
+      const automix::ResolvedTrack rt = automix::resolve_track(f, AutomixPoints{}, a ? a->settings() : AutomixSettings{});
+      Json eff = Json::object();  // what automix would use now (the queue entry's overrides not included)
+      eff.set("mix_in_ms", rt.mix_in_ms);
+      eff.set("mix_out_ms", rt.mix_out_ms);
+      eff.set("mix_out_automatic", rt.mix_out_automatic);
+      eff.set("last_sound_ms", rt.last_sound_ms);
+      j.set("effective", std::move(eff));
+      return Response::ok(std::move(j));
+    });
+    // ---- phrases and cue suggestions ----
+    s.add_route("GET", "/v1/library/tracks/{id}/phrases", "library:read", [this](const Request& r) {
+      std::int64_t id = 0;
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      if (!int_param(r, "id", id) || !lib.track(id)) return Response::error(404, "no such track");
+      const auto sp = lib.phrases(id);
+      Json j = Json::object();
+      j.set("track_id", id);
+      j.set("analysed", sp.has_value() && !sp->sections.empty());
+      if (!sp) return Response::ok(std::move(j));
+      j.set("version", sp->version);
+      j.set("gridded", sp->gridded);
+      j.set("time_based", sp->time_based);
+      j.set("origin_ms", sp->origin_ms);
+      j.set("pickup_ms", sp->pickup_ms);
+      j.set("bar_ms", sp->bar_ms);
+      j.set("total_bars", sp->total_bars);
+      Json secs = Json::array();
+      for (const StoredPhraseSection& x : sp->sections) {
+        Json o = Json::object();
+        o.set("start_ms", x.start_ms);
+        o.set("end_ms", x.end_ms);
+        o.set("start_bar", x.start_bar);
+        o.set("end_bar", x.end_bar);
+        o.set("bars", x.bars);
+        o.set("energy", x.energy);
+        o.set("label", x.label);
+        o.set("label_confidence", x.label_confidence);
+        o.set("kind", x.kind);
+        o.set("boundary_confidence", x.boundary_confidence);
+        o.set("phrase_aligned", x.phrase_aligned);
+        o.set("kick", x.kick);
+        secs.push_back(std::move(o));
+      }
+      j.set("sections", std::move(secs));
+      if (r.query.count("bars") && r.query.at("bars") == "1") {  // the compact per-bar data, for drawing an energy strip
+        Json starts = Json::array(), energy = Json::array();
+        for (const double v : sp->bar_starts_ms) starts.push_back(Json(v));
+        for (const float v : sp->bar_energy) energy.push_back(Json(static_cast<double>(v)));
+        j.set("bar_starts_ms", std::move(starts));
+        j.set("bar_energy", std::move(energy));
+      }
+      return Response::ok(std::move(j));
+    });
+    s.add_route("GET", "/v1/library/tracks/{id}/cue-suggestions", "library:read", [this](const Request& r) {
+      std::int64_t id = 0;
+      SuggestOptions o;
+      std::string error;
+      if (!suggest_options_from_query(r, o, error)) return Response::error(400, error);
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      if (!int_param(r, "id", id) || !lib.track(id)) return Response::error(404, "no such track");
+      const SuggestResult res = suggest_for_track(lib, id, o, &habit_cache);
+      Json j = Json::object();
+      j.set("track_id", id);
+      j.set("analysed", res.has_phrases);
+      j.set("habit", o.habit);
+      j.set("habit_samples", res.habit_samples);
+      if (!res.note.empty()) j.set("note", res.note);
+      Json items = Json::array();
+      for (const CueSuggestion& c : res.items) items.push_back(suggestion_json(c));
+      j.set("items", std::move(items));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/tracks/{id}/cue-suggestions/apply", "library:write", [this](const Request& r) {
+      std::int64_t id = 0;
+      SuggestOptions o;
+      std::string error;
+      if (!suggest_options_from_body(r.body, o, error)) return Response::error(400, error);
+      const bool dry = opt_bool(r.body, "dry_run", false);
+      Json j = apply_json(ApplyResult{});
+      ApplyResult res;
+      std::int64_t batch = 0;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (!int_param(r, "id", id) || !lib.track(id)) return Response::error(404, "no such track");
+        EditScope api_edit("api");
+        res = apply_suggestions(lib, id, o, &habit_cache, dry);
+        batch = dry || res.written.empty() ? 0 : api_edit.batch();
+      }
+      j = apply_json(res);
+      j.set("track_id", id);
+      j.set("dry_run", dry);
+      j.set("batch_id", batch);
+      if (!dry && !res.written.empty()) {
+        host.api_library_changed();
+        host.api_cues_changed({id});
+      }
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/cue-suggestions/apply", "library:write", [this](const Request& r) {
+      SuggestOptions o;
+      std::string error;
+      if (!suggest_options_from_body(r.body, o, error)) return Response::error(400, error);
+      const bool dry = opt_bool(r.body, "dry_run", false);
+      std::vector<std::int64_t> ids, changed;
+      Json tracks = Json::array();
+      int written = 0, no_phrases = 0;
+      std::int64_t batch = 0;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (r.body["ids"].is_array()) {
+          if (!id_list(r.body["ids"], ids)) return Response::error(400, "ids must be numbers");
+        } else if (r.body["playlist_id"].is_number() || r.body["search"].is_string()) {
+          ids = lib.track_ids(r.body["playlist_id"].as_int(), r.body["search"].as_string());
+        } else {
+          return Response::error(400, "select tracks with ids, or playlist_id and/or search");
+        }
+        if (ids.size() > 5000) return Response::error(400, "at most 5000 tracks per call");
+        EditScope api_edit("api");  // one batch for every track: one undo_batch takes it all back
+        if (!dry) lib.db().exec("BEGIN IMMEDIATE");
+        try {
+          for (const std::int64_t id : ids) {
+            if (!lib.track(id)) continue;
+            const ApplyResult res = apply_suggestions(lib, id, o, &habit_cache, dry);
+            if (!res.has_phrases) ++no_phrases;
+            if (!res.written.empty()) {
+              written += static_cast<int>(res.written.size());
+              changed.push_back(id);
+            }
+            if (!res.written.empty() || !res.has_phrases || !res.skipped.empty()) {
+              Json t = apply_json(res);
+              t.set("track_id", id);
+              tracks.push_back(std::move(t));
+            }
+          }
+          if (!dry) lib.db().exec("COMMIT");
+        } catch (...) {
+          if (!dry) lib.db().exec("ROLLBACK");
+          throw;
+        }
+        batch = dry || changed.empty() ? 0 : api_edit.batch();
+      }
+      Json j = Json::object();
+      j.set("dry_run", dry);
+      j.set("batch_id", batch);
+      j.set("tracks_looked_at", static_cast<std::int64_t>(ids.size()));
+      j.set("tracks_changed", static_cast<std::int64_t>(changed.size()));
+      j.set("cues_written", written);
+      j.set("tracks_without_phrases", no_phrases);
+      j.set("tracks", std::move(tracks));
+      if (!dry && !changed.empty()) {
+        host.api_library_changed();
+        host.api_cues_changed(changed);
+      }
+      return Response::ok(std::move(j));
+    });
+    s.add_route("PUT", "/v1/library/tracks/{id}/automix", "library:write", [this](const Request& r) {
+      std::int64_t id = 0;
+      AutomixPoints p;
+      std::string error;
+      if (!parse_points(r.body, p, false, error)) return Response::error(400, error);
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      if (!int_param(r, "id", id) || !lib.track(id)) return Response::error(404, "no such track");
+      lib.set_automix_points(id, p);
+      return Response::ok(points_json(p));
+    });
   }
 
   void add_chain_routes() {
@@ -2101,6 +2732,16 @@ struct ApiBridge::Impl {
     }
     server = std::make_unique<api::ApiServer>(tokens, cfg);
     add_routes();
+    if (AutomixService* a = host.api_automix()) {
+      a->set_listener([this](const AutomixEvent& ev) {
+        if (!server) return;
+        Json e = Json::object();
+        e.set("type", ev.type);
+        for (const auto& kv : ev.text) e.set(kv.first, kv.second);
+        for (const auto& kv : ev.num) e.set(kv.first, kv.second);
+        server->publish("events", e);
+      });
+    }
     if (StemService* st = host.api_stems()) {
       st->set_event_sink([this](const std::string& type, const std::string& id, const std::string& state, float progress, const std::string& error) {
         if (!server) return;
@@ -2114,6 +2755,7 @@ struct ApiBridge::Impl {
       });
     }
     add_chain_routes();
+    add_queue_routes();
     add_keymap_stem_routes();
     if (!server->start(&error)) {
       DH_LOG(Error, "API did not start: %s", error.c_str());
@@ -2137,6 +2779,7 @@ ApiBridge::ApiBridge(ApiHost& host, const std::string& data_dir) : impl_(std::ma
 
 ApiBridge::~ApiBridge() {
   if (StemService* st = impl_->host.api_stems()) st->set_event_sink(nullptr);
+  if (AutomixService* a = impl_->host.api_automix()) a->set_listener(nullptr);
   impl_->quit = true;
   if (impl_->ticker.joinable()) impl_->ticker.join();
   if (impl_->server) impl_->server->stop();

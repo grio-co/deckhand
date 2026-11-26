@@ -128,6 +128,7 @@ template gridtools n color {
       use tog bind="deck[${n}].cue.memory_next" label="@cue.mem_next" on=accent
       use tog bind="deck[${n}].cue.loop_save" label="@cue.loop_save" on=accent
       use tog bind="deck[${n}].cue.loop_recall" label="@cue.loop_recall" on=accent
+      use tog bind="deck[${n}].cue.suggest" label="@cue.suggest" on=accent
       spacer w=12
       use tog bind="deck[${n}].grid.add_section" label="@grid.add_section" on=accent
       use tog bind="deck[${n}].grid.remove_section" label="@grid.remove_section" on=bad

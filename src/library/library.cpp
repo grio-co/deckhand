@@ -283,6 +283,38 @@ void Library::migrate() {
     tx.commit();
     DH_LOG(Info, "library migrated to schema %d (duplicate finder)", 6);
   }
+  if (version < 7) {
+    // Automix: per-track mixing points, the persisted play queue and its history, and the end of the last audible sound.
+    Transaction tx(db_);
+    for (const char* t : {"tracks", "trash_tracks"})
+      if (!has_column(db_, t, "last_sound_ms")) db_.exec(std::string("ALTER TABLE ") + t + " ADD COLUMN last_sound_ms REAL;");
+    db_.exec(
+        "CREATE TABLE IF NOT EXISTS automix_points ("
+        " track_id INTEGER PRIMARY KEY, mix_in_ms REAL, mix_out_ms REAL, transition_beats REAL, transition_type TEXT, max_play_ms REAL);"
+        "CREATE TABLE IF NOT EXISTS play_queue ("
+        " pos INTEGER NOT NULL, entry_id INTEGER PRIMARY KEY, track_id INTEGER NOT NULL, play_next INTEGER NOT NULL DEFAULT 0,"
+        " pending INTEGER NOT NULL DEFAULT 0, mix_in_ms REAL, mix_out_ms REAL, transition_beats REAL, transition_type TEXT, max_play_ms REAL);"
+        "CREATE TABLE IF NOT EXISTS play_queue_history ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, entry_id INTEGER NOT NULL, track_id INTEGER NOT NULL, played_at_ms INTEGER NOT NULL);"
+        "UPDATE schema_version SET version = 7;");
+    tx.commit();
+    DH_LOG(Info, "library migrated to schema %d (automix, play queue)", 7);
+  }
+  if (version < 8) {
+    // Phrase analysis: sections plus the compact per-bar data, with the analysis version.
+    Transaction tx(db_);
+    db_.exec(
+        "CREATE TABLE IF NOT EXISTS track_phrases ("
+        " track_id INTEGER PRIMARY KEY, version INTEGER NOT NULL, gridded INTEGER NOT NULL, time_based INTEGER NOT NULL,"
+        " origin_ms REAL, pickup_ms REAL, bar_ms REAL, total_bars INTEGER, bar_starts TEXT, bar_energy TEXT);"
+        "CREATE TABLE IF NOT EXISTS phrase_sections ("
+        " track_id INTEGER NOT NULL, idx INTEGER NOT NULL, start_ms REAL, end_ms REAL, start_bar INTEGER, end_bar INTEGER,"
+        " bars INTEGER, energy INTEGER, label TEXT, label_confidence REAL, kind TEXT, boundary_confidence REAL,"
+        " phrase_aligned INTEGER, kick REAL, PRIMARY KEY(track_id, idx));"
+        "UPDATE schema_version SET version = 8;");
+    tx.commit();
+    DH_LOG(Info, "library migrated to schema %d (phrases)", 8);
+  }
   {
     // Substring search index (FTS5 trigram, case-insensitive) kept in step with `tracks` by triggers. Optional: an
     // SQLite build without FTS5 keeps working with the LIKE scan. Tried on every start until it exists.
@@ -600,13 +632,254 @@ void Library::set_bpm(std::int64_t track_id, double bpm) {
 
 TrackCues Library::track_cues(std::int64_t track_id) {
   TrackCues c;
-  Stmt s(db_, "SELECT main_cue_ms, load_cue_ms, first_sound_ms FROM tracks WHERE id = ?1");
+  Stmt s(db_, "SELECT main_cue_ms, load_cue_ms, first_sound_ms, last_sound_ms FROM tracks WHERE id = ?1");
   s.bind(1, track_id);
   if (!s.step()) return c;
   if (!s.is_null(0)) c.main_cue_ms = s.f64(0);
   if (!s.is_null(1)) c.load_cue_ms = s.f64(1);
   if (!s.is_null(2)) c.first_sound_ms = s.f64(2);
+  if (!s.is_null(3)) c.last_sound_ms = s.f64(3);
   return c;
+}
+
+void Library::set_last_sound_ms(std::int64_t track_id, std::optional<double> ms) {
+  Stmt u(db_, "UPDATE tracks SET last_sound_ms = ?1 WHERE id = ?2");
+  if (ms) u.bind(1, *ms);
+  else u.bind_null(1);
+  u.bind(2, track_id);
+  u.run();
+}
+
+namespace {
+void bind_opt(Stmt& s, int i, const std::optional<double>& v) {
+  if (v) s.bind(i, *v);
+  else s.bind_null(i);
+}
+void bind_opt(Stmt& s, int i, const std::optional<std::string>& v) {
+  if (v) s.bind(i, std::string_view(*v));
+  else s.bind_null(i);
+}
+// Reads the five automix columns starting at `col`.
+AutomixPoints read_points(const Stmt& s, int col) {
+  AutomixPoints p;
+  if (!s.is_null(col)) p.mix_in_ms = s.f64(col);
+  if (!s.is_null(col + 1)) p.mix_out_ms = s.f64(col + 1);
+  if (!s.is_null(col + 2)) p.transition_beats = s.f64(col + 2);
+  if (!s.is_null(col + 3)) p.transition_type = s.text(col + 3);
+  if (!s.is_null(col + 4)) p.max_play_ms = s.f64(col + 4);
+  return p;
+}
+}  // namespace
+
+AutomixPoints Library::automix_points(std::int64_t track_id) {
+  Stmt s(db_, "SELECT mix_in_ms, mix_out_ms, transition_beats, transition_type, max_play_ms FROM automix_points WHERE track_id = ?1");
+  s.bind(1, track_id);
+  return s.step() ? read_points(s, 0) : AutomixPoints{};
+}
+
+void Library::set_automix_points(std::int64_t track_id, const AutomixPoints& p) {
+  if (p.empty()) {
+    Stmt d(db_, "DELETE FROM automix_points WHERE track_id = ?1");
+    d.bind(1, track_id);
+    d.run();
+    return;
+  }
+  Stmt u(db_, "INSERT OR REPLACE INTO automix_points(track_id, mix_in_ms, mix_out_ms, transition_beats, transition_type, max_play_ms)"
+              " VALUES (?1, ?2, ?3, ?4, ?5, ?6)");
+  u.bind(1, track_id);
+  bind_opt(u, 2, p.mix_in_ms);
+  bind_opt(u, 3, p.mix_out_ms);
+  bind_opt(u, 4, p.transition_beats);
+  bind_opt(u, 5, p.transition_type);
+  bind_opt(u, 6, p.max_play_ms);
+  u.run();
+}
+
+namespace {
+std::string join_numbers(const std::vector<double>& v, const char* fmt) {
+  std::string out;
+  char buf[48];
+  for (std::size_t i = 0; i < v.size(); ++i) {
+    std::snprintf(buf, sizeof buf, fmt, v[i]);
+    if (i) out += ' ';
+    out += buf;
+  }
+  return out;
+}
+std::vector<double> split_numbers(const std::string& t) {
+  std::vector<double> out;
+  const char* p = t.c_str();
+  char* end = nullptr;
+  while (*p) {
+    const double v = std::strtod(p, &end);
+    if (end == p) break;
+    out.push_back(v);
+    p = end;
+  }
+  return out;
+}
+}  // namespace
+
+std::optional<StoredPhrases> Library::phrases(std::int64_t track_id) {
+  Stmt s(db_, "SELECT version, gridded, time_based, origin_ms, pickup_ms, bar_ms, total_bars, bar_starts, bar_energy"
+              " FROM track_phrases WHERE track_id = ?1");
+  s.bind(1, track_id);
+  if (!s.step()) return std::nullopt;
+  StoredPhrases p;
+  p.version = static_cast<int>(s.i64(0));
+  p.gridded = s.i64(1) != 0;
+  p.time_based = s.i64(2) != 0;
+  p.origin_ms = s.f64(3);
+  p.pickup_ms = s.f64(4);
+  p.bar_ms = s.f64(5);
+  p.total_bars = static_cast<int>(s.i64(6));
+  p.bar_starts_ms = split_numbers(s.text(7));
+  for (const double v : split_numbers(s.text(8))) p.bar_energy.push_back(static_cast<float>(v));
+  Stmt q(db_, "SELECT start_ms, end_ms, start_bar, end_bar, bars, energy, label, label_confidence, kind, boundary_confidence,"
+              " phrase_aligned, kick FROM phrase_sections WHERE track_id = ?1 ORDER BY idx");
+  q.bind(1, track_id);
+  while (q.step()) {
+    StoredPhraseSection x;
+    x.start_ms = q.f64(0);
+    x.end_ms = q.f64(1);
+    x.start_bar = static_cast<int>(q.i64(2));
+    x.end_bar = static_cast<int>(q.i64(3));
+    x.bars = static_cast<int>(q.i64(4));
+    x.energy = static_cast<int>(q.i64(5));
+    x.label = q.text(6);
+    x.label_confidence = q.f64(7);
+    x.kind = q.text(8);
+    x.boundary_confidence = q.f64(9);
+    x.phrase_aligned = q.i64(10) != 0;
+    x.kick = q.f64(11);
+    p.sections.push_back(std::move(x));
+  }
+  return p;
+}
+
+void Library::clear_phrases(std::int64_t track_id) {
+  OptionalTx tx(db_);
+  for (const char* sql : {"DELETE FROM track_phrases WHERE track_id = ?1", "DELETE FROM phrase_sections WHERE track_id = ?1"}) {
+    Stmt d(db_, sql);
+    d.bind(1, track_id);
+    d.run();
+  }
+  tx.commit();
+}
+
+void Library::set_phrases(std::int64_t track_id, const StoredPhrases& p) {
+  OptionalTx tx(db_);
+  clear_phrases(track_id);
+  {
+    Stmt u(db_, "INSERT INTO track_phrases(track_id, version, gridded, time_based, origin_ms, pickup_ms, bar_ms, total_bars, bar_starts, bar_energy)"
+                " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)");
+    u.bind(1, track_id);
+    u.bind(2, static_cast<std::int64_t>(p.version));
+    u.bind(3, static_cast<std::int64_t>(p.gridded ? 1 : 0));
+    u.bind(4, static_cast<std::int64_t>(p.time_based ? 1 : 0));
+    u.bind(5, p.origin_ms);
+    u.bind(6, p.pickup_ms);
+    u.bind(7, p.bar_ms);
+    u.bind(8, static_cast<std::int64_t>(p.total_bars));
+    u.bind(9, std::string_view(join_numbers(p.bar_starts_ms, "%.2f")));
+    std::vector<double> e(p.bar_energy.begin(), p.bar_energy.end());
+    u.bind(10, std::string_view(join_numbers(e, "%.3f")));
+    u.run();
+  }
+  std::int64_t idx = 0;
+  for (const StoredPhraseSection& x : p.sections) {
+    Stmt u(db_, "INSERT INTO phrase_sections(track_id, idx, start_ms, end_ms, start_bar, end_bar, bars, energy, label, label_confidence,"
+                " kind, boundary_confidence, phrase_aligned, kick) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)");
+    u.bind(1, track_id);
+    u.bind(2, idx++);
+    u.bind(3, x.start_ms);
+    u.bind(4, x.end_ms);
+    u.bind(5, static_cast<std::int64_t>(x.start_bar));
+    u.bind(6, static_cast<std::int64_t>(x.end_bar));
+    u.bind(7, static_cast<std::int64_t>(x.bars));
+    u.bind(8, static_cast<std::int64_t>(x.energy));
+    u.bind(9, std::string_view(x.label));
+    u.bind(10, x.label_confidence);
+    u.bind(11, std::string_view(x.kind));
+    u.bind(12, x.boundary_confidence);
+    u.bind(13, static_cast<std::int64_t>(x.phrase_aligned ? 1 : 0));
+    u.bind(14, x.kick);
+    u.run();
+  }
+  tx.commit();
+}
+
+std::vector<std::int64_t> Library::tracks_with_phrases() {
+  std::vector<std::int64_t> out;
+  Stmt s(db_, "SELECT p.track_id FROM track_phrases p JOIN tracks t ON t.id = p.track_id WHERE p.total_bars > 0 OR p.gridded = 0 ORDER BY p.track_id");
+  while (s.step()) out.push_back(s.i64(0));
+  return out;
+}
+
+std::vector<QueueRow> Library::play_queue() {
+  std::vector<QueueRow> out;
+  Stmt s(db_, "SELECT entry_id, track_id, play_next, pending, mix_in_ms, mix_out_ms, transition_beats, transition_type, max_play_ms"
+              " FROM play_queue ORDER BY pending DESC, pos");
+  while (s.step()) {
+    QueueRow r;
+    r.entry_id = s.i64(0);
+    r.track_id = s.i64(1);
+    r.play_next = s.i64(2) != 0;
+    r.pending = s.i64(3) != 0;
+    r.overrides = read_points(s, 4);
+    out.push_back(std::move(r));
+  }
+  return out;
+}
+
+void Library::save_play_queue(const std::vector<QueueRow>& rows) {
+  Transaction tx(db_);
+  db_.exec("DELETE FROM play_queue");
+  Stmt i(db_, "INSERT INTO play_queue(pos, entry_id, track_id, play_next, pending, mix_in_ms, mix_out_ms, transition_beats, transition_type, max_play_ms)"
+              " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)");
+  int pos = 0;
+  for (const QueueRow& r : rows) {
+    i.bind(1, pos++).bind(2, r.entry_id).bind(3, r.track_id).bind(4, r.play_next ? 1 : 0).bind(5, r.pending ? 1 : 0);
+    bind_opt(i, 6, r.overrides.mix_in_ms);
+    bind_opt(i, 7, r.overrides.mix_out_ms);
+    bind_opt(i, 8, r.overrides.transition_beats);
+    bind_opt(i, 9, r.overrides.transition_type);
+    bind_opt(i, 10, r.overrides.max_play_ms);
+    i.run();
+  }
+  tx.commit();
+}
+
+std::int64_t Library::add_queue_history(std::int64_t entry_id, std::int64_t track_id, std::int64_t played_at_ms) {
+  Stmt i(db_, "INSERT INTO play_queue_history(entry_id, track_id, played_at_ms) VALUES (?1, ?2, ?3)");
+  i.bind(1, entry_id).bind(2, track_id).bind(3, played_at_ms);
+  i.run();
+  Stmt r(db_, "SELECT last_insert_rowid()");
+  return r.step() ? r.i64(0) : 0;
+}
+
+std::vector<QueueHistoryRow> Library::queue_history(int limit) {
+  std::vector<QueueHistoryRow> out;
+  Stmt s(db_, "SELECT id, entry_id, track_id, played_at_ms FROM play_queue_history ORDER BY id DESC LIMIT ?1");
+  s.bind(1, std::max(1, limit));
+  while (s.step()) out.push_back({s.i64(0), s.i64(1), s.i64(2), s.i64(3)});
+  return out;
+}
+
+std::optional<QueueHistoryRow> Library::pop_queue_history() {
+  const auto rows = queue_history(1);
+  if (rows.empty()) return std::nullopt;
+  Stmt d(db_, "DELETE FROM play_queue_history WHERE id = ?1");
+  d.bind(1, rows[0].id);
+  d.run();
+  return rows[0];
+}
+
+void Library::clear_queue_history() { db_.exec("DELETE FROM play_queue_history"); }
+
+std::int64_t Library::max_queue_entry_id() {
+  Stmt s(db_, "SELECT max((SELECT coalesce(max(entry_id), 0) FROM play_queue), (SELECT coalesce(max(entry_id), 0) FROM play_queue_history))");
+  return s.step() ? s.i64(0) : 0;
 }
 
 void Library::set_main_cue_ms(std::int64_t track_id, std::optional<double> ms) {
@@ -752,6 +1025,8 @@ void Library::remove_track(std::int64_t track_id) {
     std::erase(ids, track_id);
     set_playlist_tracks(list, ids);
   }
+  copy("DELETE FROM track_phrases WHERE track_id = ?1");
+  copy("DELETE FROM phrase_sections WHERE track_id = ?1");
   copy("DELETE FROM tracks WHERE id = ?1");
   copy("DELETE FROM import_map WHERE entity = 'track' AND local_id = ?1");
   tx.commit();

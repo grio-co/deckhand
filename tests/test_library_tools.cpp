@@ -156,11 +156,12 @@ static void test_strip() {
   }
   lib.set_grid_locked(b, true);
 
+  lib.set_phrases(a, StoredPhrases{});
   StripKinds k;
   k.grid = k.key = k.loudness = k.waveform = k.first_sound = k.phrases = k.vocals = k.stems = true;
   StripResult dry = lib.strip_analysis({a, b}, k, false, true);
   CHECK(dry.dry_run && dry.cleared["grid"] == 1 && dry.skipped_grid_locked == 1 && dry.cleared["key"] == 2);
-  CHECK(lib.track(a)->key == "8A" && lib.beatgrid(a).size() == 1 && lib.gain_db(a));  // untouched
+  CHECK(lib.track(a)->key == "8A" && lib.beatgrid(a).size() == 1 && lib.gain_db(a) && lib.phrases(a));  // untouched
 
   StripKinds only_key;
   only_key.key = true;
@@ -169,7 +170,7 @@ static void test_strip() {
   CHECK(lib.undo_batch(r1.batch_id).status == UndoStatus::Ok && lib.track(a)->key == "8A");
 
   StripResult r = lib.strip_analysis({a, b}, k);
-  CHECK(r.tracks == 2 && r.cleared["grid"] == 1 && r.skipped_grid_locked == 1 && r.notes.size() >= 4);
+  CHECK(r.tracks == 2 && r.cleared["grid"] == 1 && r.skipped_grid_locked == 1 && r.notes.size() >= 3 && r.cleared["phrases"] == 1 && !lib.phrases(a));
   CHECK(lib.beatgrid(a).empty() && lib.track(a)->bpm == 0 && !lib.gain_db(a) && !lib.track_cues(a).load_cue_ms && !lib.track_cues(a).first_sound_ms);
   CHECK(count(lib, "SELECT count(*) FROM waveforms") == 0);
   CHECK(lib.beatgrid(b).size() == 1 && lib.track(b)->bpm == 128);          // locked: kept
@@ -205,7 +206,7 @@ static void test_duplicates_and_merge() {
   Stmt fm3(lib.db(), "UPDATE tracks SET bitrate=192 WHERE id = ?1");
   fm3.bind(1, t3);
   fm3.run();
-  CHECK(count(lib, "SELECT max(version) FROM schema_version") == 6 && kLibrarySchemaVersion == 6);
+  CHECK(count(lib, "SELECT max(version) FROM schema_version") == 8 && kLibrarySchemaVersion == 8);
 
   CHECK(lib.find_duplicates().size() == 1);  // likely only: no hashes yet
   HashProgress hp = lib.hash_pending(50);

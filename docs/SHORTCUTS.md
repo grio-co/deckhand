@@ -77,6 +77,8 @@ Besides the engine's control table the keymap can call these application actions
 
 | Shortcut | What it does | Control |
 |---|---|---|
+| `Mod+E` | Add the selected tracks to the end of the play queue | `ui.queue_add` |
+| `Mod+Shift+E` | Play the selected tracks next | `ui.queue_play_next` |
 | `Mod+,` | Open or close the settings | `ui.settings` |
 | `F1` | Open or close the keyboard shortcuts | `ui.shortcuts` |
 | `F2` | Open or close the sampler | `ui.sampler` |
@@ -150,6 +152,7 @@ Besides the engine's control table the keymap can call these application actions
 | `Shift+S` | Headphone cue for this channel | `deck1.pfl` |
 | `Shift+D` | Keep the pitch when the tempo changes | `deck1.key_lock` |
 | `Shift+F` | Reset the tempo fader to zero | `deck1.tempo 0` |
+| `Mod+G` | Suggest cues for deck 1 from the phrase analysis (free hot slots only) | `deck1.suggest_cues` |
 | `Shift+G` | Delete the memory cue nearest the playhead | `deck1.memory_cue_delete` |
 | `Z` | Set the loop start | `deck1.loop_in` |
 | `X` | Set the loop end and start looping | `deck1.loop_out` |
@@ -194,6 +197,7 @@ Besides the engine's control table the keymap can call these application actions
 | `Shift+L` | Headphone cue for this channel | `deck2.pfl` |
 | `Shift+K` | Keep the pitch when the tempo changes | `deck2.key_lock` |
 | `Shift+J` | Reset the tempo fader to zero | `deck2.tempo 0` |
+| `Mod+J` | Suggest cues for deck 2 from the phrase analysis (free hot slots only) | `deck2.suggest_cues` |
 | `Shift+H` | Delete the memory cue nearest the playhead | `deck2.memory_cue_delete` |
 | `/` | Set the loop start | `deck2.loop_in` |
 | `.` | Set the loop end and start looping | `deck2.loop_out` |
@@ -217,6 +221,14 @@ Besides the engine's control table the keymap can call these application actions
 | `Mod+Left` | Crossfader fully left | `mixer.crossfader 0` |
 | `Mod+Right` | Crossfader fully right | `mixer.crossfader 1` |
 | `Mod+Shift+Down` | Crossfader to the centre | `mixer.crossfader 0.5` |
+
+### Other
+
+| Shortcut | What it does | Control |
+|---|---|---|
+| `Mod+Shift+A` | Start or stop automix | `automix.run` |
+| `Mod+Shift+K` | Pause or resume automix | `automix.pause` |
+| `Mod+Shift+N` | Automix: start the next transition now, on the next bar | `automix.skip` |
 
 ### Pre-listen
 

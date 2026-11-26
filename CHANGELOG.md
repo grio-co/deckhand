@@ -6,6 +6,15 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Automix and play queue: add to end or "play next", reorder, endless fill from a playlist; per-track
+  mix-in/mix-out points, transition length and type, maximum play time; crossfade with bass swap,
+  cut, fade and echo-out, started on a bar line with the incoming beat aligned (0.3 samples in the
+  offline simulation) and the tempo ramped back to the track's own; controls you touch are handed
+  back. Queue tab in the Tools panel. Library schema 7. Nobody has listened to a transition yet.
+- Phrase analysis: sections (intro, build, drop, breakdown, outro...) with an energy level, drawn
+  on the waveform; cue suggestions written to free slots only as one undoable step, biased toward
+  the user's own cue habits; phrase-based mix points for automix. Library schema 8. Tuned on
+  synthetic arrangements only.
 - Effect chains: up to eight effects in any order on each deck, the master, the microphone and
   the sampler, edited without clicks (tails ring out); new isolator, slicer, build-up and one-knob
   filter; chain presets; controls and REST routes (`/v1/fx/chains/...`). Engine protocol 5.

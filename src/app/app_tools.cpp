@@ -63,9 +63,9 @@ void App::draw_tools(const Rect& m) {
   const ui::Theme& th = theme_;
   const float x = m.x + 20, rw = m.w - 40;
   float y = m.y + 46;
-  const char* tabs[] = {"tools.tab_stems", "tools.tab_trash", "tools.tab_history", "tools.tab_dups"};
-  const float tw = (rw - 18) / 4;
-  for (int i = 0; i < 4; ++i) {
+  const char* tabs[] = {"tools.tab_stems", "tools.tab_trash", "tools.tab_history", "tools.tab_dups", "tools.tab_queue"};
+  const float tw = (rw - 24) / 5;
+  for (int i = 0; i < 5; ++i) {
     if (ui_button({x + i * (tw + 6), y, tw, 26}, T(tabs[i]), tools_tab_ == i) && tools_tab_ != i) {
       tools_tab_ = i;
       tools_reload();
@@ -175,6 +175,55 @@ void App::draw_tools(const Rect& m) {
         break;
       }
       cy += row_h;
+    }
+  } else if (tools_tab_ == 4) {
+    // Play queue and automix: transport, transition, the upcoming entries.
+    if (!queue_ || !automix_) {
+      empty();
+    } else {
+      const AutomixStatus st = automix_->status();
+      const AutomixSettings as = automix_->settings();
+      std::string err;
+      float bx = lx;
+      const auto button = [&](const std::string& label, float w, bool on) {
+        const bool hit = ui_button({bx, cy, w, 26}, label, on);
+        bx += w + 6;
+        return hit;
+      };
+      if (button(T(st.running ? "queue.stop" : "queue.start"), 96, st.running)) automix_control(st.running ? "stop" : "start", false, 0, err);
+      if (button(T(st.paused ? "queue.resume" : "queue.pause"), 96, st.paused)) automix_control("pause", false, 0, err);
+      if (button(T("queue.skip"), 96, false)) automix_control("skip", false, 0, err);
+      cy += 32;
+      bx = lx;
+      if (button(T("queue.type", {{"type", as.transition_type}}), 180, false)) automix_control("next_type", false, 0, err);
+      if (button(T("queue.length", {{"beats", fmt("%g", as.transition_beats)}}), 140, false)) automix_control("next_length", false, 0, err);
+      cy += 32;
+      bx = lx;
+      if (button(T("queue.add_selected"), 170, false)) queue_selected(false);
+      if (button(T("queue.play_next_selected"), 190, false)) queue_selected(true);
+      cy += 34;
+      dl_.text(lx, cy, skin_->fit(T("queue.state", {{"state", st.state}, {"count", static_cast<int>(queue_->size())}}), 11, 0, rw), 11, th.dim, Align::Left, rw);
+      cy += 20;
+      const std::vector<QueueEntry> up = queue_->upcoming();
+      if (up.empty()) dl_.text(lx, cy + 4, T("queue.empty"), 12, th.dim);
+      if (up.empty()) cy += row_h;
+      const float small = 28, lw2 = rw - 3 * (small + 4) - 10;
+      for (std::size_t i = 0; i < up.size() && i < 200; ++i) {
+        std::string title = std::to_string(up[i].track_id), artist;
+        if (const auto row = lib_->track(up[i].track_id)) {
+          title = row->title;
+          artist = row->artist;
+        }
+        dl_.text(lx, cy + 1, skin_->fit(std::to_string(i + 1) + "  " + title, 12, 0, lw2), 12, th.text, Align::Left, lw2);
+        dl_.text(lx, cy + 17, skin_->fit(up[i].play_next ? T("queue.play_next_tag") + "  " + artist : artist, 10, 0, lw2), 10, th.dim, Align::Left, lw2);
+        const float bx0 = x + rw - 3 * (small + 4);
+        bool changed = false;
+        if (i > 0 && ui_button({bx0, cy + 3, small, 26}, "^", false)) changed = queue_->move(up[i].id, static_cast<int>(i) - 1);
+        else if (i + 1 < up.size() && ui_button({bx0 + small + 4, cy + 3, small, 26}, "v", false)) changed = queue_->move(up[i].id, static_cast<int>(i) + 1);
+        else if (ui_button({bx0 + 2 * (small + 4), cy + 3, small, 26}, "x", false, th.warn)) changed = queue_->remove(up[i].id);
+        if (changed) break;
+        cy += row_h;
+      }
     }
   } else {
     if (tools_dup_left_ > 0) {

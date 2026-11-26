@@ -255,6 +255,7 @@ const PrepDef kPrep[] = {
     {"grid_undo", "grid.undo", "none", "Undo the last grid change"},
     {"memory_cue_set", "cue.memory_set", "none = at the playhead, or seconds", "Add a memory cue (body: text = name, color = 0xRRGGBB as a number)"},
     {"memory_cue_delete", "cue.memory_delete", "none; slot-less: nearest to the playhead, or the 1-based number in body slot", "Delete a memory cue"},
+    {"suggest_cues", "cue.suggest", "none = free hot slots, 1 = and memory cues at phrase boundaries", "Fill the free hot-cue slots from the phrase analysis (never overwrites a cue)"},
     {"loop_save", "cue.loop_save", "none", "Store the current loop as a saved (memory) loop"},
     {"loop_recall", "cue.loop_recall", "none = next saved loop, or body slot = its number", "Set the deck's loop to a saved loop"},
     {"loop_delete", "cue.loop_delete", "body slot = its number", "Delete a saved loop"},
@@ -267,7 +268,37 @@ const PrepDef kPrep[] = {
     {"wave_zoom_out", "wave.zoom_out", "none", "Zoom the scrolling waveform out"},
 };
 
+struct AutomixDef {
+  const char* name;
+  const char* range;
+  const char* help;
+};
+const AutomixDef kAutomix[] = {
+    {"run", "0 stop, 1 start, none = toggle", "Start automix (plays the queue) or stop it"},
+    {"start", "none", "Start automix: plays the play queue, or carries on from what is playing"},
+    {"stop", "none", "Stop automix; the decks go on playing, a running transition finishes first"},
+    {"pause", "0 resume, 1 pause, none = toggle", "Pause automix: no new transition starts, what plays goes on"},
+    {"skip", "none", "Start the next transition now, on the next bar"},
+    {"next_type", "none", "Cycle the global transition type (crossfade, cut, fade, echo out)"},
+    {"next_length", "none", "Cycle the global transition length (4, 8, 16, 32 beats)"},
+    {"queue_clear", "none", "Empty the play queue (what plays now is not touched)"},
+    {"queue_shuffle", "none", "Shuffle the queue behind the play-next entries"},
+    {"queue_skip", "none", "Drop the next entry of the play queue without playing it"},
+    {"queue_back", "none", "Go back to the previous track (the one playing now follows it)"},
+};
+
 }  // namespace
+
+bool parse_automix_control(std::string_view name, std::string& action) {
+  if (name.substr(0, 8) != "automix.") return false;
+  const std::string_view rest = name.substr(8);
+  for (const AutomixDef& d : kAutomix)
+    if (rest == d.name) {
+      action = d.name;
+      return true;
+    }
+  return false;
+}
 
 bool parse_prep_control(std::string_view name, int& deck, std::string& action, int& slot) {
   const auto dot = name.find('.');
@@ -313,6 +344,8 @@ std::vector<ControlInfo> list_controls() {
       }
     }
   }
+  for (const AutomixDef& d : kAutomix)
+    out.push_back({std::string("automix.") + d.name, std::strcmp(d.range, "none") != 0 ? "value" : "trigger", d.range, d.help});
   for (const Def& d : kMixer) out.push_back({std::string("mixer.") + d.name, kind_name(d.kind), d.range, d.help});
   for (int unit = 1; unit <= kMaxDecks + 1; ++unit) {
     const std::string group = unit <= kMaxDecks ? "deck" + std::to_string(unit) : std::string("mixer");
@@ -484,6 +517,13 @@ bool apply_control(IEngine& engine, std::string_view name, bool has_value, doubl
     std::string action;
     if (parse_prep_control(name, deck, action, slot)) {
       error = "this control edits the loaded track and is carried out by the application, not the engine";
+      return false;
+    }
+  }
+  {
+    std::string action;
+    if (parse_automix_control(name, action)) {
+      error = "this control drives automix and is carried out by the application, not the engine";
       return false;
     }
   }

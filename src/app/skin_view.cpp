@@ -176,7 +176,8 @@ Target map_binding(std::string_view n) {
     if (s[1].name == "cue" && s.size() == 3) {  // memory cues and saved loops of the deck
       static const struct { const char* name; const char* action; } kCue[] = {
           {"memory_set", "cue_memory_set"},   {"memory_delete", "cue_memory_delete"}, {"memory_prev", "cue_memory_prev"},
-          {"memory_next", "cue_memory_next"}, {"loop_save", "cue_loop_save"},         {"loop_recall", "cue_loop_recall"}};
+          {"memory_next", "cue_memory_next"}, {"loop_save", "cue_loop_save"},         {"loop_recall", "cue_loop_recall"},
+          {"suggest", "cue_suggest"}};
       for (const auto& c : kCue)
         if (s[2].name == c.name) return action(c.action, d);
       return {};

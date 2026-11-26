@@ -415,7 +415,8 @@ void App::do_action(const ui::Target& t) {
         {"grid_scale", "grid.scale", true},          {"grid_tap", "grid.tap", false},          {"grid_reanalyse", "grid.reanalyse", false},
         {"grid_lock", "grid.lock", false},           {"grid_undo", "grid.undo", false},        {"grid_add_section", "grid.add_section", false},
         {"grid_remove_section", "grid.remove_section", false}, {"cue_memory_set", "cue.memory_set", false},
-        {"cue_memory_delete", "cue.memory_delete", false}, {"cue_loop_save", "cue.loop_save", false}, {"cue_loop_recall", "cue.loop_recall", false}};
+        {"cue_memory_delete", "cue.memory_delete", false}, {"cue_loop_save", "cue.loop_save", false}, {"cue_loop_recall", "cue.loop_recall", false},
+        {"cue_suggest", "cue.suggest", false}};
     for (const auto& m : kMap) {
       if (n != m.id) continue;
       PrepArgs a;
@@ -512,8 +513,11 @@ void App::draw_custom(const skin::ResolvedWidget& w, const ui::Target& t, const 
       }
       if (!deck_ok) return;
       const auto mode = w.props.find("mode");
+      const auto ph = w.props.find("phrases");  // skin switch: phrases="off" keeps the bands off this widget
+      wave_phrases_ = ph == w.props.end() || (ph->second != "off" && ph->second != "0" && ph->second != "false");
       if (mode != w.props.end() && mode->second == "overview") draw_overview(d, r, views_[d], info_[d], base, theme_);
       else draw_wave(d, r, views_[d], info_[d], base, theme_, true);
+      wave_phrases_ = true;
       break;
     }
     case skin::Kind::Jog:
@@ -547,6 +551,40 @@ void App::draw_search(const Rect& r, const skin::Style& st, const std::string& h
 namespace {
 Color rgb_of(int c) { return rgba((c >> 16) & 255, (c >> 8) & 255, c & 255); }
 }  // namespace
+
+namespace {
+Color phrase_color(const std::string& label) {
+  if (label == "intro" || label == "outro") return rgba(110, 140, 190);
+  if (label == "build") return rgba(240, 180, 60);
+  if (label == "drop" || label == "chorus") return rgba(235, 70, 110);
+  if (label == "breakdown") return rgba(70, 200, 220);
+  if (label == "verse") return rgba(120, 200, 120);
+  if (label == "bridge") return rgba(180, 120, 230);
+  return rgba(150, 150, 160);
+}
+}  // namespace
+
+void App::draw_phrase_bands(const DeckInfo& info, float x0, float y, float w, float h, double ms0, double ms1, bool labels,
+                            const ui::Theme& th) {
+  if (!show_phrases_ || !wave_phrases_ || info.phrases.sections.empty() || ms1 <= ms0) return;
+  const float per_ms = w / static_cast<float>(ms1 - ms0);
+  for (const StoredPhraseSection& s : info.phrases.sections) {
+    if (s.end_ms < ms0 || s.start_ms > ms1) continue;
+    const float xa = x0 + static_cast<float>(s.start_ms - ms0) * per_ms, xb = x0 + static_cast<float>(s.end_ms - ms0) * per_ms;
+    const float width = xb - xa;
+    if (width < 1.0f) continue;
+    const bool sure = s.label_confidence >= 0.5;  // a doubtful label is drawn lighter
+    const Color c = phrase_color(s.label);
+    const float bh = std::max(2.0f, h * (0.35f + 0.065f * static_cast<float>(std::clamp(s.energy, 1, 10))));
+    dl_.rect(xa, y + h - bh, std::max(1.0f, width - 1.0f), bh, with_alpha(c, sure ? 200 : 80));
+    // Boundary tick: stronger changes are taller.
+    dl_.rect(xa, y, 1.0f, h * static_cast<float>(0.5 + 0.5 * std::clamp(s.boundary_confidence, 0.0, 1.0)), with_alpha(c, sure ? 230 : 110));
+    if (labels && width > 46) {
+      const std::string text = skin_->fit(T(("phrase.label." + s.label).c_str()) + " " + std::to_string(s.energy), 10, 1, width - 8);
+      dl_.text(xa + 4, y + h + 1, text, 10, with_alpha(sure ? th.text : th.dim, sure ? 235 : 170), Align::Left, 0, 1);
+    }
+  }
+}
 
 void App::draw_wave(int di, const Rect& r, const DeckView& v, const DeckInfo& info, Color base, const ui::Theme& th, bool) {
   dl_.rect(r.x, r.y, 3, r.h, base);
@@ -634,6 +672,7 @@ void App::draw_wave(int di, const Rect& r, const DeckView& v, const DeckInfo& in
     }
     (void)n;
   }
+  if (r.h > 36) draw_phrase_bands(info, r.x, r.y + std::min(13.0f, r.h * 0.5f) + 2, r.w, 5, t0 * 1000.0, t1 * 1000.0, r.h >= 70, th);
   // Cue point, hot cues (colour and name), memory cues.
   const auto marker_frame = [&](int kind, int index, double frame) {
     return cue_drag_.deck == di && cue_drag_.kind == kind && cue_drag_.index == index ? cue_drag_.frame : frame;
@@ -764,6 +803,7 @@ void App::draw_overview(int di, const Rect& ov, const DeckView& v, const DeckInf
     dl_.rect(x, ov.y + (ov.h - h) / 2, cw + 0.5f, h, x - ov.x < played ? mix(base, th.bg, 0.6f) : base);
   }
   const auto x_at = [&](double frame) { return ov.x + static_cast<float>(frame / v.length) * ov.w; };
+  draw_phrase_bands(info, ov.x, ov.y, ov.w, std::min(4.0f, ov.h * 0.3f), 0, v.length / std::max(1u, info.audio ? info.audio->sample_rate : 1u) * 1000.0, false, th);
   if (v.loop_in >= 0 && v.loop_out > v.loop_in)
     dl_.rect(x_at(v.loop_in), ov.y, std::max(1.0f, x_at(v.loop_out) - x_at(v.loop_in)), ov.h, with_alpha(th.accent, v.loop_active ? 80 : 40));
   for (const MemCue& m : info.mem) {  // memory cues: a tick at the foot; saved loops: a band

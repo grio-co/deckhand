@@ -21,8 +21,11 @@
 #include <thread>
 
 #include "deckhand/app/api_bridge.hpp"
+#include "deckhand/app/automix.hpp"
+#include "deckhand/app/play_queue.hpp"
 #include "deckhand/app/capi.h"
 #include "deckhand/app/controls.hpp"
+#include "deckhand/app/cue_suggest.hpp"
 #include "deckhand/app/keymap.hpp"
 #include "deckhand/app/stems_service.hpp"
 #include "deckhand/app/stream_bridge.hpp"
@@ -107,6 +110,7 @@ struct DeckInfo {
   int hot_color[kHotCues];
   std::vector<MemCue> mem;
   bool grid_locked = false;
+  StoredPhrases phrases;  // sections drawn on the waveform; empty until analysed
   DeckInfo() {
     for (int& c : hot_color) c = -1;
   }
@@ -114,7 +118,7 @@ struct DeckInfo {
 
 struct Job {
   enum Kind { Load, Reattach, AddFile, Import, SaveMainCue, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample, Sync, SyncInfo, RestoreSamples,
-              SaveGrid, SaveMemCues, SaveHotStyle, SaveTrackColor, Reanalyse, PreviewLoad } kind = Load;
+              SaveGrid, SaveMemCues, SaveHotStyle, SaveTrackColor, Reanalyse, PreviewLoad, SuggestCues, SyncCues } kind = Load;
   int deck = -1;
   std::int64_t track_id = 0;
   std::string path;
@@ -246,6 +250,10 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::string api_keymap_json() override { return keymap_json(); }
   bool api_keymap_set(const std::string& t, std::vector<std::string>& w, std::string& e) override { return keymap_set_user(t, w, e); }
   StemService* api_stems() override { return stems_.get(); }
+  AutomixService* api_automix() override { return automix_.get(); }
+  bool api_automix_control(const std::string& name, bool has_value, double value, std::string& error) override {
+    return automix_control(name, has_value, value, error);
+  }
   void open_file(const std::string& path, float x, float y);
   void audio_route() { audio_recheck_ = true; }
   const dh_frame* frame();
@@ -309,6 +317,23 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
     return true;
   }
   void api_library_changed() override { rows_dirty_ = true; }
+  void api_cues_changed(const std::vector<std::int64_t>& track_ids) override {
+    for (const std::int64_t id : track_ids) {
+      for (int d = 0; d < kMaxDecks; ++d) {
+        bool holds = false;
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          holds = decks_[d].row.id == id && decks_[d].audio;
+        }
+        if (!holds) continue;
+        Job j;
+        j.kind = Job::SyncCues;
+        j.track_id = id;
+        post(std::move(j));
+        break;
+      }
+    }
+  }
   bool api_record(bool start, std::string& path, std::string& error) override { return record(start, path, error); }
   void api_load_sample(int slot, const std::string& path) override {
     Job j;
@@ -383,6 +408,9 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
     DH_LOG(Info, "%s", s.c_str());
   }
   void request_load(int deck, std::int64_t track_id);
+  void setup_automix();
+  bool automix_control(const std::string& action, bool has_value, double value, std::string& error);
+  void queue_selected(bool play_next);
   bool record(bool start, std::string& path, std::string& error);
   std::string source_db() const {
 #if defined(_WIN32)
@@ -411,6 +439,11 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void commit_mem(int deck, std::int64_t track_id, std::vector<MemCue> mem);
   void send_meta(int deck, std::int64_t track_id, const std::vector<GridSection>& grid, const std::vector<MemCue>& mem, double bpm);
   void reanalyse(Library& lib, int deck, std::int64_t track_id);
+  // Cue suggestions for the loaded track (loader thread): free hot slots only, one journalled batch; then the deck is synced.
+  void suggest_cues_job(Library& lib, int deck, std::int64_t track_id, bool memory);
+  // Brings the engine and the display of every deck holding `track_id` in step with the library's cues (adds only).
+  void sync_deck_cues(Library& lib, std::int64_t track_id);
+  HabitCache habit_cache_;
   void open_cue_editor(int deck, int slot, int mem_index);
   void apply_cue_editor(bool remove);
   void set_wave_zoom(int deck, double seconds);
@@ -429,6 +462,9 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void toggle_layout();
   void do_action(const ui::Target& t);
   void draw_skin_ui();
+  // Phrase sections as coloured bands (ms0..ms1 spans x0..x0+w); `labels` adds the name and energy under the band.
+  void draw_phrase_bands(const DeckInfo& info, float x0, float y, float w, float h, double ms0, double ms1, bool labels,
+                         const ui::Theme& th);
   void draw_wave(int di, const Rect& r, const DeckView& v, const DeckInfo& info, Color base, const ui::Theme& th, bool zoomed);
   void draw_overview(int di, const Rect& r, const DeckView& v, const DeckInfo& info, Color base, const ui::Theme& th);
   void draw_jog(int di, const Rect& r, const DeckView& v, Color base, const skin::Style& st);
@@ -552,6 +588,12 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::unique_ptr<MidiIO> midi_;
   std::unique_ptr<HidIO> hid_;
   std::unique_ptr<HubApi> hub_;
+  // automix and the play queue (app_automix.cpp); destroyed before the engine, after the API bridge
+  std::unique_ptr<Library> queue_lib_, amx_lib_;
+  std::unique_ptr<PlayQueue> queue_;
+  std::unique_ptr<AutomixHost> amx_host_;
+  std::unique_ptr<AutomixService> automix_;
+  std::int64_t load_failed_[kMaxDecks] = {};  // track id whose load failed, per deck; state_mutex_
   std::thread signal_thread_;
   std::unique_ptr<StemService> stems_;  // before api_: the bridge is destroyed first
   std::unique_ptr<ApiBridge> api_;
@@ -657,7 +699,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   // ---- browser (app_browser.cpp), UI thread
   std::vector<std::string> bcols_;                   // shown columns, in order
   std::map<std::string, float> bwidth_;              // user widths: px, or weight for the flexible columns
-  bool bcols_loaded_ = false, key_musical_ = false, compat_on_ = false;
+  bool bcols_loaded_ = false, key_musical_ = false, show_phrases_ = true, wave_phrases_ = true, compat_on_ = false;
   std::atomic<bool> settings_synced_{false};  // set by the sync worker: reload the browser settings
   std::int64_t compat_ref_id_ = 0;
   unsigned frame_count_ = 0;

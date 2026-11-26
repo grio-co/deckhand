@@ -8,6 +8,7 @@
 #include <numeric>
 
 #include "deckhand/log/log.hpp"
+#include "phrases_internal.hpp"
 
 namespace deckhand {
 namespace {
@@ -1387,10 +1388,14 @@ AnalysisResult analyse(const float* pcm, std::uint64_t frames, std::uint32_t rat
   r.first_audible_ms = ar.first_ms;
   r.last_audible_ms = ar.last_ms;
   try {
-    if (o.beats || o.key) {
+    if (o.beats || o.key || o.phrases) {
       const Prepared p = prepare(pcm, frames, rate);
       const Chroma ch = compute_chroma(p.tonal, p.tonal_rate);
       if (o.beats) r.beats = beats_from(p, ch, o);
+      if (o.phrases) {
+        if (ar.ok) r.phrases = detail::phrases_from_mono(p.onset, p.onset_rate, r.beats, ar.first_ms, ar.last_ms, r.duration_ms, o);
+        else r.phrases.error = "no audible content";
+      }
       if (o.key) {
         if (p.duration_s < kMinKeySeconds) r.key.error = "track too short for key detection";
         else r.key = key_from_chroma(ch);

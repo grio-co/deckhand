@@ -312,6 +312,15 @@ bool App::prep_cue(int deck, const std::string& action, const PrepArgs& a, std::
     return true;
   };
 
+  if (op == "suggest") {  // free hot slots from the phrase analysis; a value of 1 adds memory cues at the boundaries too
+    Job j;
+    j.kind = Job::SuggestCues;
+    j.deck = deck;
+    j.track_id = tid;
+    j.flag = a.has_value && a.value != 0;
+    post(std::move(j));
+    return true;
+  }
   if (op == "memory_set") {
     double at = a.has_value ? seconds_or_playhead() : snap(v.position);
     for (const MemCue& c : mem)
@@ -506,6 +515,73 @@ bool App::prep_cue(int deck, const std::string& action, const PrepArgs& a, std::
   return false;
 }
 
+void App::suggest_cues_job(Library& lib, int deck, std::int64_t track_id, bool memory) {
+  SuggestOptions o;
+  o.memory = memory;
+  o.habit = true;  // ignored by the analysis module until there are enough cued tracks to learn from
+  ApplyResult r;
+  {
+    EditScope scope("user");
+    r = apply_suggestions(lib, track_id, o, &habit_cache_, false);
+  }
+  if (!r.has_phrases) {
+    set_status(T("cues.suggest_no_phrases"));
+    return;
+  }
+  if (r.written.empty()) {
+    set_status(T("cues.suggest_none"));
+    return;
+  }
+  set_status(T("cues.suggested", {{"n", static_cast<int>(r.written.size())}}));
+  sync_deck_cues(lib, track_id);
+  (void)deck;
+}
+
+void App::sync_deck_cues(Library& lib, std::int64_t track_id) {
+  const std::vector<Cue> cues = lib.cues(track_id);
+  for (int deck = 0; deck < kMaxDecks; ++deck) {
+    double sr = 0;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      const DeckInfo& d = decks_[deck];
+      if (!d.audio || d.row.id != track_id || d.loading) continue;
+      sr = d.audio->sample_rate;
+    }
+    const DeckView v = engine_->deck(deck);
+    std::vector<MemCue> mem;
+    for (const Cue& c : cues) {
+      const double frame = c.start_ms / 1000.0 * sr;
+      if (c.slot < 0) {
+        MemCue m;
+        m.frame = frame;
+        m.end = c.kind == CueKind::Loop && c.end_ms > c.start_ms ? c.end_ms / 1000.0 * sr : -1;
+        m.label = c.label;
+        m.color = c.color;
+        mem.push_back(std::move(m));
+      } else if (c.slot < kHotCues && v.hot_cue[c.slot] < 0) {  // only empty slots: what the user has on the deck stays
+        Command cmd;
+        cmd.op = Op::HotCueSetAt;
+        cmd.deck = static_cast<std::uint8_t>(deck);
+        cmd.i = c.slot;
+        cmd.d = frame;
+        engine_->send(cmd);
+        {
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          decks_[deck].hot_label[c.slot] = c.label;
+          decks_[deck].hot_color[c.slot] = c.color;
+        }
+      }
+    }
+    bool memory_changed = false;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      memory_changed = decks_[deck].mem.size() != mem.size();
+    }
+    if (memory_changed) commit_mem(deck, track_id, mem);
+  }
+  rows_dirty_ = true;
+}
+
 // Re-runs the analysis on the loaded track (loader thread). A locked grid is never replaced.
 void App::reanalyse(Library& lib, int deck, std::int64_t track_id) {
   std::shared_ptr<const TrackAudio> audio;
@@ -522,6 +598,11 @@ void App::reanalyse(Library& lib, int deck, std::int64_t track_id) {
   const TrackAnalysis an = analyse_track(*audio);
   EditScope analysis_scope("analysis");  // the BPM stored below is DeckHand's own result
   if (an.has_audible) lib.set_analysis_cues(track_id, an.suggested_cue_ms, an.first_audible_ms);
+  if (an.has_phrases) {
+    lib.set_phrases(track_id, an.phrases);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (decks_[deck].row.id == track_id) decks_[deck].phrases = an.phrases;
+  }
   if (!an.has_grid) {
     set_status(T("grid.no_result"));
     return;
