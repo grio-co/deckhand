@@ -1,0 +1,371 @@
+// Skull: an X-ray skull as a free-form, multi-window skin. The two huge eye sockets are the decks (jog platter, read-outs and
+// overview inside; the scrolling waveform runs as one ribbon through the middle of both eyes), the teeth are the hot-cue pads (top)
+// and the key / range / stem buttons (bottom), the cheekbones carry cue memory and loops, the temples the tempo faders, the ears
+// the module buttons, the open mouth the mixer, the mandible load / eject / grid and the crossfader (along the chin), and the seven
+// vertebrae the effects, master, microphone and application buttons. Every empty area is transparent and clicks fall through.
+// Library (ribcage), sampler (femur), grid tools (tray) and the library tools / settings panels (trays) float on their own.
+// Art: img/*.png from tools/make_skull_art.py. Shells without several windows dock the visible modules beside the skull.
+dhskin 1
+
+meta name="Skull" author="DeckHand contributors" license="MIT" min_version="0.1" description="X-ray skull: decks in the eye sockets, mixer in the open mouth, effects down the spine; library, sampler and tools float as bones"
+
+tokens {
+  color bg       #081522
+  color panel    #0b1b2e
+  color panel2   #12293f
+  color line     #3f78a8
+  color text     #e8f6ff
+  color dim      #9ec2de
+  color accent   #3fe6ff
+  color deck1    #3fe6ff
+  color deck2    #ffc245
+  color deck3    #a678ff
+  color deck4    #ff6ba8
+  color good     #4be0a0
+  color warn     #ffc245
+  color bad      #ff5a6e
+  color hover    #3fe6ff30
+  color press    #3fe6ff55
+  color glass    #02070ee6
+  color socket   #040b14
+  color ink      #0c2236
+  color deck1d   #067c9c
+  color deck2d   #9a6400
+  font ui    size=12
+  font small size=10 bold=true
+  font title size=14 bold=true
+  font big   size=24 bold=true
+}
+
+atlas main     src="img/main.png"     { region full 0 0 2200 2880 }
+atlas ribcage  src="img/browser.png"  { region full 0 0 1600 940 }
+atlas femur    src="img/sampler.png"  { region full 0 0 1000 380 }
+atlas gridtray src="img/grid.png"     { region full 0 0 1400 600 }
+atlas toolstray src="img/tools.png"   { region full 0 0 1400 1040 }
+atlas setstray src="img/settings.png" { region full 0 0 1440 1120 }
+
+strings {
+  skull.grid "GRID"
+  skull.close "x"
+  skull.eject "EJECT"
+  skull.zero "0"
+}
+
+animation beat_glow property=glow from=1 to=0 duration=160 ease=out trigger=beat
+
+window main size=1100x1440 min=550x720 title="@app.title" chrome=none background=transparent mask="img/main.png" mask_threshold=128 scale=fit scale_min=40 scale_max=200 scale_default=70 snap=true shadow=auto {
+  resize {
+    ellipse cx=968 cy=462 rx=19 ry=19
+  }
+  snap_point 550,1440
+  snap_point 0,720
+  snap_point 1100,720
+  free sprite="main:full" {
+    // ---- deck A: eye socket
+    arc bind="mixer.ch[1].level" color=deck1 x=154 y=128 w=316 h=316 start=135 end=405 thickness=5
+    jog bind="deck[1].jog" color=deck1 bg=socket border=deck1 border_w=1 radius=144 glow=deck1 glow_r=10 anim=beat_glow x=168 y=142 w=288 h=288
+    label bind="deck[1].letter" font=title color=deck1 text_align=center x=292 y=150 w=40 h=16 
+    label bind="deck[1].title" font=title color=text text_align=center x=217 y=168 w=190 h=18 
+    label bind="deck[1].artist" font=ui color=dim text_align=center x=222 y=187 w=180 h=14 
+    waveform bind="deck[1].waveform" mode=zoomed color=deck1 bg=glass radius=3 x=174 y=244 w=372 h=84
+    label bind="deck[1].bpm" font=big color=text text_align=left x=200 y=334 w=96 h=28 
+    label bind="deck[1].key" font=small color=dim text_align=left x=200 y=363 w=44 h=14 
+    label bind="deck[1].key_shift" font=small color=deck1 text_align=left x=248 y=363 w=44 h=14 
+    label bind="deck[1].time" font=title color=text text_align=right x=316 y=338 w=108 h=18 
+    label bind="deck[1].remaining" font=small color=dim text_align=right x=316 y=358 w=108 h=14 
+    waveform bind="deck[1].waveform" mode=overview color=deck1 bg=glass radius=3 x=226 y=382 w=172 h=18
+    label bind="deck[1].loop" font=small color=accent text_align=center x=267 y=403 w=90 h=14 
+    // ---- deck A: brow
+    button bind="deck[1].play" text="@deck.play" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=345 y=36 w=54 h=32 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="deck[1].cue" text="@deck.cue" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=403 y=36 w=46 h=32 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    button bind="deck[1].sync" text="@deck.sync" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=453 y=36 w=46 h=32 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].key_lock" text="@deck.key_lock" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=262 y=74 w=42 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].quantize" text="@deck.quantize" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=308 y=74 w=42 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].slip" text="@deck.slip" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=354 y=74 w=42 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].reverse" text="@deck.reverse" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=400 y=74 w=42 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.edit" text="@skull.grid" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=446 y=74 w=42 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    // ---- deck A: bridge key shift, temple tempo
+    button bind="deck[1].key_shift.minus" text="@deck.key_down" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=494 y=112 w=28 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    label bind="deck[1].key_shift" font=small color=deck1 text_align=center x=524 y=118 w=52 h=14 
+    button bind="deck[1].key_shift.plus" text="@deck.key_up" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=578 y=112 w=28 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    label bind="deck[1].tempo" font=small color=ink text_align=center x=88 y=190 w=56 h=14 
+    path bind="deck[1].tempo" d="M 38 6 Q 8 102 38 198" viewbox=56x204 color=deck1 thickness=5 handle=9 x=88 y=206 w=56 h=204
+    // ---- deck A: cheekbone cue memory and loops
+    button bind="deck[1].cue.memory_set" text="@cue.mem_add" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=176 y=478 w=64 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].cue.memory_delete" text="@cue.mem_del" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=244 y=478 w=64 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].cue.memory_prev" text="@cue.mem_prev" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=312 y=478 w=64 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].cue.memory_next" text="@cue.mem_next" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=380 y=478 w=64 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].cue.loop_save" text="@cue.loop_save" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=176 y=512 w=86 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].cue.loop_recall" text="@cue.loop_recall" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=266 y=512 w=86 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].cue.suggest" text="@cue.suggest" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=356 y=512 w=86 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    // ---- deck A: upper teeth = hot cues, lower teeth = key shift, range, stems
+    pads bind="deck[1].pads" cols=8 rows=1 gap=4 radius=8 color=deck1 x=230 y=576 w=316 h=60
+    button bind="deck[1].key_shift.minus" text="@deck.key_down" font=small color=text bg=panel border=deck1 border_w=1 radius=8 transition=90 x=230 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].key_shift.reset" text="@skull.zero" font=small color=text bg=panel border=deck1 border_w=1 radius=8 transition=90 x=270 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].key_shift.plus" text="@deck.key_up" font=small color=text bg=panel border=deck1 border_w=1 radius=8 transition=90 x=310 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].tempo_range" font=small color=text bg=panel border=deck1 border_w=1 radius=8 transition=90 x=350 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].stem.vocals.active" text="@deck.stem_vocals" font=small color=text bg=panel border=deck1 border_w=1 radius=8 transition=90 x=390 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="deck[1].stem.drums.active" text="@deck.stem_drums" font=small color=text bg=panel border=deck1 border_w=1 radius=8 transition=90 x=430 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="deck[1].stem.bass.active" text="@deck.stem_bass" font=small color=text bg=panel border=deck1 border_w=1 radius=8 transition=90 x=470 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="deck[1].stem.other.active" text="@deck.stem_other" font=small color=text bg=panel border=deck1 border_w=1 radius=8 transition=90 x=510 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    // ---- deck A: mandible
+    button bind="deck[1].load" text="@browser.load" args="deck=A" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=262 y=884 w=76 h=30 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].eject" text="@skull.eject" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=342 y=884 w=70 h=30 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
+    button bind="deck[1].grid.edit" text="@deck.grid_edit" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=262 y=922 w=76 h=30 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    button bind="deck[1].metronome" text="@grid.click" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=342 y=922 w=70 h=30 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    // ---- deck A: mixer channel in the mouth
+    knob bind="mixer.ch[1].trim" text="@mixer.trim" color=deck1 font=small  x=338 y=660 w=44 h=60
+    knob bind="mixer.ch[1].eq.high" text="@mixer.eq.high" color=deck1 font=small  x=384 y=660 w=44 h=60
+    knob bind="mixer.ch[1].eq.mid" text="@mixer.eq.mid" color=deck1 font=small  x=430 y=660 w=44 h=60
+    knob bind="mixer.ch[1].eq.low" text="@mixer.eq.low" color=deck1 font=small  x=476 y=660 w=44 h=60
+    knob bind="mixer.ch[1].filter" text="@mixer.filter" color=text font=small  bipolar=true x=522 y=660 w=44 h=60
+    fader bind="mixer.ch[1].fader" orientation=horizontal color=deck1 bg=glass radius=3 x=576 y=672 w=118 h=22
+    meter bind="mixer.ch[1].level" orientation=horizontal bg=glass x=576 y=700 w=118 h=8
+    button bind="mixer.ch[1].cue" text="@mixer.cue" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=704 y=674 w=56 h=30 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    // ---- deck A: effect slots on the vertebrae C1-C3
+    button bind="deck[1].fx[1].select" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=292 y=1071 w=78 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].fx[1].on" text="@fx.on" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=374 y=1071 w=34 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    fader bind="deck[1].fx[1].wet" orientation=horizontal color=deck1 bg=glass radius=3 x=412 y=1074 w=64 h=22
+    button bind="deck[1].fx[2].select" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=292 y=1123 w=78 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].fx[2].on" text="@fx.on" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=374 y=1123 w=34 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    fader bind="deck[1].fx[2].wet" orientation=horizontal color=deck1 bg=glass radius=3 x=412 y=1126 w=64 h=22
+    button bind="deck[1].fx[3].select" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=292 y=1175 w=78 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].fx[3].on" text="@fx.on" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=374 y=1175 w=34 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    fader bind="deck[1].fx[3].wet" orientation=horizontal color=deck1 bg=glass radius=3 x=412 y=1178 w=64 h=22
+    // ---- deck B: eye socket
+    arc bind="mixer.ch[2].level" color=deck2 x=630 y=128 w=316 h=316 start=135 end=405 thickness=5
+    jog bind="deck[2].jog" color=deck2 bg=socket border=deck2 border_w=1 radius=144 glow=deck2 glow_r=10 anim=beat_glow x=644 y=142 w=288 h=288
+    label bind="deck[2].letter" font=title color=deck2 text_align=center x=768 y=150 w=40 h=16 
+    label bind="deck[2].title" font=title color=text text_align=center x=693 y=168 w=190 h=18 
+    label bind="deck[2].artist" font=ui color=dim text_align=center x=698 y=187 w=180 h=14 
+    waveform bind="deck[2].waveform" mode=zoomed color=deck2 bg=glass radius=3 x=554 y=244 w=372 h=84
+    label bind="deck[2].bpm" font=big color=text text_align=left x=676 y=334 w=96 h=28 
+    label bind="deck[2].key" font=small color=dim text_align=left x=676 y=363 w=44 h=14 
+    label bind="deck[2].key_shift" font=small color=deck2 text_align=left x=724 y=363 w=44 h=14 
+    label bind="deck[2].time" font=title color=text text_align=right x=792 y=338 w=108 h=18 
+    label bind="deck[2].remaining" font=small color=dim text_align=right x=792 y=358 w=108 h=14 
+    waveform bind="deck[2].waveform" mode=overview color=deck2 bg=glass radius=3 x=702 y=382 w=172 h=18
+    label bind="deck[2].loop" font=small color=accent text_align=center x=743 y=403 w=90 h=14 
+    // ---- deck B: brow
+    button bind="deck[2].play" text="@deck.play" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=601 y=36 w=54 h=32 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="deck[2].cue" text="@deck.cue" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=659 y=36 w=46 h=32 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    button bind="deck[2].sync" text="@deck.sync" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=709 y=36 w=46 h=32 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].key_lock" text="@deck.key_lock" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=612 y=74 w=42 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].quantize" text="@deck.quantize" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=658 y=74 w=42 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].slip" text="@deck.slip" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=704 y=74 w=42 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].reverse" text="@deck.reverse" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=750 y=74 w=42 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.edit" text="@skull.grid" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=796 y=74 w=42 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    // ---- deck B: bridge key shift, temple tempo
+    button bind="deck[2].key_shift.minus" text="@deck.key_down" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=494 y=142 w=28 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    label bind="deck[2].key_shift" font=small color=deck2 text_align=center x=524 y=148 w=52 h=14 
+    button bind="deck[2].key_shift.plus" text="@deck.key_up" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=578 y=142 w=28 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    label bind="deck[2].tempo" font=small color=ink text_align=center x=956 y=190 w=56 h=14 
+    path bind="deck[2].tempo" d="M 18 6 Q 48 102 18 198" viewbox=56x204 color=deck2 thickness=5 handle=9 x=956 y=206 w=56 h=204
+    // ---- deck B: cheekbone cue memory and loops
+    button bind="deck[2].cue.memory_set" text="@cue.mem_add" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=656 y=478 w=64 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].cue.memory_delete" text="@cue.mem_del" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=724 y=478 w=64 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].cue.memory_prev" text="@cue.mem_prev" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=792 y=478 w=64 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].cue.memory_next" text="@cue.mem_next" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=860 y=478 w=64 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].cue.loop_save" text="@cue.loop_save" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=656 y=512 w=86 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].cue.loop_recall" text="@cue.loop_recall" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=746 y=512 w=86 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].cue.suggest" text="@cue.suggest" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=836 y=512 w=86 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    // ---- deck B: upper teeth = hot cues, lower teeth = key shift, range, stems
+    pads bind="deck[2].pads" cols=8 rows=1 gap=4 radius=8 color=deck2 x=550 y=576 w=316 h=60
+    button bind="deck[2].key_shift.minus" text="@deck.key_down" font=small color=text bg=panel border=deck2 border_w=1 radius=8 transition=90 x=550 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].key_shift.reset" text="@skull.zero" font=small color=text bg=panel border=deck2 border_w=1 radius=8 transition=90 x=590 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].key_shift.plus" text="@deck.key_up" font=small color=text bg=panel border=deck2 border_w=1 radius=8 transition=90 x=630 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].tempo_range" font=small color=text bg=panel border=deck2 border_w=1 radius=8 transition=90 x=670 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].stem.vocals.active" text="@deck.stem_vocals" font=small color=text bg=panel border=deck2 border_w=1 radius=8 transition=90 x=710 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="deck[2].stem.drums.active" text="@deck.stem_drums" font=small color=text bg=panel border=deck2 border_w=1 radius=8 transition=90 x=750 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="deck[2].stem.bass.active" text="@deck.stem_bass" font=small color=text bg=panel border=deck2 border_w=1 radius=8 transition=90 x=790 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="deck[2].stem.other.active" text="@deck.stem_other" font=small color=text bg=panel border=deck2 border_w=1 radius=8 transition=90 x=830 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    // ---- deck B: mandible
+    button bind="deck[2].load" text="@browser.load" args="deck=B" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=688 y=884 w=76 h=30 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].eject" text="@skull.eject" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=768 y=884 w=70 h=30 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
+    button bind="deck[2].grid.edit" text="@deck.grid_edit" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=688 y=922 w=76 h=30 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    button bind="deck[2].metronome" text="@grid.click" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=768 y=922 w=70 h=30 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    // ---- deck B: mixer channel in the mouth
+    knob bind="mixer.ch[2].trim" text="@mixer.trim" color=deck2 font=small  x=338 y=724 w=44 h=60
+    knob bind="mixer.ch[2].eq.high" text="@mixer.eq.high" color=deck2 font=small  x=384 y=724 w=44 h=60
+    knob bind="mixer.ch[2].eq.mid" text="@mixer.eq.mid" color=deck2 font=small  x=430 y=724 w=44 h=60
+    knob bind="mixer.ch[2].eq.low" text="@mixer.eq.low" color=deck2 font=small  x=476 y=724 w=44 h=60
+    knob bind="mixer.ch[2].filter" text="@mixer.filter" color=text font=small  bipolar=true x=522 y=724 w=44 h=60
+    fader bind="mixer.ch[2].fader" orientation=horizontal color=deck2 bg=glass radius=3 x=576 y=736 w=118 h=22
+    meter bind="mixer.ch[2].level" orientation=horizontal bg=glass x=576 y=764 w=118 h=8
+    button bind="mixer.ch[2].cue" text="@mixer.cue" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=704 y=738 w=56 h=30 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    // ---- deck B: effect slots on the vertebrae C1-C3
+    button bind="deck[2].fx[1].select" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=730 y=1071 w=78 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].fx[1].on" text="@fx.on" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=692 y=1071 w=34 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    fader bind="deck[2].fx[1].wet" orientation=horizontal color=deck2 bg=glass radius=3 x=624 y=1074 w=64 h=22
+    button bind="deck[2].fx[2].select" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=730 y=1123 w=78 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].fx[2].on" text="@fx.on" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=692 y=1123 w=34 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    fader bind="deck[2].fx[2].wet" orientation=horizontal color=deck2 bg=glass radius=3 x=624 y=1126 w=64 h=22
+    button bind="deck[2].fx[3].select" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=730 y=1175 w=78 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].fx[3].on" text="@fx.on" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=692 y=1175 w=34 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    fader bind="deck[2].fx[3].wet" orientation=horizontal color=deck2 bg=glass radius=3 x=624 y=1178 w=64 h=22
+    // ---- centre of the skull
+    meter bind="mixer.master.level" orientation=horizontal bg=glass x=505 y=46 w=90 h=10
+    // ears: module buttons (left), application buttons (right)
+    button action="window.toggle:browser" text="@window.browser" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=169 y=656 w=56 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button action="window.toggle:sampler" text="@window.sampler" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=180 y=694 w=56 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    button action="window.toggle:grid" text="@skull.grid" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=191 y=732 w=56 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    // the right ear is the mirror image
+    button bind="app.settings" text="@app.settings" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=875 y=656 w=56 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button bind="app.skin" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=864 y=694 w=56 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button bind="app.language" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=853 y=732 w=56 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    // ---- mixer: crossfader along the chin, headphone cue, master
+    label text="@mixer.crossfader" font=small color=ink text_align=center x=450 y=930 w=200 h=14 
+    label bind="deck[1].letter" font=title color=deck1d text_align=center x=410 y=960 w=20 h=16 
+    label bind="deck[2].letter" font=title color=deck2d text_align=center x=670 y=960 w=20 h=16 
+    path bind="mixer.crossfader" d="M 10 8 Q 120 54 230 8" viewbox=240x60 color=accent thickness=6 handle=11 x=430 y=956 w=240 h=60
+    // ---- spine C4 master, C5 microphone, C6 application, C7 status
+    knob bind="mixer.master.volume" text="@mixer.master" color=text font=small bg=panel radius=8  x=294 y=1218 w=52 h=46
+    knob bind="mixer.headphone.volume" text="@mixer.headphones" color=text font=small bg=panel radius=8  x=350 y=1218 w=52 h=46
+    knob bind="mixer.headphone.mix" text="@mixer.headphone_mix" color=text font=small bg=panel radius=8  x=406 y=1218 w=52 h=46
+    knob bind="mixer.sampler.level" text="@mixer.sampler" color=accent font=small bg=panel radius=8  x=750 y=1218 w=56 h=46
+    meter bind="mixer.master.level" orientation=horizontal bg=glass x=496 y=1237 w=108 h=8
+    button bind="mixer.mic.on" text="@mixer.mic" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=292 y=1279 w=54 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="mixer.mic.talkover" text="@mixer.talkover" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=350 y=1279 w=54 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    fader bind="mixer.mic.level" orientation=horizontal color=text bg=glass radius=3 x=408 y=1282 w=68 h=22
+    meter bind="mixer.mic.meter" orientation=horizontal bg=glass x=658 y=1288 w=150 h=10
+    button bind="app.rec" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=292 y=1331 w=90 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
+    button bind="app.export" text="@app.export_usb" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=386 y=1331 w=90 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button bind="app.import" text="@app.import_library" show="app.has_import" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=714 y=1331 w=94 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button bind="app.learn" text="@app.learn" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=624 y=1331 w=84 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    label bind="app.status" font=ui color=dim text_align=left x=292 y=1387 w=184 h=22 bg=panel radius=8 pad=8,0
+    button bind="sampler.stop" text="@sampler.stop_all" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=718 y=1383 w=90 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
+    label bind="app.controller" font=ui color=dim text_align=center x=18 y=1408 w=242 h=16 
+    label bind="app.audio" font=ui color=dim text_align=center x=840 y=1408 w=242 h=16 
+  }
+}
+
+// The library: a ribcage. Floats on its own and docks beside the skull in shells without several windows.
+window browser role=browser size=800x470 min=400x235 title="@window.browser" chrome=none background=transparent mask="img/browser.png" scale=fit scale_min=50 scale_max=200 snap=true visible=true place="main right -60 700" {
+  resize {
+    ellipse cx=752 cy=420 rx=20 ry=20
+  }
+  snap_point 400,0
+  free sprite="ribcage:full" {
+    label bind="browser.search" text="@browser.search" font=ui color=text text_align=left x=102 y=48 w=150 h=26 editable=true bg=panel2 radius=5 pad=6,0
+    label bind="browser.count" text="@browser.tracks" font=small color=dim text_align=center x=256 y=48 w=66 h=26 
+    button bind="browser.compatible" text="@browser.compatible" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=326 y=48 w=78 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="browser.columns" text="@browser.columns" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=408 y=48 w=78 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button bind="browser.edit" text="@browser.edit" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=490 y=48 w=58 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button bind="browser.add_to" text="@browser.add_to" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=552 y=48 w=76 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button action="window.hide:browser" text="@skull.close" font=small color=text bg=panel border=line border_w=1 radius=13 transition=90 x=672 y=48 w=26 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
+    tree bind="browser.tree" text="@browser.collection" bg=panel2 radius=5 font=ui color=text x=102 y=82 w=172 h=166
+    button bind="browser.playlist.add_list" text="@playlist.add_list" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=102 y=252 w=84 h=22 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button bind="browser.playlist.add_folder" text="@playlist.add_folder" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=190 y=252 w=84 h=22 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button bind="browser.playlist.add_smart" text="@playlist.add_smart" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=102 y=278 w=84 h=22 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button bind="browser.playlist.rename" text="@playlist.rename" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=190 y=278 w=84 h=22 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button bind="browser.playlist.delete" text="@playlist.delete" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=102 y=304 w=84 h=22 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
+    browser bind="browser.tracks" columns="title,artist,bpm,key,time" row_h=22 font=ui color=text x=282 y=82 w=416 h=250
+    button bind="app.import" text="@app.import_library" show="app.has_import" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=102 y=338 w=84 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button bind="app.export" text="@app.export_usb" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=190 y=338 w=84 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    button bind="deck[1].load" text="@browser.load" args="deck=A" font=small color=deck1 bg=panel border=deck1 border_w=1 radius=6 transition=90 x=282 y=338 w=70 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[2].load" text="@browser.load" args="deck=B" font=small color=deck2 bg=panel border=deck2 border_w=1 radius=6 transition=90 x=356 y=338 w=70 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="browser.remove" text="@browser.remove" show="browser.can_remove" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=430 y=338 w=80 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
+    button action="window.reset" text="@window.reset" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=582 y=366 w=116 h=22 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
+    label bind="preview.title" font=small color=dim text_align=left x=102 y=369 w=440 h=16 
+    button bind="preview.play" text="@preview.play" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=102 y=394 w=64 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="preview.stop" text="@preview.stop" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=170 y=394 w=48 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
+    waveform bind="preview.wave" mode=overview color=accent bg=glass radius=3 x=222 y=394 w=290 h=26
+    label bind="preview.time" font=small color=dim text_align=right x=516 y=394 w=66 h=26 
+    fader bind="preview.level" orientation=horizontal color=text bg=glass radius=3 x=588 y=399 w=110 h=18
+  }
+}
+
+// The sampler: a femur. Click a pad to play it, shift-click or the corner square stops it.
+window sampler role=sampler size=500x190 min=250x95 title="@window.sampler" chrome=none background=transparent mask="img/sampler.png" scale=fit scale_min=50 scale_max=200 snap=true floating=true visible=false place="main left 40 760" {
+  snap_point 250,0
+  snap_point 500,95
+  free sprite="femur:full" {
+    pads bind="sampler.pads" cols=8 rows=2 gap=3 radius=5 color=warn x=70 y=40 w=360 h=80
+    fader bind="sampler.level" orientation=horizontal color=warn bg=glass radius=3 x=70 y=130 w=230 h=22
+    button bind="sampler.stop" text="@sampler.stop_all" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=306 y=128 w=84 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
+    button action="window.hide:sampler" text="@skull.close" font=small color=text bg=panel border=line border_w=1 radius=13 transition=90 x=396 y=128 w=34 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
+  }
+}
+
+// Grid and cue tools of both decks on a bone tray.
+window grid role=grid size=700x300 min=350x150 title="@skull.grid" chrome=none background=transparent mask="img/grid.png" scale=fit scale_min=50 scale_max=200 snap=true visible=false place="main right -40 40" {
+  snap_point 350,0
+  free sprite="gridtray:full" {
+    button action="window.hide:grid" text="@skull.close" font=small color=text bg=panel border=line border_w=1 radius=12 transition=90 x=660 y=6 w=28 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
+    label text="@skull.grid" font=title color=ink text_align=left x=24 y=8 w=200 h=20 
+    label bind="deck[1].letter" font=title color=deck1 text_align=center x=24 y=44 w=18 h=24 
+    button bind="deck[1].metronome" text="@grid.click" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=46 y=44 w=56 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="deck[1].grid.edit" text="@deck.grid_edit" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=106 y=44 w=50 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    button bind="deck[1].grid.shift_m10" text="-10" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=160 y=44 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.shift_m1" text="-1" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=200 y=44 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.shift_p1" text="+1" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=240 y=44 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.shift_p10" text="+10" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=280 y=44 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.first_beat" text="@grid.first_beat" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=320 y=44 w=70 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.downbeat" text="@grid.downbeat" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=394 y=44 w=84 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.cycle" text="@grid.cycle" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=482 y=44 w=62 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.bpm_m01" text="-.1" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=46 y=72 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.bpm_m001" text="-.01" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=86 y=72 w=40 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    label bind="deck[1].grid.bpm" font=small color=text text_align=center x=130 y=72 w=64 h=24 
+    button bind="deck[1].grid.bpm_p001" text="+.01" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=198 y=72 w=40 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.bpm_p01" text="+.1" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=242 y=72 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.half" text="1/2" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=282 y=72 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.double" text="x2" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=322 y=72 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.tap" text="@grid.tap" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=362 y=72 w=48 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.reanalyse" text="@grid.reanalyse" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=414 y=72 w=70 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.lock" text="@grid.lock" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=488 y=72 w=54 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    button bind="deck[1].grid.undo" text="@grid.undo" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=546 y=72 w=54 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.add_section" text="@grid.add_section" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=46 y=100 w=76 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].grid.remove_section" text="@grid.remove_section" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=126 y=100 w=76 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].cue.memory_set" text="@cue.mem_add" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=206 y=100 w=56 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].cue.memory_delete" text="@cue.mem_del" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=266 y=100 w=56 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].cue.memory_prev" text="@cue.mem_prev" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=326 y=100 w=56 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].cue.memory_next" text="@cue.mem_next" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=386 y=100 w=56 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].cue.loop_save" text="@cue.loop_save" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=446 y=100 w=76 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].cue.loop_recall" text="@cue.loop_recall" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=526 y=100 w=62 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    label bind="deck[2].letter" font=title color=deck2 text_align=center x=24 y=148 w=18 h=24 
+    button bind="deck[2].metronome" text="@grid.click" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=46 y=148 w=56 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=good color=bg } }
+    button bind="deck[2].grid.edit" text="@deck.grid_edit" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=106 y=148 w=50 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    button bind="deck[2].grid.shift_m10" text="-10" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=160 y=148 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.shift_m1" text="-1" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=200 y=148 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.shift_p1" text="+1" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=240 y=148 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.shift_p10" text="+10" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=280 y=148 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.first_beat" text="@grid.first_beat" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=320 y=148 w=70 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.downbeat" text="@grid.downbeat" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=394 y=148 w=84 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.cycle" text="@grid.cycle" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=482 y=148 w=62 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.bpm_m01" text="-.1" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=46 y=176 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.bpm_m001" text="-.01" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=86 y=176 w=40 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    label bind="deck[2].grid.bpm" font=small color=text text_align=center x=130 y=176 w=64 h=24 
+    button bind="deck[2].grid.bpm_p001" text="+.01" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=198 y=176 w=40 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.bpm_p01" text="+.1" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=242 y=176 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.half" text="1/2" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=282 y=176 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.double" text="x2" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=322 y=176 w=36 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.tap" text="@grid.tap" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=362 y=176 w=48 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.reanalyse" text="@grid.reanalyse" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=414 y=176 w=70 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.lock" text="@grid.lock" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=488 y=176 w=54 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=warn color=bg } }
+    button bind="deck[2].grid.undo" text="@grid.undo" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=546 y=176 w=54 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.add_section" text="@grid.add_section" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=46 y=204 w=76 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].grid.remove_section" text="@grid.remove_section" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=126 y=204 w=76 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].cue.memory_set" text="@cue.mem_add" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=206 y=204 w=56 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].cue.memory_delete" text="@cue.mem_del" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=266 y=204 w=56 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].cue.memory_prev" text="@cue.mem_prev" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=326 y=204 w=56 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].cue.memory_next" text="@cue.mem_next" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=386 y=204 w=56 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].cue.loop_save" text="@cue.loop_save" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=446 y=204 w=76 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].cue.loop_recall" text="@cue.loop_recall" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=526 y=204 w=62 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    label text="@grid.click" font=small color=dim text_align=left x=24 y=254 w=60 h=20 
+    fader bind="mixer.metronome.level" orientation=horizontal color=good bg=glass radius=3 x=90 y=256 w=200 h=18
+  }
+}
+
+// Hosts the application's tools panel (open it from Settings > Library tools for the tools tabs: stem models, trash, edit history, duplicates, queue).
+window tools role=tools size=700x520 min=350x260 title="@app.title" chrome=none background=transparent mask="img/tools.png" scale=fit scale_min=50 scale_max=200 snap=true visible=false place="main right -80 80" {
+  free sprite="toolstray:full" {
+    free id=content x=16 y=14 w=668 h=492
+  }
+}
+
+// Hosts the application's settings panel (open it from Settings > Library tools for the tools tabs: stem models, trash, edit history, duplicates, queue).
+window settings role=settings size=720x560 min=360x280 title="@app.title" chrome=none background=transparent mask="img/settings.png" scale=fit scale_min=50 scale_max=200 snap=true visible=false place="main right -80 80" {
+  free sprite="setstray:full" {
+    free id=content x=16 y=14 w=688 h=532
+  }
+}

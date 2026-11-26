@@ -778,6 +778,75 @@ int main() {
     fs::remove_all(root, ec);
   }
 
+
+  // ---- the shipped Skull skin: a shaped main window plus floating bone modules, laid out at their declared size (the main window is
+  // taller than the generic test sizes above, so it is not part of that loop)
+  {
+    ParseResult r = load_skin("resources/skins/skull.dhskin");
+    if (!r.ok() || r.warning_count()) std::fprintf(stderr, "%s", r.describe().c_str());
+    CHECK(r.ok() && r.error_count() == 0 && r.warning_count() == 0);
+    const Skin& k = *r.skin;
+    CHECK(k.windows.size() == 6 && k.windows[0].id == "main");
+    for (const char* role : {"browser", "sampler", "grid", "tools", "settings"}) {
+      const Window* w = k.find_window(role);
+      CHECK(w && w->role == role && w->transparent && w->chrome == Chrome::None && !w->mask.empty());
+    }
+    const Window* m = k.find_window("main");
+    CHECK(m && m->transparent && m->scale_fit && m->mask == "img/main.png" && !m->resize.empty());
+    CHECK(k.find_window("browser")->visible && k.find_window("browser")->place.set && !k.find_window("tools")->visible);
+    check_layout(k, "skull/main", m->width, m->height, 1, 0);
+    check_layout(k, "skull/main@2x", m->width * 2, m->height * 2, 2, 0);
+    for (size_t w = 1; w < k.windows.size(); ++w)  // the modules lay out inside themselves, at 1x and scaled up
+      for (const float z : {1.0f, 1.5f}) {
+        const Layout L = solve_layout(k, w, k.windows[w].width * z, k.windows[w].height * z, 1);
+        CHECK(!L.widgets.empty());
+        for (const auto& rw : L.widgets) CHECK(rw.rect.x >= -0.01f && rw.rect.y >= -0.01f && rw.rect.right() <= L.width + 0.01f && rw.rect.bottom() <= L.height + 0.01f);
+      }
+    // the essential controls of the default skin are all present somewhere in the skull's windows
+    std::map<std::string, int> have;
+    for (size_t w = 0; w < k.windows.size(); ++w)
+      for (auto& rw : solve_layout(k, w, k.windows[w].width, k.windows[w].height, 1).widgets) {
+        if (!rw.bind.empty()) ++have[rw.bind];
+        const auto a = rw.props.find("action");
+        if (a != rw.props.end()) ++have[a->second];
+      }
+    for (int d = 1; d <= 2; ++d) {
+      const std::string D = "deck[" + std::to_string(d) + "].";
+      for (const char* b : {"play", "cue", "sync", "key_lock", "quantize", "slip", "reverse", "eject", "tempo", "tempo_range", "key_shift.minus", "key_shift.plus",
+                            "key_shift.reset", "jog", "waveform", "pads", "load", "metronome", "grid.edit", "grid.tap", "cue.suggest", "cue.memory_set", "cue.loop_save",
+                            "fx[1].select", "fx[2].on", "fx[3].wet", "stem.vocals.active", "stem.drums.active", "stem.bass.active", "stem.other.active", "title", "bpm", "time"})
+        CHECK(have.count(D + b));
+      const std::string C = "mixer.ch[" + std::to_string(d) + "].";
+      for (const char* b : {"trim", "eq.high", "eq.mid", "eq.low", "filter", "fader", "level", "cue"}) CHECK(have.count(C + b));
+    }
+    for (const char* b : {"mixer.crossfader", "mixer.master.volume", "mixer.headphone.volume", "mixer.headphone.mix", "mixer.master.level", "mixer.sampler.level", "mixer.mic.on",
+                          "mixer.mic.talkover", "mixer.mic.level", "browser.tree", "browser.tracks", "browser.search", "browser.compatible", "browser.columns", "sampler.pads",
+                          "preview.play", "preview.wave", "app.settings", "app.rec", "app.export", "app.import", "app.learn", "app.skin", "app.language", "app.status",
+                          "window.toggle:browser", "window.toggle:sampler", "window.toggle:grid"})
+      CHECK(have.count(b));
+    // the real mask: nasal cavity, mouth gap, spine gap and the corners are transparent; eyes, teeth and plate are bone / glass
+    deckhand::gfx::Image img;
+    std::string why;
+    CHECK(deckhand::gfx::load_png_file("resources/skins/skull.dhskin/img/main.png", img, why));
+    CHECK(img.width == 2200 && img.height == 2880);
+    Mask mask;
+    CHECK(mask_from_rgba(img.rgba.data(), img.width, img.height, mask, why) && !mask.empty());
+    WindowShape shape = make_window_shape(k, *m, mask);
+    CHECK(!shape.rectangular());
+    CHECK(shape.opaque(312, 286) && shape.opaque(788, 286));          // eye sockets (decks)
+    CHECK(shape.opaque(550, 300) && shape.opaque(250, 600));          // nose bridge, an upper tooth
+    CHECK(!shape.opaque(550, 500));                                   // nasal cavity
+    CHECK(!shape.opaque(300, 720) && !shape.opaque(800, 720));        // open mouth beside the mixer plate
+    CHECK(shape.opaque(550, 720));                                    // the mixer plate
+    CHECK(!shape.opaque(5, 5) && !shape.opaque(1095, 700));           // corners
+    CHECK(!shape.opaque(150, 1300));                            // beside the spine
+    CHECK(!shape.opaque(450, 1062 + 49));                             // gap between two vertebrae wings
+    CHECK(classify_point(shape, *m, false, 550, 40) == Hit::Drag);    // bare bone drags the window
+    CHECK(classify_point(shape, *m, true, 400, 300) == Hit::Control);
+    CHECK(classify_point(shape, *m, false, 968, 462) == Hit::Resize); // the grip
+    CHECK(classify_point(shape, *m, false, 550, 500) == Hit::None);   // clicks fall through the nasal cavity
+  }
+
   std::puts("test_skin OK");
   return 0;
 }

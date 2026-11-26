@@ -191,3 +191,19 @@ slots, hot-cue pads, overview) around a central mixer, zoomed waveforms, playlis
 every library action; `four` = four compact decks with a four-strip mixer. All procedural. `voidwave.dhskin`:
 hexagonal window, free-form stack, orbiting/pulsing decorations; exposes fewer controls (plus the skin and settings
 buttons). Original design; no third-party assets.
+
+## Skull (`skull.dhskin`)
+A free-form, multi-window skin built from an X-ray skull (art by `tools/make_skull_art.py`, original and procedural; `SKULL_ART_SCALE=1` for a quick draft).
+`main` (1100x1440, `scale=fit`, default 70 %, mask = `img/main.png`, so the nasal cavity, the gaps beside the mixer plate, beside the spine and between the
+vertebrae are transparent and click-through; bare bone drags the window, the grip on the right cheek resizes):
+eye sockets = decks (jog with a level `arc`, title/artist/BPM/key/time/remaining/loop, overview; the zoomed waveforms form one ribbon through the middle of both eyes,
+with the phrase bands); brow = play/cue/sync, key lock/quantise/slip/reverse/grid edit; bridge = key shift; temples = tempo (curved `path` slider); cheekbones =
+cue memory, loops, auto-cue; upper teeth = the 8 hot-cue pads per deck; lower teeth = key shift, key 0, range and the four stem buttons; open mouth = mixer
+(trim, EQ, filter, fader, meter, cue per channel); mandible = load, eject, grid, click and the crossfader (a curved `path` along the chin); ears = module toggles (left)
+and settings/skin/language (right); vertebrae C1-C3 = the three effect slots per deck, C4 master/headphones/sampler level, C5 microphone, C6 rec/export/import/learn,
+C7 status and stop-all; controller and audio pills at the bottom.
+Modules, each shaped by its art: `browser` (ribcage, visible at start, `place="main right ..."`), `sampler` (femur), `grid` (grid and cue tools of both decks, tray),
+and the hosts of the application panels `tools` (Settings > Library tools: stem models, trash, edit history, duplicates, queue) and `settings` (their `id=content` node
+receives the panel). Shells without several windows dock the visible modules beside the skull over the solid `bg` colour.
+Format gaps worked around: no rotated widget and no clipped (circular) waveform, so the waveform ribbon is a rectangle across the sockets; no loop in/out buttons are
+bound, so the concept's loop teeth became key/range/stem teeth; the jog/pads/browser drawing is the application's, so only their rectangle and colours are the skin's.
