@@ -10,8 +10,7 @@ platform files (`platform/linux/decoder_linux.cpp`, `midi_linux.cpp`). The audio
 | Need | Debian / Ubuntu | Fedora | Arch |
 |---|---|---|---|
 | Toolchain | `build-essential cmake ninja-build pkg-config` | `gcc-c++ cmake ninja-build pkgconf-pkg-config` | `base-devel cmake ninja` |
-| SQLCipher | `libsqlcipher-dev` | `sqlcipher-devel` | `sqlcipher` |
-| OpenSSL, zlib | `libssl-dev zlib1g-dev` | `openssl-devel zlib-devel` | `openssl zlib` |
+| OpenSSL (API server, sync and the library database's encryption) | `libssl-dev` | `openssl-devel` | `openssl` |
 | FFmpeg (decoding) | `libavformat-dev libavcodec-dev libavutil-dev libswresample-dev` | `ffmpeg-free-devel` (or RPM Fusion `ffmpeg-devel`) | `ffmpeg` |
 | ALSA (MIDI) | `libasound2-dev` | `alsa-lib-devel` | `alsa-lib` |
 | Text | `libpango1.0-dev libcairo2-dev` | `pango-devel cairo-devel` | `pango cairo` |
@@ -134,7 +133,7 @@ which explains portable mode (an empty file `bin/portable`; data then lives in `
 The tarball is **not** a static or self-contained build and not an AppImage: it is linked against the build
 machine's shared libraries (Ubuntu 24.04 in the Docker build) and needs these from the distribution: SDL3 (3.2+),
 Pango, PangoCairo and Cairo, FFmpeg's `libavformat`/`libavcodec`/`libavutil`/`libswresample` (same major version as
-at build time), `libasound2`, SQLCipher, OpenSSL 3 (`libssl3`), zlib and the C++ runtime; Noto fonts at run time. Audio
+at build time), `libasound2`, OpenSSL 3 (`libssl3`) and the C++ runtime; Noto fonts at run time. Audio
 backends are opened with `dlopen` (PulseAudio/PipeWire, ALSA, JACK). The packaging script prints the exact `ldd` list.
 A distribution-independent AppImage or Flatpak, and `.deb`/`.rpm` packages, are future work.
 
@@ -142,7 +141,8 @@ A distribution-independent AppImage or Flatpak, and `.deb`/`.rpm` packages, are 
 
 DeckHand is MIT. It links, dynamically, FFmpeg (LGPL 2.1+ for a distribution build without GPL options;
 check your distribution's build), SDL3 (zlib), Pango/Cairo/Fontconfig/FreeType/HarfBuzz (LGPL/MPL/FTL/MIT)
-and the system C++ runtime. SQLCipher (BSD) and OpenSSL (Apache-2.0) come from the distribution.
+and the system C++ runtime. SQLCipher (BSD, built from the vendored source in `third_party/sqlcipher`) is linked in statically;
+OpenSSL (Apache-2.0) comes from the distribution.
 Shipping binaries that bundle these libraries must keep them replaceable (LGPL) and carry their notices.
 
 ## Known gaps

@@ -58,7 +58,9 @@ full control API.
 - **Cross-platform.** macOS first, then Windows and Linux; iOS in tandem.
 
 ## Building (macOS)
-Requires Xcode, CMake, SQLCipher and OpenSSL (`brew install sqlcipher openssl`).
+Requires Xcode, CMake and OpenSSL (`brew install openssl`, used by the API server and sync). SQLCipher with full-text search
+is built from the vendored source in `third_party/sqlcipher` using CommonCrypto, so no SQLCipher install is needed on any
+platform (`-DDECKHAND_SYSTEM_SQLITE=ON` uses a system library instead).
 
     scripts/build-macos.sh          # builds, bundles and signs build/DeckHand.app
     ctest --test-dir build          # core tests

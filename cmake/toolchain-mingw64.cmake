@@ -1,5 +1,5 @@
 # Cross-compiles DeckHand for Windows x86_64 with mingw-w64 (POSIX threads, GCC 13 or newer, or llvm-mingw).
-# Dependencies (zlib, OpenSSL, SQLCipher) live under ${DECKHAND_WIN_PREFIX}, default /opt/win64 (scripts/windows/Dockerfile).
+# Dependencies (OpenSSL) live under ${DECKHAND_WIN_PREFIX}, default /opt/win64 (scripts/windows/Dockerfile).
 #   cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-mingw64.cmake
 set(CMAKE_SYSTEM_NAME Windows)
 set(CMAKE_SYSTEM_PROCESSOR x86_64)

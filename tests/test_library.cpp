@@ -28,7 +28,11 @@ static void test_backups() {
     CHECK(lib.db().handle() != nullptr);
     Stmt s(lib.db(), "SELECT max(version) FROM schema_version");
     // Bump the constant with migrate(). Without FTS5 in the SQLite build the last step (the
-    // search index) is skipped by design and the schema stays one version behind.
+    // search index) is skipped by design and the schema stays one version behind. The vendored
+    // SQLCipher is built with FTS5, so there the index must be present.
+#ifdef DECKHAND_VENDORED_SQLITE
+    CHECK(lib.search_indexed());
+#endif
     CHECK(s.step() && s.i64(0) == (lib.search_indexed() ? kLibrarySchemaVersion : kLibrarySchemaVersion - 1));
     if (!lib.search_indexed()) std::puts("note: this SQLite build has no FTS5; search index tests run on the fallback");
   }

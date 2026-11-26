@@ -39,7 +39,7 @@ folder can be copied to a USB stick. Without that file the data goes to $XDG_DAT
 This archive is not self-contained. It needs these from your distribution (names are Debian/Ubuntu's):
   libsdl3 (SDL3, 3.2 or newer)   libpango-1.0, libpangocairo-1.0, libcairo2
   libavformat, libavcodec, libavutil, libswresample (FFmpeg 6 or newer)
-  libasound2 (ALSA)              libsqlcipher, libssl3, zlib1g
+  libasound2 (ALSA)              libssl3 (SQLCipher is built in)
   fonts-noto-core (and fonts-noto-cjk for CJK text)
 Audio output is found at run time: PulseAudio / PipeWire (pulse), ALSA or JACK, whichever is present.
 The desktop entry and icon are in share/applications and share/icons; copy them under ~/.local/share to add
