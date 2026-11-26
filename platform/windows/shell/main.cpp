@@ -274,6 +274,15 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (!s || !s->core) return DefWindowProcW(hwnd, msg, wp, lp);
   switch (msg) {
     case WM_CLOSE: DestroyWindow(hwnd); return 0;
+    case WM_ENDSESSION:
+      // Logoff or shutdown: the system ends the process soon after this returns. Quit the way a window close does
+      // (the audio engine fades out and stops, a recording is finished), then leave.
+      if (wp) {
+        dh_app_destroy(s->core);
+        s->core = nullptr;
+        ExitProcess(0);
+      }
+      return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: {
@@ -300,10 +309,21 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_GETMINMAXINFO: {
       auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
-      const RECT r = outer_rect(static_cast<int>(kMinW * s->scale), static_cast<int>(kMinH * s->scale),
-                                static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)), static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)), s->scale);
+      // The minimum is in device-independent units. This message arrives before WM_DPICHANGED when the window moves
+      // to a monitor with another DPI, so the window's own DPI is read here rather than the stored scale.
+      const float scale = window_scale(hwnd);
+      const RECT r = outer_rect(static_cast<int>(kMinW * scale + 0.5f), static_cast<int>(kMinH * scale + 0.5f),
+                                static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)), static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)), scale);
       mm->ptMinTrackSize.x = r.right - r.left;
       mm->ptMinTrackSize.y = r.bottom - r.top;
+      // The minimum never exceeds the monitor's work area: 1100x700 DIPs at 150 % on a 1080p panel (1650x1050 plus the
+      // caption) would otherwise be taller than the screen, and the window could not be placed fully on it.
+      MONITORINFO mon{};
+      mon.cbSize = sizeof mon;
+      if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mon)) {
+        mm->ptMinTrackSize.x = std::min<LONG>(mm->ptMinTrackSize.x, mon.rcWork.right - mon.rcWork.left);
+        mm->ptMinTrackSize.y = std::min<LONG>(mm->ptMinTrackSize.y, mon.rcWork.bottom - mon.rcWork.top);
+      }
       return 0;
     }
     case 0x02E0: {  // WM_DPICHANGED
@@ -509,9 +529,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
   int client_w = opt.shot_w, client_h = opt.shot_h;
   if (offscreen) {
-    // Debug path: no window, a fixed-size offscreen target (at the scale DECKHAND_SCALE names, default 1).
+    // Debug path: no window, a fixed-size offscreen target. --size is the logical size; DECKHAND_SCALE (default 1)
+    // scales it, so the canvas has as many pixels as a window of that size on a display at that scale.
     const std::string s = getenv_utf8(L"DECKHAND_SCALE");
-    ui.scale = s.empty() ? 1.0f : std::max(0.5f, static_cast<float>(std::atof(s.c_str())));
+    ui.scale = s.empty() ? 1.0f : std::clamp(static_cast<float>(std::atof(s.c_str())), 0.5f, 4.0f);
+    client_w = std::max(1, static_cast<int>(client_w * ui.scale + 0.5f));
+    client_h = std::max(1, static_cast<int>(client_h * ui.scale + 0.5f));
     if (!ui.renderer.init(nullptr, client_w, client_h)) {
       std::fprintf(stderr, "DeckHand: the renderer could not start: %s\n", ui.renderer.error().c_str());
       return 1;

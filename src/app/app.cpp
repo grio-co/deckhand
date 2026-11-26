@@ -12,6 +12,9 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
+#elif defined(_WIN32)
+#define DH_HAVE_ENGINE_PROCESS 1
+#include "deckhand/audio/ipc_win32.hpp"
 #endif
 
 namespace deckhand {
@@ -151,7 +154,7 @@ App::~App() {
 // inside this one. If the helper cannot be started the app falls back to in-process audio rather than none.
 void App::setup_engine(const std::vector<std::string>& mapping_folders) {
 #if defined(DH_HAVE_ENGINE_PROCESS) && !(defined(__APPLE__) && TARGET_OS_IPHONE)
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
   const char* default_mode = "separate";
 #else
   const char* default_mode = "inprocess";  // until the helper is proven on this platform
@@ -237,7 +240,7 @@ void App::setup_engine(const std::vector<std::string>& mapping_folders) {
 }
 
 // A normal quit stops the engine process. SIGTERM / SIGHUP / SIGINT count as normal; a crash or SIGKILL does not.
-#if defined(DH_HAVE_ENGINE_PROCESS)
+#if defined(DH_HAVE_ENGINE_PROCESS) && !defined(_WIN32)
 namespace {
 int g_signal_pipe[2] = {-1, -1};
 void on_quit_signal(int s) {
@@ -248,7 +251,13 @@ void on_quit_signal(int s) {
 #endif
 
 void App::start_signal_watch() {
-#if defined(DH_HAVE_ENGINE_PROCESS)
+#if defined(_WIN32)
+  // Ctrl+C / Ctrl+Break / console close / logoff / shutdown count as a normal quit; a killed process does not (ipc_win32.cpp).
+  ipc::set_quit_handler([this] {
+    DH_LOG(Info, "console or session end: stopping the audio engine and quitting");
+    if (remote_) remote_->shutdown_remote(120);
+  });
+#elif defined(DH_HAVE_ENGINE_PROCESS)
   if (pipe(g_signal_pipe) != 0) return;
   for (const int fd : g_signal_pipe) fcntl(fd, F_SETFD, FD_CLOEXEC);
   struct sigaction sa {};
@@ -267,7 +276,9 @@ void App::start_signal_watch() {
 }
 
 void App::stop_signal_watch() {
-#if defined(DH_HAVE_ENGINE_PROCESS)
+#if defined(_WIN32)
+  ipc::set_quit_handler(nullptr);  // waits for a handler that is running
+#elif defined(DH_HAVE_ENGINE_PROCESS)
   if (!signal_thread_.joinable()) return;
   const char zero = 0;
   (void)!write(g_signal_pipe[1], &zero, 1);
@@ -594,7 +605,7 @@ void App::run_job(Library& lib, const Job& j) {
 // The name other devices see this one by: the host name without a ".local" suffix.
 std::string App::host_name() {
   char buf[256] = {};
-#if defined(DH_HAVE_ENGINE_PROCESS)
+#if defined(DH_HAVE_ENGINE_PROCESS) && !defined(_WIN32)
   if (gethostname(buf, sizeof buf - 1) != 0) buf[0] = 0;
 #else
   if (const char* c = std::getenv("COMPUTERNAME")) std::snprintf(buf, sizeof buf, "%s", c);

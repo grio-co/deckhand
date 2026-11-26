@@ -69,6 +69,7 @@ int usage() {
                "  token list | create NAME SCOPE[,SCOPE...] | revoke ID   [--data DIR]   API access tokens\n"
                "  devices                      list audio outputs\n"
                "  midi                         list connected MIDI input devices\n"
+               "  hid                          list HID devices (vid:pid, usage, product); keyboards and mice are left out, nothing is opened\n"
                "  play FILE  [--seconds N] [--silent 1] [--device NAME]   decode and play through the engine\n");
   return 2;
 }
@@ -86,6 +87,21 @@ int main(int argc, char** argv) {
     auto io = create_midi_io([](const std::string&, const std::uint8_t*, std::size_t) {}, [] {});
     if (!io) return 1;
     for (const auto& d : io->devices()) std::printf("%s\n", d.c_str());
+    return 0;
+  }
+  if (cmd == "hid") {
+    auto io = create_hid_io([](const std::string&, int, const std::uint8_t*, std::size_t) {}, [] {});
+    if (!io) {
+      std::fprintf(stderr, "HID is not available on this platform\n");
+      return 1;
+    }
+    io->set_matches({HidMatch{}});  // every device; enumerating opens nothing
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));  // the platform lists devices in the background
+    for (const auto& d : io->devices()) {
+      if (hid_usage_refused(d.usage_page, d.usage)) continue;  // keyboards, keypads, mice and pointers are never listed
+      std::printf("%04x:%04x  usage %04x/%04x  %s%s%s\n", d.vid, d.pid, d.usage_page, d.usage, d.product.c_str(),
+                  d.manufacturer.empty() ? "" : "  by ", d.manufacturer.c_str());
+    }
     return 0;
   }
   if (cmd == "play" && argc >= 3) {

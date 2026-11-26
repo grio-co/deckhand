@@ -52,7 +52,7 @@ the screenshot. If vcpkg's `sqlcipher` port puts `sqlite3.h` somewhere other tha
 
 ```
 deckhand.exe [--deck-a FILE] [--deck-b FILE] [FILE...] [--screenshot FILE.png [--frames N] [--size WxH]]
-deckhandctl.exe devices | midi | import | list | export ...
+deckhandctl.exe devices | midi | hid | import | list | export ...
 ```
 
 * Data (library, settings, logs): `%APPDATA%\DeckHand`. **Portable mode:** an empty file named `portable` beside
@@ -61,7 +61,8 @@ deckhandctl.exe devices | midi | import | list | export ...
   `<build>\share\deckhand`), then the exe's own folder, then `..\share\deckhand`; `DECKHAND_RESOURCE_DIR` overrides.
 * `DECKHAND_LOG=error|warn|info|debug|trace` sets the log level (`deckhand.log` in the data folder).
 * `--screenshot` renders N frames (default 30) into an offscreen Direct3D target and writes a PNG without opening a
-  window; it uses the GPU or WARP (Microsoft's software rasteriser). `DECKHAND_SCALE=2` renders at 200 %.
+  window; it uses the GPU or WARP (Microsoft's software rasteriser). `DECKHAND_SCALE=2` renders at 200 %: `--size` is the logical
+  size, the PNG is size x scale pixels (see HiDPI).
 * Keys: Ctrl takes the role of Command on macOS. Files can be dropped on the window (an elevated DeckHand still
   accepts drops). The source library of another DJ application is read from `%APPDATA%\Pioneer\rekordbox\master.db`.
 * Narrow strings are UTF-8 process-wide: the executables carry a manifest with `activeCodePage=UTF-8` and
@@ -101,19 +102,59 @@ deckhandctl.exe devices | midi | import | list | export ...
 * **Winsock**: `src/api/sockport.hpp` and `src/broadcast/sock.cpp` hide the differences (WSAPoll, `closesocket`,
   `ioctlsocket`, a loopback socket pair instead of a pipe for wake-ups).
 
-## Engine mode on Windows
+## Engine process on Windows
 
-`src/app/app.cpp` enables the separate engine process only under `__unix__`/`__APPLE__`, so a Windows build runs the
-engine **in-process** until that guard learns `_WIN32` (see "Changes needed in src/app" below). The helper,
-`deckhand-engine.exe`, is built and tested (`test_windows_ipc`).
+`engine.process = separate` (the default on Windows, `DECKHAND_ENGINE_PROCESS` overrides) runs the audio engine in
+`deckhand-engine.exe` beside the app, as on macOS and Linux: if the UI crashes, is killed or hangs, the music keeps
+playing, and a restarted UI re-attaches to the running set (decks, mixer, recording). If the helper cannot start the app
+falls back to in-process audio. `ARCHITECTURE.md` ("Engine process") describes the design; the Windows specifics:
 
-## Changes needed in src/app (not done here: another agent owns that tree; line numbers are those of commit 08929d9)
+* **Starting.** `spawn_detached` (`ipc_win32.cpp`) calls `CreateProcessW` with `DETACHED_PROCESS` (no console, so no
+  window flashes up; the helper is a console-subsystem exe that never gets one), `CREATE_NEW_PROCESS_GROUP`, and
+  `CREATE_BREAKAWAY_FROM_JOB` when the UI's job allows it (a launcher that wraps the UI in a kill-on-close job must not take
+  the engine along; a job that refuses breakaway gets the plain call). There is deliberately **no job object of our own**:
+  the helper's life is not tied to the UI's. Handles are not inherited except an explicit list of two (NUL as stdin and the
+  helper's log file as stdout/stderr, `<data>\deckhand-engine.out`), through `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`: the UI's
+  sockets, mappings and lock file never leak into the helper. Sockets and the lock handle are also marked non-inheritable.
+* **Crash vs quit.** A UI ended with `TerminateProcess` (Task Manager "End task" on a hung window, `Stop-Process -Force`, a
+  fault) leaves the helper playing. A normal quit tells the helper to fade out and exit: closing the window (`WM_CLOSE`),
+  `WM_ENDSESSION` on logoff or shutdown (the shell destroys the app, which stops the helper, then exits), and Ctrl+C,
+  Ctrl+Break or a console close when the app was started from a console (`ipc::set_quit_handler`, the SIGTERM/SIGINT/SIGHUP
+  analogue in `ipc_win32.cpp`). `engine.keep_alive_on_quit` keeps it while a deck plays, as elsewhere.
+* **Helper side.** `SetConsoleCtrlHandler` turns Ctrl+C, logoff and shutdown into the same fade-out and exit; an open
+  recording is finalised (the WAV header is patched) on every orderly exit, including the quit request of a UI that is
+  closing. There is no named "quit" event: the control channel's quit request does that job, and an outside tool that wants
+  the helper to stop uses the same request (or `taskkill /F`, which counts as a crash and leaves a WAV playable up to the
+  last once-a-second header refresh).
+* **One engine per data folder.** The single-instance lock is a file opened with no sharing, in
+  `%LOCALAPPDATA%\DeckHand\ipc\<hash>.lock`, named from the user and the lower-cased canonical data folder; the OS drops it
+  when the helper dies however it dies. (A named mutex would be equivalent; the lock file also carries `DELETE` access so a
+  clean exit removes it.) Two portable copies on different folders do not collide.
+* **Stale objects.** Windows removes a named file mapping when its last handle closes, so a killed UI or helper cannot leave
+  segments behind; a stale lock or socket file (a port and secret) is simply replaced by the next helper. A helper
+  restarted by the UI re-creates everything.
+* **Limits.** The deck contents of a *restarted* helper are empty (a crash of the helper itself loses the loaded tracks, as
+  elsewhere). If the helper is killed while the UI is gone, nobody restarts it until the next UI starts.
 
-* `app.cpp:10-11`: add `|| defined(_WIN32)` to the `DH_HAVE_ENGINE_PROCESS` condition (this is what turns the engine process on),
-  keep the `<fcntl.h>/<signal.h>/<unistd.h>` includes POSIX-only, and give `start_signal_watch()` / `stop_signal_watch()`
-  (`app.cpp:~228-250`, they use `pipe`, `sigaction`) a Windows branch: nothing is needed, because a GUI process is told to quit
-  through `WM_CLOSE`, which the shell turns into `dh_app_destroy`, which stops the engine. The default mode string
-  (`app.cpp:~135`, `"inprocess"` outside macOS) can become `"separate"` once WASAPI has run on a real machine.
+### Checking it
+
+* `test_windows_ipc` (`platform/windows/tests/ipc_test.cpp`) starts the real `deckhand-engine.exe` on the null audio device:
+  shared-memory load, a second client attaching, `TerminateProcess` of the helper and its restart, **a UI process that plays
+  and records and is killed with `TerminateProcess` while the helper keeps going, a new client attaching and finding the
+  position advanced by the wall-clock gap (within 0.75 s), the recording that spanned the kill closing as a valid WAV, and an
+  orderly quit that finalises an open recording and leaves no segment, socket file or lock**.
+* `scripts/windows/engine-check.ps1` runs the **real `deckhand.exe`** with its window against a portable data folder and
+  drives it through the REST API (token from `<data>\api-admin-token.txt`, master muted first): helper started and windowless,
+  UI killed, helper survives, relaunched UI re-attaches with the position continued, killed helper restarted, `WM_CLOSE`
+  stops the helper and `deckhand-engine --probe` shows no object left. It runs in the CI job "Windows (MSVC)". With no sound
+  device the engine runs on miniaudio's null device (paced like a real one). `scripts/windows/engine-check-wine.sh` is the same
+  under Wine in the Docker build (`docker-build.sh` runs it after the tests).
+
+## Changes needed in src/app (done unless listed)
+
+* Done: `DH_HAVE_ENGINE_PROCESS` is on for `_WIN32` (the POSIX signal pipe stays POSIX-only; Windows uses
+  `ipc::set_quit_handler`), `host_name()` no longer calls `gethostname` there, and `RemoteEngine` finds
+  `deckhand-engine.exe` beside the app.
 * `app_impl.hpp:275-276` (`source_db()`): on Windows return `%APPDATA%\Pioneer\rekordbox\master.db`
   (`std::getenv("APPDATA")`), and the `share` folder beside it for the analysis files.
 * `app_panels.cpp:124`: the `HOME`-based "Music" export target is empty on Windows (use `USERPROFILE`). Nothing else: the
@@ -125,10 +166,38 @@ engine **in-process** until that guard learns `_WIN32` (see "Changes needed in s
   macro, and guarding the `chmod` (token files are already owner-only through `src/api/fileio.cpp`).
 * `app_panels.cpp:850` hint text `/Volumes/...` for the relink field is a macOS path shown on every platform.
 
+## HiDPI (per-monitor v2)
+
+Reviewed against the Win32 rules; **none of it can be exercised on CI or under Wine** (one monitor, 96 DPI): it needs a
+real PC with a scaled display and, for `WM_DPICHANGED`, two monitors with different scaling (or changing the scale in
+Settings while the app runs).
+
+* Awareness comes from the manifest (`PerMonitorV2`) and `SetProcessDpiAwarenessContext(-4)` as a fallback; the scale is
+  `GetDpiForWindow / 96`. The core lays out in logical units and multiplies by the scale; text is rasterised by DirectWrite at
+  `size x scale` pixels (the glyph cache is keyed by that pixel size, so a scale change draws fresh glyphs).
+* `WM_DPICHANGED`: the stored scale is updated first, then the window is moved and resized to the rectangle Windows
+  suggests (so the monitor under the pointer keeps the same logical size); the resulting `WM_SIZE` resizes the swap chain
+  (`ResizeBuffers`) and the next frame is laid out at the new scale. Non-client areas scale automatically under v2;
+  outer sizes are computed with `AdjustWindowRectExForDpi`.
+* Fixed in this round: the minimum window size (1100x700 DIPs) is now computed from the window's *current* DPI inside
+  `WM_GETMINMAXINFO` (which arrives before `WM_DPICHANGED` when a window crosses monitors) and is capped to the monitor's work
+  area (at 150 % on a 1080p panel the minimum used to be taller than the screen); `WM_ENDSESSION` quits cleanly.
+* `--screenshot` with `DECKHAND_SCALE=2` now renders a canvas of **logical size x scale** (`--size 1440x900` gives
+  2880x1800 pixels), like a real window on a 200 % display; before, the canvas stayed 1440x900 pixels and the layout was
+  cramped. The Linux shell has no such debug scale (its screenshot is the real window's pixel size), so it is unaffected.
+
 ## Tests
 
-`ctest` runs every `tests/test_*.cpp` plus `test_windows_decoder`, `test_windows_midi`, `test_windows_text` and
-`test_windows_ipc`. Under Wine two environment variables mark what Wine lacks: `DECKHAND_TEST_NO_MF=1` (skip the
+`ctest` runs every `tests/test_*.cpp` plus `test_windows_decoder`, `test_windows_midi`, `test_windows_hid`,
+`test_windows_text` and `test_windows_ipc`. `test_windows_hid` exercises the HID backend without a device (enumeration with
+criteria that match nothing queries and opens nothing, the keyboard/mouse refusal rules, matching, the device-path parser,
+unknown ids failing cleanly); it needs no hardware and runs on CI and under Wine. `deckhandctl hid` lists the HID devices
+that are not keyboards or mice (vid:pid, usage page/usage, product); it opens nothing.
+
+`test_analysis` times a 6-minute synthetic track as a sanity bound, not a benchmark: it must run at least 30x faster than
+real time (under 12 s), and the measured time and factor are printed. The old fixed 3 s limit failed at 3.3 s on a desktop PC
+under MSVC Release while every accuracy check passed. MSVC Release already builds with `/O2 /Ob2` (the equivalent of the
+`-O3` of the other platforms) and no compiler in this project uses fast-math, so no flags changed. Under Wine two environment variables mark what Wine lacks: `DECKHAND_TEST_NO_MF=1` (skip the
 Media Foundation codec checks) and `DECKHAND_TEST_LENIENT=1` (skip text samples for scripts without an installed font).
 `test_engine_ipc` runs its portable parts only on Windows (its fork/SIGKILL parts have no equivalent);
 `test_windows_ipc` covers the Windows IPC layer and the engine process, including an engine ended with TerminateProcess.

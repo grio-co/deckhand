@@ -10,6 +10,7 @@
 //    TCP behaves the same on every Windows 10/11 build and under Wine.
 //  * Spawning: CreateProcessW with only the log and NUL handles inherited, detached from our console.
 #include "deckhand/audio/ipc.hpp"
+#include "deckhand/audio/ipc_win32.hpp"
 
 #if defined(_WIN32)
 
@@ -31,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -187,7 +189,32 @@ std::string quote_arg(const std::string& a) {
   return q + "\"";
 }
 
+// Quit handler (set_quit_handler). The mutex is held while the callback runs, so removing the handler waits for it.
+std::mutex g_quit_mutex;
+std::function<void()> g_quit_fn;
+bool g_quit_installed = false;
+
+BOOL WINAPI on_console_event(DWORD) {
+  std::lock_guard<std::mutex> lock(g_quit_mutex);
+  if (g_quit_fn) {
+    auto fn = std::move(g_quit_fn);
+    g_quit_fn = nullptr;
+    fn();
+  }
+  return FALSE;  // the default handler ends the process, as the default action of SIGTERM does
+}
+
 }  // namespace
+
+void set_quit_handler(std::function<void()> on_quit) {
+  std::lock_guard<std::mutex> lock(g_quit_mutex);
+  g_quit_fn = std::move(on_quit);
+  if (g_quit_fn && !g_quit_installed) g_quit_installed = SetConsoleCtrlHandler(on_console_event, TRUE) != 0;
+  else if (!g_quit_fn && g_quit_installed) {
+    SetConsoleCtrlHandler(on_console_event, FALSE);
+    g_quit_installed = false;
+  }
+}
 
 std::uint64_t now_ns() {
   static const LONGLONG freq = [] {
@@ -629,10 +656,15 @@ bool spawn_detached(const std::string& exe, const std::vector<std::string>& args
   si.StartupInfo.hStdError = log;
   si.lpAttributeList = attrs;
   PROCESS_INFORMATION pi{};
-  const BOOL ok = CreateProcessW(widen(image).c_str(), wcmd.data(), nullptr, nullptr, TRUE,
-                                 EXTENDED_STARTUPINFO_PRESENT | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
-                                     CREATE_UNICODE_ENVIRONMENT,
-                                 nullptr, nullptr, &si.StartupInfo, &pi);
+  // No console (so no window flashes up), a process group of its own, and out of our job object when the job allows
+  // it: a launcher that puts the UI in a kill-on-close job must not take the engine with it. A job that does not
+  // allow breakaway refuses the flag, then it is started without.
+  const DWORD base_flags = EXTENDED_STARTUPINFO_PRESENT | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT;
+  BOOL ok = CreateProcessW(widen(image).c_str(), wcmd.data(), nullptr, nullptr, TRUE, base_flags | CREATE_BREAKAWAY_FROM_JOB,
+                           nullptr, nullptr, &si.StartupInfo, &pi);
+  if (!ok && GetLastError() == ERROR_ACCESS_DENIED)
+    ok = CreateProcessW(widen(image).c_str(), wcmd.data(), nullptr, nullptr, TRUE, base_flags, nullptr, nullptr,
+                        &si.StartupInfo, &pi);
   const DWORD err = GetLastError();
   DeleteProcThreadAttributeList(attrs);
   close_all();

@@ -353,6 +353,17 @@ class WinHid final : public HidIO {
 
 }  // namespace
 
+// The ids a HID interface path carries ("\\?\hid#vid_046d&pid_c52b&mi_01#..."), read without any I/O. Case-insensitive.
+// interface_number is -1 when the path has no "mi_" part. Used by the scan; exported for platform/windows/tests/hid_test.cpp.
+bool hid_parse_device_path(const std::string& path, int& vid, int& pid, int& interface_number) {
+  std::string low = path;
+  std::transform(low.begin(), low.end(), low.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  interface_number = -1;
+  if (!path_field(low, "vid_", 16, vid) || !path_field(low, "pid_", 16, pid)) return false;
+  path_field(low, "mi_", 16, interface_number);
+  return true;
+}
+
 std::unique_ptr<HidIO> create_hid_io(HidIO::Receive receive, HidIO::Changed changed) {
   return std::make_unique<WinHid>(std::move(receive), std::move(changed));
 }
