@@ -45,9 +45,8 @@ them in [CHANGELOG.md](CHANGELOG.md).
 ## Next
 - [ ] Embedding (docs/EMBEDDING.md): test input and audio inside Rig; Rig side wires `DeckHandKit` (Rig session)
 - [ ] Linux: test on a real machine (audio, MIDI, Wayland, GPU drivers)
-- [ ] Windows: build and test on the real PC (MSVC build, WASAPI audio, MIDI, Media Foundation
-      codecs, HiDPI); then enable the separate engine process there (needs the UI-side quit
-      handling on Windows)
+- [ ] Windows on the real PC: WASAPI audio (incl. the Remote Desktop device), MIDI, HID, sleep/resume,
+      DPI change while running; no UI-level single-instance guard yet
 - [x] Sync: passphrase encryption, tombstone clean-up (long-deleted details dropped at compaction)
 - [ ] Sync: passphrase encryption on iOS (no OpenSSL there); encryption never tried across two real computers;
       removing tombstones altogether needs per-device acknowledgements

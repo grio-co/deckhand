@@ -60,6 +60,14 @@ if [ "${TESTS:-1}" = 1 ]; then
   done
 fi
 
+# ---- the real app with its separate engine process, through the REST API (scripts/windows/engine-check-wine.sh) -----------
+if [ "${TESTS:-1}" = 1 ] && [ "${ENGINECHECK:-1}" = 1 ]; then
+  export DECKHAND_RESOURCE_DIR=$BUILD/share/deckhand
+  timeout 600 sh $SRC/scripts/windows/engine-check-wine.sh $BUILD $OUT >$OUT/engine-check-wine.log 2>&1
+  grep -E "^(PASS|FAIL|ENGINE|==)" $OUT/engine-check-wine.log
+  wineserver -k 2>/dev/null; sleep 1
+fi
+
 # ---- shell screenshot (Xvfb + Wine: Direct3D 11 through wined3d / llvmpipe) ------------------------------------------
 if [ "${SHOT:-1}" = 1 ]; then
   # a 12 s stereo test tone with a beat, for --deck-a

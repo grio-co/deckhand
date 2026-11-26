@@ -6,6 +6,8 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Windows: the engine runs as a separate process by default (music survives a UI crash or
+  kill; the UI re-attaches); `deckhandctl hid` lists HID devices; engine-check scripts.
 - SQLCipher is now built from a pinned, vendored source on every platform with full-text
   search enabled; the Homebrew, distribution and vcpkg database packages are no longer used.
   The macOS app uses the system crypto for it. CI checks a screenshot on Linux and Windows.
@@ -100,6 +102,9 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 - Tests for the library, analysis, API, export, effects, scheduling, languages, skins and streaming.
 
 ### Fixed
+- Windows: minimum window size no longer exceeds the screen at high display scaling; the
+  `--screenshot` canvas scales with `DECKHAND_SCALE`; quit on session end stops the helper.
+- Tests: the analysis speed check is a real-time-factor bound; the export test uses its own temp folder.
 - API server: a WebSocket close frame is no longer lost on Windows when the client is still sending.
 - Windows paths are no longer stored with a leading slash in the library and sync code.
 - The macOS build script no longer bundles a stale core library after a compile error.

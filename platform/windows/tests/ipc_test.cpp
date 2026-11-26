@@ -302,9 +302,196 @@ int test_engine(const fs::path& dir, const std::string& helper) {
   return 0;
 }
 
+// ---- the UI process dies, the engine plays on ----------------------------------------------------------------------
+// A stand-in for the app: attaches to (starting if needed) the engine for `data`, plays a track, optionally records,
+// prints "READY <engine pid>" and then waits to be killed.
+int ui_process(const std::string& data, const std::string& helper, const std::string& rec) {
+  RemoteEngine::Options o;
+  o.data_dir = data;
+  o.helper_path = helper;
+  o.null_audio = true;
+  o.log_level = 2;
+  RemoteEngine eng(o);
+  std::string err;
+  OutputConfig oc;
+  if (!eng.connect(err) || !eng.start(oc, err)) {
+    std::printf("UIFAIL %s\n", err.c_str());
+    return 1;
+  }
+  eng.load(0, sine_track(200.0, 44100, 7));
+  if (!wait_for([&] { return eng.deck(0).loaded; }, 10)) return 1;
+  eng.send(cmd(Op::MasterLevel, 0, 0.0f));
+  eng.send(cmd(Op::PlayToggle, 0));
+  if (!wait_for([&] { return eng.deck(0).playing && eng.deck(0).position > 4410; }, 5)) return 1;
+  if (!rec.empty() && !eng.record_open(rec, false, err)) {
+    std::printf("UIFAIL record %s\n", err.c_str());
+    return 1;
+  }
+  std::printf("READY %u\n", eng.engine_pid());
+  std::fflush(stdout);
+  // Only one UI may be attached to an engine, so the test process cannot look at the engine itself while this one lives:
+  // this process reports the playhead with a system-wide monotonic timestamp instead (now_ns is comparable between processes).
+  for (int i = 0; i < 900; ++i) {
+    const DeckView d = eng.deck(0);
+    std::printf("POS %.3f %.1f %llu\n", d.position, d.sample_rate, static_cast<unsigned long long>(now_ns()));
+    std::fflush(stdout);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+  return 0;
+}
+
+struct WavInfo {
+  bool valid = false;  // a finalised 24-bit stereo file whose header sizes match the file
+  double seconds = 0;
+};
+
+WavInfo read_wav(const fs::path& p) {
+  WavInfo w;
+  const std::string d = slurp(p);
+  if (d.size() < 80 || d.compare(0, 4, "RIFF") != 0 || d.compare(8, 4, "WAVE") != 0 || d.compare(48, 4, "fmt ") != 0 ||
+      d.compare(72, 4, "data") != 0)
+    return w;
+  auto u32 = [&](std::size_t at) {
+    std::uint32_t v = 0;
+    std::memcpy(&v, d.data() + at, 4);
+    return v;
+  };
+  auto u16 = [&](std::size_t at) {
+    std::uint16_t v = 0;
+    std::memcpy(&v, d.data() + at, 2);
+    return v;
+  };
+  const std::uint32_t rate = u32(60);
+  if (u16(56) != 1 || u16(58) != 2 || u16(70) != 24 || rate == 0) return w;
+  if (u32(4) != d.size() - 8 || u32(76) != d.size() - 80) return w;  // sizes were patched at finalisation
+  w.valid = true;
+  w.seconds = static_cast<double>(u32(76)) / 6.0 / rate;
+  return w;
+}
+
+int test_ui_kill(const fs::path& dir, const std::string& helper) {
+  const std::string data = (dir / "ui-kill-data").string();
+  fs::create_directories(data);
+  const std::string rec1 = (dir / "through-kill.wav").string(), rec2 = (dir / "orderly-quit.wav").string();
+  wchar_t self_w[1024] = L"";
+  GetModuleFileNameW(nullptr, self_w, 1024);
+  const std::string self = fs::path(self_w).string();
+  const std::string log = (dir / "ui1.log").string();
+  SessionNames names;
+  std::string err;
+  CHECK(session_names(data, names, err));
+
+  std::uint32_t ui_pid = 0;
+  CHECK(spawn_detached(self, {"--ui", data, helper, rec1}, log, ui_pid, err));
+  std::uint32_t engine_pid = 0;
+  CHECK(wait_for([&] {
+    const std::string t = slurp(log);
+    const auto at = t.find("READY ");
+    if (at == std::string::npos) return false;
+    engine_pid = static_cast<std::uint32_t>(std::strtoul(t.c_str() + at + 6, nullptr, 10));
+    return engine_pid != 0;
+  }, 60));
+  CHECK(process_alive(engine_pid) && engine_pid != ui_pid);
+  note("ui kill: the UI process (pid " + std::to_string(ui_pid) + ") started the engine (pid " + std::to_string(engine_pid) +
+       "), plays a track and records");
+
+  RemoteEngine::Options o;
+  o.data_dir = data;
+  o.helper_path = helper;
+  o.null_audio = true;
+  o.log_level = 2;
+  // The last playhead the UI reported (complete lines only) and when.
+  struct Pos {
+    double frames = 0, rate = 44100;
+    std::uint64_t ns = 0;
+    int lines = 0;
+  };
+  auto last_pos = [&] {
+    Pos p;
+    const std::string t = slurp(log);
+    std::size_t at = 0;
+    while ((at = t.find("POS ", at)) != std::string::npos) {
+      const std::size_t end = t.find('\n', at);
+      if (end == std::string::npos) break;  // a line that was being written
+      unsigned long long ns = 0;
+      double f = 0, r = 0;
+      if (std::sscanf(t.c_str() + at, "POS %lf %lf %llu", &f, &r, &ns) == 3) {
+        p.frames = f;
+        p.rate = r;
+        p.ns = ns;
+        ++p.lines;
+      }
+      at = end;
+    }
+    return p;
+  };
+  CHECK(wait_for([&] { return last_pos().lines >= 8; }, 10));  // at least 1.5 s of audio, so the recording has content
+  const Pos before = last_pos();
+  CHECK(before.frames > 4410);
+
+  HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, ui_pid);
+  CHECK(h != nullptr);
+  TerminateProcess(h, 137);  // no WM_CLOSE, no handlers: the "UI crash"
+  CHECK(WaitForSingleObject(h, 10000) == WAIT_OBJECT_0);
+  CloseHandle(h);
+  reap_child(ui_pid);
+  CHECK(!process_alive(ui_pid));
+  CHECK(process_alive(engine_pid));  // the engine is not tied to the UI's lifetime (no job object, no parent link)
+  const Pos last = last_pos();  // the final report, possibly newer than `before`
+  std::this_thread::sleep_for(std::chrono::milliseconds(2500));  // nobody is attached for a while
+
+  RemoteEngine back(o);
+  CHECK(back.connect(err) && back.attached_existing() && back.engine_pid() == engine_pid);
+  CHECK(wait_for([&] { return back.deck(0).loaded && back.deck(0).playing; }, 5));
+  const DeckView d = back.deck(0);
+  const double elapsed = static_cast<double>(now_ns() - last.ns) / 1e9;
+  const double advanced = (d.position - last.frames) / last.rate;
+  note("ui kill: a new UI attached " + std::to_string(elapsed) + " s after the last reading; the deck advanced " +
+       std::to_string(advanced) + " s");
+  CHECK(std::fabs(advanced - elapsed) < 0.75);
+  CHECK(d.position < d.length);
+  const std::string path_back = back.recorder_path();
+  CHECK(back.recorder_status().open && path_back.find("through-kill.wav") != std::string::npos);
+
+  // The recording that was running when the UI died is still being written; the new UI ends it.
+  back.record_close();
+  CHECK(wait_for([&] { return !back.recorder_status().open; }, 10));
+  const double closed_after = static_cast<double>(now_ns() - last.ns) / 1e9;
+  const WavInfo w1 = read_wav(rec1);
+  note("ui kill: the recording that spanned the kill is a valid WAV of " + std::to_string(w1.seconds) + " s (its last report was " +
+       std::to_string(closed_after) + " s before the close; the recording began before that report)");
+  CHECK(w1.valid && w1.seconds >= closed_after - 0.5);
+
+  // An orderly quit finalises a recording that is still open, then leaves nothing behind.
+  CHECK(back.record_open(rec2, false, err));
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  back.shutdown_remote(50);
+  CHECK(wait_for([&] { return !process_alive(engine_pid); }, 10));
+  const WavInfo w2 = read_wav(rec2);
+  CHECK(w2.valid && w2.seconds > 0.8);
+  CHECK(wait_for([&] {
+    Shm probe;
+    std::string e;
+    return !Shm::open(names.shm_main, false, probe, e);
+  }, 5));
+  CHECK(!fs::exists(names.socket));
+  for (int i = 0; i < kBlockSlots; ++i) {
+    Shm probe;
+    std::string e;
+    CHECK(!Shm::open(names.block(i), false, probe, e));
+  }
+  InstanceLock again;
+  CHECK(again.acquire(names.lock, err));
+  again.release_and_remove();
+  note("ui kill: orderly quit finalised the open recording (" + std::to_string(w2.seconds) +
+       " s), stopped the engine process and left no segment, socket file or lock");
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc >= 5 && std::strcmp(argv[1], "--ui") == 0) return ui_process(argv[2], argv[3], argv[4]);
   if (argc >= 5 && std::strcmp(argv[1], "--child") == 0) {  // helper process for test_spawn
     std::printf("child says hello %s\n", argv[4]);
     std::fflush(stdout);
@@ -329,6 +516,7 @@ int main(int argc, char** argv) {
     std::printf("skip: deckhand-engine not found (%s)\n", helper.c_str());
   } else {
     rc = test_engine(dir, helper);
+    if (rc == 0) rc = test_ui_kill(dir, helper);
   }
   fs::remove_all(dir);
   if (rc == 0) std::puts("test_windows_ipc ok");

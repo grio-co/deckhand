@@ -1,3 +1,4 @@
+#include <random>
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -345,7 +346,9 @@ void negative_tests(const fs::path& good, const fs::path& work) {
 }  // namespace
 
 int main() {
-  const fs::path tmp = fs::temp_directory_path() / "deckhand_export_test";
+  // Unique per run: two copies of this test (parallel builds, several checkouts) must not share a folder.
+  const fs::path tmp = fs::temp_directory_path() /
+                       ("deckhand_export_test_" + std::to_string(std::random_device{}()));
   fs::remove_all(tmp);
   fs::create_directories(tmp / "src");
   const fs::path stick = tmp / "stick";

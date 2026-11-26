@@ -172,6 +172,10 @@ jobs:
           name: screenshot-windows
           path: screenshots/
           if-no-files-found: warn
+      - name: Engine process check (real deckhand.exe, REST API)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: scripts\windows\engine-check.ps1 -BuildDir build-windows -Config Release
       - name: Upload test logs
         if: failure()
         uses: actions/upload-artifact@v4

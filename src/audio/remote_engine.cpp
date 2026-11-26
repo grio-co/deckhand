@@ -141,10 +141,14 @@ bool RemoteEngine::establish(std::string& error, bool allow_spawn, bool& spawned
     attached_existing_ = false;
     std::string helper = opt_.helper_path;
     if (helper.empty()) helper = executable_dir() + "/deckhand-engine";
+#if defined(_WIN32)
+    // spawn_detached adds ".exe" and reports a missing file; std::filesystem::exists would read UTF-8 as the ANSI page.
+#else
     if (!std::filesystem::exists(helper)) {
       error = "engine helper not found: " + helper;
       return false;
     }
+#endif
     std::vector<std::string> args = {"--data-dir", opt_.data_dir, "--log-level", std::to_string(opt_.log_level)};
     if (!opt_.resource_dir.empty()) {
       args.push_back("--resources");
