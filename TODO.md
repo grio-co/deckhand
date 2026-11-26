@@ -69,4 +69,4 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - Tracks are decoded fully into memory.
 - Analysis can split a steady track at a long breakdown; such splits are merged when the tempo agrees.
 - HID controllers and MIDI learn are not supported yet.
-- Built against the host's Homebrew SQLCipher, so the app runs on this macOS version and newer.
+- The database library is vendored and statically linked; the app still links the host's Homebrew OpenSSL (API server, sync), so it runs on this macOS version and newer.

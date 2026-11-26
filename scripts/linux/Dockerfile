@@ -4,7 +4,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential clang cmake ninja-build pkg-config git ca-certificates curl rsync \
-    libsqlcipher-dev libssl-dev zlib1g-dev \
+    libssl-dev \
     libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libasound2-dev \
     libpango1.0-dev libcairo2-dev libfontconfig-dev \
     libgl-dev libegl-dev libgles-dev libgbm-dev libdrm-dev libudev-dev libdbus-1-dev libxkbcommon-dev \

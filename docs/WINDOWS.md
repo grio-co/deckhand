@@ -21,16 +21,16 @@ scripts/windows/docker-build.sh               # image, build, every test under W
 the dependencies built for `x86_64-w64-mingw32` into `/opt/win64`, statically. The result is in
 `build-windows-artifacts/` (git-ignored): `bin/*.exe` with `SHA256SUMS`, one log per test, `tests.txt`,
 `shell_x1.png` / `shell_x2.png`. `cmake/toolchain-mingw64.cmake` is the toolchain file; use it directly with
-`-DDECKHAND_WIN_PREFIX=<prefix with zlib, OpenSSL, SQLCipher>` outside Docker.
+`-DDECKHAND_WIN_PREFIX=<prefix with OpenSSL>` outside Docker.
 
 | Dependency | Version | Licence | Source of the sources |
 |---|---|---|---|
-| zlib | 1.3.1 | zlib | zlib.net, SHA-256 pinned in the Dockerfile |
 | OpenSSL | 3.5.4 | Apache-2.0 | GitHub release, checked against the `.sha256` file the project publishes next to it |
-| SQLCipher | 4.6.1 | BSD-3-Clause | GitHub tag archive (no published checksum; the build prints and stores the archive's SHA-256) |
+| SQLCipher | 4.20.0 | BSD-3-Clause | vendored in `third_party/sqlcipher` (not fetched by the build), compiled by CMake with FTS5 against OpenSSL's libcrypto |
 
-SQLCipher is built from its amalgamation (`make sqlite3.c` natively, then one cross-compile with
-`-DSQLITE_HAS_CODEC -DSQLCIPHER_CRYPTO_OPENSSL`) into a static `libsqlcipher.a` against OpenSSL's libcrypto.
+SQLCipher is the project's own pinned amalgamation (`third_party/sqlcipher/README.md`), the same on every platform and built
+with FTS5, so library search has its index here (the vcpkg and distribution packages lack FTS5). `-DDECKHAND_SYSTEM_SQLITE=ON`
+switches back to a prefix-provided SQLCipher (`-DSQLCIPHER_ROOT=<prefix>`, header in `include\sqlcipher\`). zlib is not needed.
 No FFmpeg: decoding is Media Foundation plus built-in PCM readers.
 
 ### B. Native MSVC build with vcpkg (written, not run)
@@ -43,10 +43,9 @@ vcpkg (`VCPKG_ROOT`).
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Test -Screenshot
 ```
 
-It installs `openssl`, `zlib` and `sqlcipher` for the `x64-windows-static` triplet, configures with the Visual Studio
+It installs `openssl` for the `x64-windows-static` triplet, configures with the Visual Studio
 generator and the static runtime, builds `Release`, prints SHA-256 sums of the executables, and optionally runs ctest and
-the screenshot. If vcpkg's `sqlcipher` port puts `sqlite3.h` somewhere other than `include\sqlcipher\`, point
-`-DSQLCIPHER_ROOT=<prefix>` at a prefix that has it there.
+the screenshot.
 
 ## Run
 

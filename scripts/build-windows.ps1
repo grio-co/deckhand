@@ -9,7 +9,7 @@
     * git
     * vcpkg, cloned and bootstrapped somewhere (set VCPKG_ROOT or pass -VcpkgRoot); the script runs
       `vcpkg install` for the libraries below into vcpkg's own folder.
-  Libraries (static, x64): openssl, zlib, sqlcipher  (triplet x64-windows-static: static CRT, no DLLs to ship).
+  Libraries (static, x64): openssl  (triplet x64-windows-static: static CRT, no DLLs to ship).
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -Test
@@ -46,12 +46,12 @@ if (-not $Cmake) { throw "cmake not found (install the 'C++ CMake tools for Wind
 $CmakeExe = if ($Cmake.PSObject.Properties.Name -contains "Source") { $Cmake.Source } else { $Cmake.FullName }
 
 if (-not $SkipDeps) {
-  & $Vcpkg install "openssl:$Triplet" "zlib:$Triplet" "sqlcipher:$Triplet"
+  & $Vcpkg install "openssl:$Triplet"
   if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
 }
 $Prefix = Join-Path $VcpkgRoot "installed\$Triplet"
 
-# SQLCipher's vcpkg port installs sqlite3.h under include\sqlcipher; CMakeLists.txt looks there (SQLCIPHER_ROOT / CMAKE_PREFIX_PATH).
+# SQLCipher is vendored (third_party/sqlcipher) and compiled by CMake: only OpenSSL comes from vcpkg.
 if (-not $Generator) {
   $Generator = "Visual Studio 17 2022"
   $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"

@@ -20,24 +20,24 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Install SQLCipher (Homebrew)
-        run: brew install sqlcipher
+      - name: Install OpenSSL (Homebrew; API server and sync). SQLCipher is vendored and built by CMake.
+        run: brew install openssl@3
       - name: Configure
         run: |
-          # Use whichever OpenSSL the SQLCipher bottle links against, so libcrypto matches.
-          SQLCIPHER=$(brew --prefix sqlcipher)
-          CRYPTO=$(otool -L "$SQLCIPHER/lib/libsqlcipher.dylib" | awk '/libcrypto/ {print $1; exit}')
-          OSSL=$(cd "$(dirname "$CRYPTO")/.." && pwd -P)
-          echo "SQLCipher: $SQLCIPHER  OpenSSL: $OSSL"
+          OSSL=$(brew --prefix openssl@3)
           ls "$OSSL/lib/libcrypto.a" "$OSSL/lib/libssl.a"
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -DSQLCIPHER_ROOT="$SQLCIPHER" -DOPENSSL_ROOT="$OSSL" -DOPENSSL_CRYPTO="$OSSL/lib/libcrypto.a"
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT="$OSSL"
       - name: Build (core, tests, deckhand-engine, deckhandctl)
         run: cmake --build build -j "$(sysctl -n hw.ncpu)"
       - name: Test
         run: cd build && ctest --output-on-failure -j 2 --timeout 600
       - name: Build the Swift shell (unsigned)
         run: DECKHAND_SKIP_SIGN=1 scripts/build-macos.sh
+      - name: Smoke test (deckhandctl launches and lists devices)
+        run: |
+          build/deckhandctl devices
+          # The database library is the vendored SQLCipher: no libsqlcipher or libcrypto dylib may be linked.
+          if otool -L build/DeckHand.app/Contents/MacOS/DeckHand | grep -i -E "sqlcipher|libcrypto"; then exit 1; fi
       - name: Upload test logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -61,7 +61,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config git ca-certificates curl \
-            libsqlcipher-dev libssl-dev zlib1g-dev \
+            libssl-dev \
             libavformat-dev libavcodec-dev libavutil-dev libswresample-dev libasound2-dev \
             libpango1.0-dev libcairo2-dev libfontconfig-dev \
             libgl-dev libegl-dev libgles-dev libgbm-dev libdrm-dev libudev-dev libdbus-1-dev libxkbcommon-dev \
@@ -94,6 +94,23 @@ jobs:
           export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"; mkdir -m 700 -p "$XDG_RUNTIME_DIR"
           cd build-linux
           xvfb-run -a -s "-screen 0 1600x1000x24" ctest --output-on-failure -j 2 --timeout 600
+      - name: Screenshot (shell under Xvfb with software GL)
+        run: |
+          : > "$RUNNER_TEMP/empty-alsa.conf"
+          export ALSA_CONFIG_PATH="$RUNNER_TEMP/empty-alsa.conf" PULSE_SERVER=unix:/nonexistent/dh-pulse
+          export LIBGL_ALWAYS_SOFTWARE=1 LANG=C.UTF-8 LD_LIBRARY_PATH="$HOME/sdl3/lib:${LD_LIBRARY_PATH:-}"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg"; mkdir -m 700 -p "$XDG_RUNTIME_DIR"
+          export XDG_DATA_HOME="$RUNNER_TEMP/data"
+          mkdir -p screenshots
+          xvfb-run -a -s "-screen 0 1600x1000x24" build-linux/deckhand --screenshot screenshots/linux.png --frames 60
+          python3 scripts/check-screenshot.py screenshots/linux.png --size 1440x900
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-linux
+          path: screenshots/
+          if-no-files-found: warn
       - name: Upload test logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -137,6 +154,24 @@ jobs:
           cd build-windows
           ctest -C Release --output-on-failure --timeout 600
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Screenshot (WARP software rasteriser)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force screenshots | Out-Null
+          $env:DECKHAND_RESOURCE_DIR = Join-Path $PWD "build-windows\share\deckhand"
+          # A GUI-subsystem exe: Start-Process -Wait, or PowerShell would not wait for it to write the file.
+          $p = Start-Process -FilePath build-windows\Release\deckhand.exe -Wait -PassThru -NoNewWindow `
+            -ArgumentList "--screenshot","screenshots\windows.png","--frames","60","--size","1280x800"
+          if ($p.ExitCode -ne 0) { Write-Host "deckhand exited with $($p.ExitCode)"; exit 1 }
+          python scripts\check-screenshot.py screenshots\windows.png --size 1280x800
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-windows
+          path: screenshots/
+          if-no-files-found: warn
       - name: Upload test logs
         if: failure()
         uses: actions/upload-artifact@v4

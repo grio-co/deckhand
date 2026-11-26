@@ -6,6 +6,9 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- SQLCipher is now built from a pinned, vendored source on every platform with full-text
+  search enabled; the Homebrew, distribution and vcpkg database packages are no longer used.
+  The macOS app uses the system crypto for it. CI checks a screenshot on Linux and Windows.
 - Track preparation: beat-grid editing (shift, first beat and downbeat at the playhead, BPM
   nudge, halve/double, tap tempo, tempo sections, lock, undo) with a headphone-only metronome;
   memory cues, saved loops, named and coloured hot cues, draggable cue markers.
