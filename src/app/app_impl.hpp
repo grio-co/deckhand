@@ -626,6 +626,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::vector<std::string> bcols_;                   // shown columns, in order
   std::map<std::string, float> bwidth_;              // user widths: px, or weight for the flexible columns
   bool bcols_loaded_ = false, key_musical_ = false, compat_on_ = false;
+  std::atomic<bool> settings_synced_{false};  // set by the sync worker: reload the browser settings
   std::int64_t compat_ref_id_ = 0;
   unsigned frame_count_ = 0;
   std::set<int> multi_;                              // selected row indices (browse_mutex_)

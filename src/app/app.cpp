@@ -698,6 +698,7 @@ void App::sync_job(Library& lib, bool run) {
     set_status(T("status.sync_failed", {{"message", r.error}}));
   } else if (r.records_written > 0 || r.records_applied > 0) {
     rows_dirty_ = true;
+    if (r.records_applied > 0) settings_synced_ = true;
     set_status(T("status.synced", {{"sent", r.records_written}, {"files", r.records_applied}}));
   }
 }

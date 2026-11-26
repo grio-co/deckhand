@@ -981,6 +981,77 @@ void test_auto_compaction() {
   CHECK(title_of(b, 1) == "T11");
 }
 
+void test_preparation_sync() {
+  Scenario s("prep");
+  Dev& a = s.add("A");
+  Dev& b = s.add("B");
+  add_track(a, 1, "One");
+  add_track(a, 2, "Two");
+  add_track(b, 1, "One");  // the same file, never locked here: its default must not undo the lock
+  b.lib->create_playlist(0, "Local only", false);  // so that row ids differ between the two libraries
+  adv();
+  a.lib->set_grid_locked(tid(a, 1), true);
+  const auto set = a.lib->create_playlist(0, "Peak time", false);
+  a.lib->add_to_playlist(set, tid(a, 2));
+  SmartRule in;
+  in.field = SmartRule::Field::InPlaylist;
+  in.id = set;
+  a.lib->create_smart_playlist("From peak time", true, {in});
+  a.lib->set_setting("browser.columns", "title,key");
+  sync(a);
+  sync_all(s);
+  CHECK(a.lib->grid_locked(tid(a, 1)));
+  CHECK(b.lib->grid_locked(tid(b, 1)));
+  CHECK(!b.lib->grid_locked(tid(b, 2)));
+  CHECK(b.lib->setting("browser.columns") == "title,key");
+  auto smart = b.lib->smart_playlists();
+  CHECK(smart.size() == 1);
+  if (smart.size() != 1) return;
+  CHECK(smart[0].name == "From peak time" && smart[0].match_all);
+  CHECK(smart[0].rules.size() == 1 && smart[0].rules[0].id == playlist_named(b, "Peak time"));
+  CHECK(smart[0].rules[0].text.empty());
+  CHECK(b.lib->smart_track_ids(smart[0].id) == std::vector<std::int64_t>{tid(b, 2)});
+  // Nothing new: nothing is written, in either direction.
+  CHECK(sync(a).records_written == 0);
+  CHECK(sync(b).records_written == 0);
+
+  adv();
+  smart[0].name = "Renamed";
+  smart[0].match_all = false;
+  b.lib->update_smart_playlist(smart[0]);
+  b.lib->set_grid_locked(tid(b, 1), false);
+  sync_all(s);
+  auto back = a.lib->smart_playlists();
+  CHECK(back.size() == 1 && back[0].name == "Renamed" && !back[0].match_all);
+  CHECK(back.size() == 1 && back[0].rules.size() == 1 && back[0].rules[0].id == set);
+  CHECK(!a.lib->grid_locked(tid(a, 1)));
+
+  // A library that ran an earlier version: the register is stored but was never applied.
+  adv();
+  a.lib->set_grid_locked(tid(a, 1), true);
+  sync_all(s);
+  b.lib->set_grid_locked(tid(b, 1), false);
+  b.lib->db().exec("DELETE FROM sync_meta WHERE key = 'fields'");
+  restart(b, "");
+  sync_all(s);
+  CHECK(a.lib->grid_locked(tid(a, 1)));
+  CHECK(b.lib->grid_locked(tid(b, 1)));
+
+  // The referenced playlist goes away, then the smart playlist itself.
+  adv();
+  a.lib->delete_playlist(set);
+  sync_all(s);
+  CHECK(a.lib->smart_playlists().size() == 1);
+  CHECK(sync(a).records_written == 0);
+  CHECK(sync(b).records_written == 0);
+  adv();
+  b.lib->delete_smart_playlist(b.lib->smart_playlists().at(0).id);
+  sync_all(s);
+  CHECK(a.lib->smart_playlists().empty());
+  CHECK(b.lib->smart_playlists().empty());
+  expect_equal(s);
+}
+
 void test_big_library() {
   Scenario s("big");
   Dev& a = s.add("A");
@@ -1057,6 +1128,7 @@ int main() {
   test_tombstone_cleanup();
   test_auto_compaction();
   test_restored_backup();
+  test_preparation_sync();
   test_big_library();
   std::error_code ec;
   fs::remove_all(fs::temp_directory_path() / ("dh_sync_fp_" + std::to_string(run_id())), ec);

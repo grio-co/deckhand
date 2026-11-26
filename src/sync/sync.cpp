@@ -42,7 +42,9 @@ const FieldDef kTrackFields[] = {
     {"label", Val::Text},      {"comment", Val::Text},    {"key", Val::Text},        {"format", Val::Text},
     {"year", Val::Int},        {"rating", Val::Int},      {"color", Val::Int},       {"duration_ms", Val::Int},
     {"bitrate", Val::Int},     {"sample_rate", Val::Int}, {"date_added", Val::Int},  {"bpm", Val::Real},
-    {"gain_db", Val::Real}};
+    {"gain_db", Val::Real},
+    {"grid_locked", Val::Int},
+};
 constexpr int kNumTrackFields = static_cast<int>(sizeof kTrackFields / sizeof kTrackFields[0]);
 
 // A Windows path ("C:\x", "C:/x", "\\server\share") stored under the system root '/' stands for itself.
@@ -352,7 +354,7 @@ Tree build_tree(const State& st) {
 }  // namespace
 
 std::vector<std::string> DefaultSettingsAllow() {
-  return {"ui.language", "ui.skin", "analysis.", "cue.", "mix.", "stream.template", "obs.text_template"};
+  return {"ui.language", "ui.skin", "browser.", "analysis.", "cue.", "mix.", "stream.template", "obs.text_template"};
 }
 
 std::string SyncEngine::fingerprint_file(const std::string& path) {
@@ -455,6 +457,24 @@ struct SyncEngine::Impl {
     dev_name = cfg.device_name;
     meta_put("device_name", dev_name);
     reload();
+    adopt_new_fields();
+  }
+
+  // An earlier version stored fields it did not know without applying them, and marked files holding unknown kinds as
+  // read. Apply the former before the first capture (or this library's defaults would win) and read every file again.
+  void adopt_new_fields() {
+    if (meta_get("fields") == "2") return;
+    Transaction tx(db);
+    for (const auto& [fp, e] : st.ent[State::idx('T')]) {
+      const auto r = e.f.find("grid_locked");
+      if (r == e.f.end() || r->second.v.empty()) continue;
+      Stmt u(db, "UPDATE tracks SET grid_locked = 1 WHERE id IN (SELECT track_id FROM sync_track WHERE fp = ?1)");
+      u.bind(1, fp);
+      u.run();
+    }
+    db.exec("DELETE FROM sync_files");
+    meta_put("fields", "2");
+    tx.commit();
   }
 
   std::string meta_get(const char* key) {
@@ -999,12 +1019,113 @@ struct SyncEngine::Impl {
     }
   }
 
+  // ---- smart playlists ----------------------------------------------------------------------------------------------
+  // An "in playlist" rule holds a local row id. In the folder the id is 0 and the text holds the playlist's entity id.
+  static std::string shared_rules(std::vector<SmartRule> rules, const IdMap& pm) {
+    for (auto& r : rules) {
+      if (r.field != SmartRule::Field::InPlaylist) continue;
+      const auto it = pm.l2e.find(r.id);
+      r.text = it == pm.l2e.end() ? std::string() : it->second;
+      r.id = 0;
+    }
+    return smart_rules_json(rules);
+  }
+  static std::string local_rules(std::vector<SmartRule> rules, const IdMap& pm) {
+    for (auto& r : rules) {
+      if (r.field != SmartRule::Field::InPlaylist) continue;
+      const auto it = pm.e2l.find(r.text);
+      r.id = it == pm.e2l.end() ? 0 : it->second;  // 0: a playlist this library does not have (yet): matches nothing
+      r.text.clear();
+    }
+    return smart_rules_json(rules);
+  }
+
+  void capture_smart() {
+    struct Row {
+      std::int64_t id;
+      std::string name;
+      std::int64_t match_all;
+      std::string rules;
+      std::int64_t pos;
+    };
+    std::vector<Row> rows;
+    {
+      Stmt s(db, "SELECT id, name, match_all, rules, position FROM smart_playlists ORDER BY id");
+      while (s.step()) rows.push_back({s.i64(0), s.text(1), s.i64(2), s.text(3), s.i64(4)});
+    }
+    const IdMap pm = load_map('P');
+    IdMap qm = load_map('Q');
+    std::unordered_set<std::int64_t> live_ids;
+    for (const auto& r : rows) live_ids.insert(r.id);
+    std::vector<std::int64_t> gone;
+    for (const auto& [id, eid] : qm.l2e)
+      if (!live_ids.count(id)) gone.push_back(id);
+    for (const auto id : gone) {
+      const std::string eid = qm.l2e[id];
+      if (st.alive('Q', eid)) put('Q', eid, "_del", Val::integer(1));
+      map_drop(qm, 'Q', id);
+    }
+    for (const auto& r : rows) {
+      if (!qm.l2e.count(r.id)) map_put(qm, 'Q', r.id, new_eid());
+      const std::string& eid = qm.l2e[r.id];
+      const bool back = !st.alive('Q', eid);
+      if (back) put('Q', eid, "_del", Val::integer(0));
+      put('Q', eid, "name", Val::text(r.name), back);
+      put('Q', eid, "match_all", Val::integer(r.match_all ? 1 : 0), back);
+      put('Q', eid, "pos", Val::integer(r.pos), back);
+      std::vector<SmartRule> live, shared;
+      if (!smart_rules_from_json(r.rules, live)) continue;
+      if (!back && st.find('Q', eid, "rules")) {
+        if (!smart_rules_from_json(st.text('Q', eid, "rules"), shared)) continue;  // a newer version's: leave them
+        if (local_rules(shared, pm) == smart_rules_json(live)) continue;           // not edited here
+      }
+      put('Q', eid, "rules", Val::text(shared_rules(live, pm)), back);
+    }
+  }
+
+  void materialize_smart(const std::set<std::string>& dirty, bool playlists_changed) {
+    const IdMap pm = load_map('P');
+    IdMap qm = load_map('Q');
+    for (const auto& [eid, e] : st.ent[State::idx('Q')]) {
+      (void)e;
+      if (!playlists_changed && !dirty.count(eid)) continue;
+      const auto found = qm.e2l.find(eid);
+      std::int64_t id = found == qm.e2l.end() ? 0 : found->second;
+      if (!st.alive('Q', eid)) {
+        if (!id) continue;
+        Stmt d(db, "DELETE FROM smart_playlists WHERE id = ?1");
+        d.bind(1, id);
+        d.run();
+        map_drop(qm, 'Q', id);
+        continue;
+      }
+      std::vector<SmartRule> rules;
+      if (!smart_rules_from_json(st.text('Q', eid, "rules"), rules)) continue;  // not here yet, or a newer version's
+      const auto num = [&](const char* field) {
+        const Reg* r = st.find('Q', eid, field);
+        return r && r->v.t == Val::Int ? r->v.i : std::int64_t{0};
+      };
+      if (id) {
+        Stmt q(db, "SELECT 1 FROM smart_playlists WHERE id = ?1");
+        q.bind(1, id);
+        if (!q.step()) id = 0;
+      }
+      Stmt w(db, id ? "UPDATE smart_playlists SET name = ?1, match_all = ?2, rules = ?3, position = ?4 WHERE id = ?5"
+                    : "INSERT INTO smart_playlists(name, match_all, rules, position) VALUES (?1, ?2, ?3, ?4)");
+      w.bind(1, st.text('Q', eid, "name")).bind(2, num("match_all")).bind(3, local_rules(rules, pm)).bind(4, num("pos"));
+      if (id) w.bind(5, id);
+      w.run();
+      if (!id) map_put(qm, 'Q', db.last_insert_id(), eid);
+    }
+  }
+
   void do_capture() {
     relink_by_hints();
     std::unordered_map<std::string, std::int64_t> fp2id;
     capture_tracks(fp2id);
     const Maps maps = track_maps();
     capture_playlists(maps);
+    capture_smart();
     capture_history(maps);
     capture_settings();
   }
@@ -1412,7 +1533,7 @@ struct SyncEngine::Impl {
   void materialize() {
     std::set<std::string> dirty_t, dirty_c, dirty_e_pl;
     bool dirty_p = false, dirty_hs = false;
-    std::set<std::string> dirty_g;
+    std::set<std::string> dirty_g, dirty_q;
     for (const auto& [kind, eid, field] : st.dirty) {
       (void)field;
       switch (kind) {
@@ -1423,6 +1544,7 @@ struct SyncEngine::Impl {
         case 'H':
         case 'S': dirty_hs = true; break;
         case 'G': dirty_g.insert(eid); break;
+        case 'Q': dirty_q.insert(eid); break;
       }
     }
     if (!dirty_t.empty()) materialize_tracks(dirty_t);
@@ -1430,6 +1552,7 @@ struct SyncEngine::Impl {
     for (const auto& eid : dirty_c) materialize_cue(eid, maps);
     std::set<std::int64_t> fresh_playlists;
     if (dirty_p) materialize_playlists(fresh_playlists);
+    if (dirty_p || !dirty_q.empty()) materialize_smart(dirty_q, dirty_p);
     if (dirty_p || !dirty_e_pl.empty() || !dirty_t.empty()) materialize_entries(dirty_e_pl, dirty_t, fresh_playlists, maps);
     if (dirty_hs) materialize_history(maps);
     for (const auto& key : dirty_g) {

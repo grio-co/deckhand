@@ -8,11 +8,14 @@ iCloud Drive, Dropbox, OneDrive, Syncthing, a NAS share, or a stick you carry ar
 
 - Track metadata: title, artist, album, genre, label, comment, year, rating, colour, key, BPM, gain, duration,
   bitrate, sample rate, date added.
+- Grid locks.
 - Beat grids, hot cues, memory cues and loops.
 - Playlists and folders (the tree, names, order, moves), and the tracks in each playlist, in order. The same track
   may appear several times in one playlist.
+- Smart playlists: name, order, match mode and rules. A rule that names a playlist follows that playlist across devices.
 - Play history.
-- A short list of settings: language, skin, analysis and cue preferences, and the stream/overlay text templates.
+- A short list of settings: language, skin, browser columns, column widths and key notation, analysis and cue
+  preferences, and the stream/overlay text templates.
 
 ## What does not sync
 
@@ -180,11 +183,14 @@ Entity kinds, ids and fields:
 | H | history row | `<device>:<counter>` | `sess`, `trk`, `deck`, `started`, `played` |
 | S | history session | `<device>:<counter>` | `started` |
 | G | setting | key | `v` |
+| Q | smart playlist | `<device>:<counter>` | `_del`, `name`, `match_all`, `rules`, `pos` |
 
 `_del` = 1 marks a tombstone; 0 or absent means present. Empty values (NULL, 0, empty text) and absent registers
 are equivalent. `pos` is a fractional position key: a string over `0-9A-Za-z` compared bytewise; entries sort by
 (`pos`, entity id). Inserting between two neighbours generates a key strictly between theirs. `grid` is the beat
-grid as text, `first_beat_ms,bpm,bar_beat;` repeated.
+grid as text, `first_beat_ms,bpm,bar_beat;` repeated. `rules` is the library's smart-rule JSON, except that an
+"in playlist" rule has `id` 0 and carries the playlist's entity id in `t`. A reader that cannot parse it keeps its own
+rules and does not overwrite the register. Readers ignore entity kinds they do not know.
 
 Effective playlist tree: a node's parent is its `parent` register, or the top level when that is empty or unknown.
 Cycles are broken by sending the node whose `parent` register has the oldest stamp in the cycle to the top level;

@@ -50,7 +50,8 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [x] Sync: passphrase encryption, tombstone clean-up (long-deleted details dropped at compaction)
 - [ ] Sync: passphrase encryption on iOS (no OpenSSL there); encryption never tried across two real computers;
       removing tombstones altogether needs per-device acknowledgements
-- [ ] Preparation follow-ups: sync `grid_locked`, smart playlists and the new browser settings; reorder
+- [x] Sync grid locks, smart playlists and the browser settings
+- [ ] Preparation follow-ups: reorder
       columns by dragging headers; fade when a preview replaces another; persist the main cue point;
       tests for the USB export glue; pinch zoom
 - [ ] Bluetooth MIDI pairing: try with a real device

@@ -6,6 +6,8 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Sync: grid locks, smart playlists (including rules that name a playlist) and the browser
+  column and key-notation settings now carry between devices.
 - Free-form skins on macOS: transparent, shaped windows whose empty areas let clicks through
   to the desktop; modules (library, sampler, panels) as separate floating windows with
   remembered positions, snapping and group dragging, uniform scaling; sliders along a path

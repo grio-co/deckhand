@@ -62,11 +62,11 @@ struct Entity {
 };
 
 // Entity kinds: T track (id = fingerprint), C cue (fp#slot), P playlist/folder, E playlist entry,
-// H history row, S history session, G setting (id = key).
-constexpr const char* kKinds = "TCPEHSG";
+// H history row, S history session, G setting (id = key), Q smart playlist.
+constexpr const char* kKinds = "TCPEHSGQ";
 
 struct State {
-  std::map<std::string, Entity> ent[7];
+  std::map<std::string, Entity> ent[8];
   std::set<Key> pending;  // regs to export
   std::set<Key> dirty;    // regs changed since the last flush to SQLite
 
