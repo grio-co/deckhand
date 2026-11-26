@@ -122,6 +122,13 @@ Fixture build_source(Library& lib) {
   return f;
 }
 
+static std::string native(std::string p) {
+#ifdef _WIN32
+  for (char& c : p) if (c == '/') c = '\\';
+#endif
+  return p;
+}
+
 void test_round_trip() {
   Library src(db_path("src"));
   const Fixture f = build_source(src);
@@ -376,11 +383,11 @@ void test_tolerant_and_malformed() {
 
 void test_urls() {
   CHECK(interchange_path_to_url("/a b/c#d%e.mp3") == "file://localhost/a%20b/c%23d%25e.mp3");
-  CHECK(interchange_url_to_path("file://localhost/a%20b/c%23d%25e.mp3") == "/a b/c#d%e.mp3");
-  CHECK(interchange_url_to_path("file:///x/y.mp3") == "/x/y.mp3");
-  CHECK(interchange_url_to_path("file://somehost/x/y.mp3") == "/x/y.mp3");
+  CHECK(interchange_url_to_path("file://localhost/a%20b/c%23d%25e.mp3") == native("/a b/c#d%e.mp3"));
+  CHECK(interchange_url_to_path("file:///x/y.mp3") == native("/x/y.mp3"));
+  CHECK(interchange_url_to_path("file://somehost/x/y.mp3") == native("/x/y.mp3"));
   CHECK(interchange_path_to_url("C:\\Music\\\xC3\xA9.mp3") == "file://localhost/C:/Music/%C3%A9.mp3");
-  CHECK(interchange_url_to_path("file://localhost/C:/Music/%C3%A9.mp3") == "C:/Music/\xC3\xA9.mp3");
+  CHECK(interchange_url_to_path("file://localhost/C:/Music/%C3%A9.mp3") == native("C:/Music/\xC3\xA9.mp3"));
   CHECK(interchange_url_to_path("/plain/100%.mp3") == "/plain/100%.mp3");
 }
 

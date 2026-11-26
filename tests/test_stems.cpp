@@ -376,6 +376,7 @@ TEST(cache_roundtrip_and_partial_reads) {
     // a new cache object over the same folder sees it (persisted index)
     StemCache c2(cfg);
     CHECK(c2.has_stems(key) && c2.count() == 1);
+    rd.reset();  // Windows cannot delete a file that is still open
     CHECK(c.evict(key) && !c.has_stems(key) && c.total_bytes() == 0);
     fs::remove_all(d);
   }
