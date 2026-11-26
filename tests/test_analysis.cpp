@@ -17,6 +17,7 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr std::uint32_t kRate = 44100;
+constexpr int kDownbeatMinFraction = 0;  // percent; raised once the estimator is measured
 
 struct Pcm {
   std::vector<float> d;
@@ -146,6 +147,435 @@ void test_downbeat() {
   CHECK(std::fabs(g.sections[0].bpm - bpm) < 0.05);
   CHECK(g.sections[0].bar_beat == expect);
   CHECK(g.downbeat_confidence > 0.1);
+}
+
+
+void add_snare(Pcm& p, double t, float amp) {
+  const std::size_t n = kRate / 7;
+  for (std::size_t i = 0; i < n; ++i) {
+    const double x = double(i) / kRate;
+    const float v = noise() * float(std::exp(-x / 0.045)) + 0.5f * float(std::sin(2 * kPi * 190.0 * x) * std::exp(-x / 0.06));
+    p.add(t, i, amp * 0.5f * v);
+  }
+}
+void add_crash(Pcm& p, double t, float amp) {
+  const std::size_t n = kRate * 6 / 5;
+  float prev = 0;
+  for (std::size_t i = 0; i < n; ++i) {
+    const float n0 = noise();
+    const float hp = n0 - prev;
+    prev = n0;
+    p.add(t, i, amp * 0.5f * hp * float(std::exp(-double(i) / (0.35 * kRate))));
+  }
+}
+
+// Error (ms) of the first grid beat against a known beat time (mod beat period), and drift at the last beat.
+struct GridErr {
+  double first = 1e9, last = 1e9, worst = 1e9;
+};
+GridErr grid_error(const BeatGrid& g, double bpm, double offset_s, double end_s) {
+  GridErr e;
+  if (g.beats_ms.empty()) return e;
+  const double T = 60000.0 / bpm, off = offset_s * 1000.0;
+  e.worst = 0;
+  bool have_first = false;
+  for (double b : g.beats_ms) {
+    const double k = std::round((b - off) / T);
+    const double err = b - (off + k * T);
+    if (b < off - 0.5 * T || b > end_s * 1000.0) continue;
+    if (!have_first && b >= off - 5.0) { e.first = err; have_first = true; }
+    e.last = err;
+    e.worst = std::max(e.worst, std::fabs(err));
+  }
+  return e;
+}
+
+void test_grid_drift(double bpm, double seconds, double offset) {
+  Pcm p = make_beat_track(bpm, offset, seconds, true);
+  const auto t0 = std::chrono::steady_clock::now();
+  BeatGrid g = analyse_beats(p.d.data(), p.frames, kRate);
+  const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  const GridErr e = grid_error(g, bpm, offset, seconds - 0.3);
+  std::printf("  drift %.2f BPM %.0f s: ok=%d bpm=%.3f first_err=%.2f last_err=%.2f worst=%.2f ms (%.2f s)\n", bpm,
+              seconds, g.ok, g.bpm, e.first, e.last, e.worst, dt);
+  CHECK(g.ok);
+  CHECK(std::fabs(g.bpm - bpm) < 0.02);
+  CHECK(std::fabs(e.first) < 6.0);
+  CHECK(std::fabs(e.last) < 6.0);
+  CHECK(e.worst < 8.0);
+}
+
+// Beat track whose beat-less lead-in is a pad (or silence/noise) before the kicks start.
+void test_intro(const char* what, double bpm, double lead_s, int kind, bool hats = true, double expect_bpm = 0) {
+  if (expect_bpm <= 0) expect_bpm = bpm;
+  const double seconds = 60.0;
+  Pcm p(seconds);
+  const double T = 60.0 / bpm;
+  if (kind == 1) {  // pad: slow-attack chord
+    for (double t = 0; t < lead_s; t += 4.0) {
+      add_note(p, t, std::min(4.0, lead_s - t), midi_hz(57), 0.25f, 3);
+      add_note(p, t, std::min(4.0, lead_s - t), midi_hz(64), 0.2f, 3);
+    }
+  } else if (kind == 2) {  // low noise floor
+    for (std::uint64_t i = 0; i < std::uint64_t(lead_s * kRate) && i < p.frames; ++i) {
+      p.d[2 * i] = p.d[2 * i + 1] = 0.0004f * noise();
+    }
+  }
+  for (int k = 0; lead_s + k * T < seconds - 0.4; ++k) {
+    const double t = lead_s + k * T;
+    add_kick(p, t, 1.0f);
+    if (hats) {
+      add_hat(p, t + T / 2, 0.6f);
+      if (k % 2 == 1) add_note(p, t, 0.12, 400.0, 0.1f, 2);
+    }
+  }
+  AnalysisResult r = analyse(p.d.data(), p.frames, kRate);
+  const GridErr e = grid_error(r.beats, expect_bpm, lead_s, seconds - 0.4);
+  std::printf("  %s: bpm=%.3f (want %.2f) first_err=%.2f worst=%.2f ms, first_audible=%.1f cue=%.1f (kick at %.1f)\n", what,
+              r.beats.bpm, expect_bpm, e.first, e.worst, r.first_audible_ms, r.suggested_cue_ms, lead_s * 1000);
+  CHECK(r.beats.ok);
+  CHECK(std::fabs(r.beats.bpm - expect_bpm) < 0.05);
+  CHECK(e.worst < 8.0);
+  CHECK(r.has_audible);
+  CHECK(r.suggested_cue_ms >= 0 && r.suggested_cue_ms <= r.duration_ms);
+  if (kind == 1) {
+    CHECK(r.first_audible_ms < 150.0);  // the pad is sound: that is the start
+  } else {
+    CHECK(std::fabs(r.first_audible_ms - lead_s * 1000) < 25.0);
+    CHECK(std::fabs(r.suggested_cue_ms - lead_s * 1000) < 25.0);  // the first kick, which is also a beat
+  }
+}
+
+// ---- downbeat set -------------------------------------------------------------------------------------
+// Pattern: kick on 1 (strong) and 3 (softer), snare on 2 and 4, off-beat hat, bass note per bar, crash on the first
+// beat of every 4th bar. `start_pos` cuts the track so the audio starts at that bar position (0..3);
+// `pickup` > 0 instead puts that many plain soft kicks (no accents) before bar 1.
+struct DbCase {
+  double bpm;
+  int start_pos;
+  int pickup;
+  int mode = 0;  // 0 full accent pattern, 1 four-on-floor + snare 2/4, 2 identical kicks, bar-level bass + phrase crash only, 3 identical kicks, constant bass, phrase crash only, 4 identical kicks, bass and crash on phrase starts only
+};
+bool run_downbeat_case(const DbCase& c, double* conf_out = nullptr) {
+  const double T = 60.0 / c.bpm, seconds = 70.0;
+  Pcm p(seconds);
+  std::uint32_t save = g_seed;
+  g_seed = 777u + std::uint32_t(c.start_pos * 31 + c.pickup * 7 + int(c.bpm));
+  static const double bass[4] = {45, 48, 43, 50};
+  double first_audio = 0.3, bar0;  // time of the true first downbeat
+  int beat0;                       // global beat index (0 = a downbeat) at the first audible beat
+  if (c.pickup > 0) {
+    beat0 = -c.pickup;
+    bar0 = first_audio + c.pickup * T;
+  } else {
+    beat0 = c.start_pos;
+    bar0 = first_audio - c.start_pos * T;
+  }
+  for (int g = beat0; first_audio + (g - beat0) * T < seconds - 0.5; ++g) {
+    const double t = first_audio + (g - beat0) * T;
+    if (g < 0) {  // pickup beats: plain, unaccented
+      add_kick(p, t, 0.6f);
+      add_hat(p, t + T / 2, 0.5f);
+      continue;
+    }
+    const int pos = g % 4, bar = g / 4;
+    if (c.mode == 0) {
+      add_kick(p, t, pos == 0 ? 1.0f : (pos == 2 ? 0.75f : 0.0f));
+      if (pos == 1 || pos == 3) add_snare(p, t, 0.8f);
+    } else if (c.mode == 1) {
+      add_kick(p, t, 0.9f);
+      if (pos == 1 || pos == 3) add_snare(p, t, 0.8f);
+    } else {
+      add_kick(p, t, 0.9f);
+    }
+    if (c.mode == 4) {
+      if (pos == 0 && bar % 4 == 0) {
+        add_note(p, t, 16 * T * 0.95, midi_hz(bass[0]), 0.3f, 3);
+        add_crash(p, t, 0.7f);
+      }
+      add_hat(p, t + T / 2, 0.5f);
+      continue;
+    }
+    add_hat(p, t + T / 2, 0.5f);
+    if (pos == 0) add_note(p, t, 4 * T * 0.95, midi_hz(bass[c.mode == 3 ? 0 : bar % 4]), 0.3f, 3);
+    if (pos == 0 && bar % 4 == 0) add_crash(p, t, 0.7f);
+  }
+  g_seed = save;
+  BeatGrid g = analyse_beats(p.d.data(), p.frames, kRate);
+  if (conf_out) *conf_out = g.downbeat_confidence;
+  if (!g.ok || g.beats_ms.size() <= std::size_t(g.downbeat_phase)) return false;
+  const double D = g.beats_ms[std::size_t(g.downbeat_phase)];
+  return phase_err_ms(D, 4 * T * 1000.0, bar0 * 1000.0) < 25.0;
+}
+
+void test_downbeat_set() {
+  int total_all = 0, good_all = 0;
+  for (int mode = 0; mode < 5; ++mode) {
+  int total = 0, good = 0;
+  for (double bpm : {100.0, 120.0, 128.0, 140.0}) {
+    for (int pos = 0; pos < 4; ++pos) {
+      for (int pick : {0, 1, 2, 3}) {
+        if (pick > 0 && pos != 0) continue;
+        if (pick == 0 || pos == 0) {
+          DbCase c{bpm, pos, pick, mode};
+          double conf = 0;
+          const bool ok = run_downbeat_case(c, &conf);
+          ++total;
+          good += ok;
+          if (!ok) std::printf("    MISS mode=%d bpm=%.0f start_pos=%d pickup=%d conf=%.2f\n", mode, bpm, pos, pick, conf);
+        }
+      }
+    }
+  }
+  std::printf("  downbeat set mode %d: %d / %d correct\n", mode, good, total);
+  total_all += total;
+  good_all += good;
+  }
+  std::printf("  downbeat set overall: %d / %d correct\n", good_all, total_all);
+  CHECK(good_all >= total_all * kDownbeatMinFraction / 100);
+}
+
+
+// Kick track of `body_s` seconds starting at `start_s`, optional fade-in, plus `tail_s` of silence after.
+Pcm make_start_track(double start_s, double body_s, double tail_s, double bpm = 124.0, double fade_s = 0.0) {
+  Pcm p(start_s + body_s + tail_s);
+  const double T = 60.0 / bpm;
+  for (int k = 0; start_s + k * T < start_s + body_s - 0.3; ++k) {
+    const double t = start_s + k * T;
+    float amp = 1.0f;
+    if (fade_s > 0) amp = float(std::min(1.0, (t - start_s) / fade_s)) * 0.98f + 0.02f;
+    add_kick(p, t, amp);
+    add_hat(p, t + T / 2, 0.6f * amp);
+  }
+  return p;
+}
+
+void test_audible() {
+  // Digital silence lead-in of odd length and a silent tail.
+  {
+    Pcm p = make_start_track(3.173, 20.0, 5.0);
+    AnalysisResult r = analyse(p.d.data(), p.frames, kRate);
+    std::printf("  silent lead/tail: first=%.1f last=%.1f cue=%.1f (kick 3173, body ends %.0f)\n", r.first_audible_ms,
+                r.last_audible_ms, r.suggested_cue_ms, (3.173 + 20.0) * 1000);
+    CHECK(r.has_audible);
+    CHECK(std::fabs(r.first_audible_ms - 3173.0) < 15.0);
+    CHECK(r.last_audible_ms > 3173 + 19000 && r.last_audible_ms < 3173 + 20000 + 700);
+    CHECK(r.last_audible_ms >= r.first_audible_ms);
+    CHECK(r.suggested_cue_ms >= r.first_audible_ms - 15.0 && r.suggested_cue_ms <= r.first_audible_ms + 60000.0 / 124.0);
+    CHECK(r.suggested_cue_ms <= r.duration_ms);
+  }
+  // A lone click/pop long before the music, and a pop with DC offset and dither noise floor: not "the start".
+  {
+    Pcm p = make_start_track(6.0, 20.0, 1.0);
+    for (std::size_t i = 0; i < p.frames; ++i) {
+      p.d[2 * i] += 0.08f + 0.0001f * noise();  // DC offset + about -80 dBFS dither
+      p.d[2 * i + 1] += 0.08f + 0.0001f * noise();
+    }
+    for (std::size_t i = 0; i < 3; ++i) p.d[2 * (22050 + i)] += 0.9f;  // 3-sample pop at 0.5 s
+    for (std::size_t i = 0; i < 40; ++i) p.d[2 * (88200 + i) + 1] -= 0.3f;  // 1 ms thump at 2 s
+    AnalysisResult r = analyse(p.d.data(), p.frames, kRate);
+    std::printf("  pop + DC + dither: first=%.1f cue=%.1f (kick 6000)\n", r.first_audible_ms, r.suggested_cue_ms);
+    CHECK(std::fabs(r.first_audible_ms - 6000.0) < 15.0);
+    CHECK(std::fabs(r.suggested_cue_ms - 6000.0) < 40.0);
+  }
+  // Noise-floor lead-in at about -50 dB under the music (tape hiss) is not sound.
+  {
+    Pcm p = make_start_track(4.0, 20.0, 0.0);
+    for (std::size_t i = 0; i < std::size_t(4.0 * kRate); ++i) p.d[2 * i] = p.d[2 * i + 1] = 0.004f * noise();
+    AnalysisResult r = analyse(p.d.data(), p.frames, kRate);
+    std::printf("  hiss lead-in: first=%.1f\n", r.first_audible_ms);
+    CHECK(std::fabs(r.first_audible_ms - 4000.0) < 15.0);
+  }
+  // Fade-in over 10 s: the start is where it becomes clearly audible, early in the fade, not 0 and not the full level.
+  {
+    Pcm p = make_start_track(0.0, 30.0, 0.0, 124.0, 10.0);
+    // Make it a real linear fade of everything, not just per-kick amplitude.
+    for (std::size_t i = 0; i < std::size_t(10.0 * kRate); ++i) {
+      const float g = float(i) / float(10.0 * kRate);
+      p.d[2 * i] *= g;
+      p.d[2 * i + 1] *= g;
+    }
+    AnalysisResult r = analyse(p.d.data(), p.frames, kRate);
+    std::printf("  10 s fade-in: first=%.1f cue=%.1f\n", r.first_audible_ms, r.suggested_cue_ms);
+    CHECK(r.first_audible_ms > 100.0 && r.first_audible_ms < 2500.0);
+  }
+  // Quiet track (-40 dBFS peaks) still gets its start found; a faint hum floor does not count.
+  {
+    Pcm p = make_start_track(2.0, 15.0, 0.0);
+    for (float& v : p.d) v *= 0.01f;
+    AnalysisResult r = analyse(p.d.data(), p.frames, kRate);
+    std::printf("  quiet track: first=%.1f\n", r.first_audible_ms);
+    CHECK(std::fabs(r.first_audible_ms - 2000.0) < 15.0);
+  }
+  // Nothing audible: silence, and pure dither.
+  {
+    Pcm p(10.0);
+    AnalysisResult r = analyse(p.d.data(), p.frames, kRate);
+    CHECK(!r.has_audible && r.first_audible_ms == 0 && r.suggested_cue_ms == 0);
+    for (float& v : p.d) v = 0.00005f * noise();
+    r = analyse(p.d.data(), p.frames, kRate);
+    CHECK(!r.has_audible && r.suggested_cue_ms == 0);
+    AudibleRange ar = find_audible_range(nullptr, 0, kRate);
+    CHECK(!ar.ok);
+  }
+  // Load cue lands on a confident downbeat when one is within a beat of the first sound.
+  {
+    const double bpm = 124.0, T = 60000.0 / bpm;
+    Pcm p = make_start_track(1.337, 30.0, 0.0, bpm);
+    AnalysisResult r = analyse(p.d.data(), p.frames, kRate);
+    const double D = r.beats.ok ? r.beats.beats_ms[std::size_t(r.beats.downbeat_phase)] : 0;
+    std::printf("  cue on downbeat: first=%.1f cue=%.1f conf=%.2f\n", r.first_audible_ms, r.suggested_cue_ms, r.beats.confidence);
+    CHECK(r.beats.ok && r.beats.confidence >= 0.5);
+    CHECK(std::fabs(r.suggested_cue_ms - 1337.0) < 40.0);
+    CHECK(phase_err_ms(r.suggested_cue_ms, 4 * T, D) < 1.0 || std::fabs(r.suggested_cue_ms - r.first_audible_ms) < 1.0);
+  }
+}
+
+
+// ---- fluid grids ---------------------------------------------------------------------------------------
+struct FluidStat {
+  double max_err = 1e9, med_err = 1e9;
+  std::size_t sections = 0;
+  double beat_count_ratio = 0;
+};
+FluidStat fluid_stat(const BeatGrid& g, const std::vector<double>& truth_s) {
+  FluidStat f;
+  f.sections = g.sections.size();
+  if (g.beats_ms.empty() || truth_s.empty()) return f;
+  std::vector<double> errs;
+  std::size_t gi = 0, in_range = 0;
+  for (double t : truth_s) {
+    const double ms = t * 1000.0;
+    while (gi + 1 < g.beats_ms.size() && g.beats_ms[gi + 1] <= ms) ++gi;
+    double e = std::fabs(g.beats_ms[gi] - ms);
+    if (gi + 1 < g.beats_ms.size()) e = std::min(e, std::fabs(g.beats_ms[gi + 1] - ms));
+    errs.push_back(e);
+  }
+  for (double b : g.beats_ms)
+    if (b >= truth_s.front() * 1000.0 - 1.0 && b <= truth_s.back() * 1000.0 + 1.0) ++in_range;
+  std::sort(errs.begin(), errs.end());
+  f.max_err = errs.back();
+  f.med_err = errs[errs.size() / 2];
+  f.beat_count_ratio = double(in_range) / double(truth_s.size());
+  return f;
+}
+
+// Beat times for a tempo function, starting at `t0`, until `end_s`. Optional per-beat jitter (uniform +-jit_ms).
+template <class F>
+std::vector<double> make_beats(double t0, double end_s, F bpm_at, double jit_ms, std::uint32_t seed) {
+  std::vector<double> v;
+  std::uint32_t save = g_seed;
+  g_seed = seed;
+  double t = t0;
+  while (t < end_s - 0.5) {
+    v.push_back(t + (jit_ms > 0 ? double(noise()) * jit_ms / 1000.0 : 0.0));
+    t += 60.0 / bpm_at(t);
+  }
+  g_seed = save;
+  return v;
+}
+Pcm render_beats(const std::vector<double>& beats, double seconds, bool groove, std::uint32_t seed) {
+  Pcm p(seconds);
+  std::uint32_t save = g_seed;
+  g_seed = seed;
+  for (std::size_t k = 0; k < beats.size(); ++k) {
+    add_kick(p, beats[k], 1.0f);
+    if (groove) {
+      const double T = k + 1 < beats.size() ? beats[k + 1] - beats[k] : 0.5;
+      add_hat(p, beats[k] + T / 2, 0.6f);
+      if (k % 2 == 1) add_snare(p, beats[k], 0.5f);
+    }
+  }
+  g_seed = save;
+  return p;
+}
+
+void run_fluid(const char* name, const std::vector<double>& beats, double seconds, bool fluid_opt, bool expect_steady,
+               double max_bound, std::size_t min_sections, std::size_t max_sections, bool check) {
+  Pcm p = render_beats(beats, seconds, true, 4242);
+  AnalysisOptions o;
+  o.fluid_grid = fluid_opt;
+  const auto t0 = std::chrono::steady_clock::now();
+  AnalysisResult r = analyse(p.d.data(), p.frames, kRate, o);
+  const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  const FluidStat f = fluid_stat(r.beats, beats);
+  std::printf("  %-28s fluid_opt=%d: sections=%zu max=%.1f med=%.1f ms count_ratio=%.3f steady=%d stability=%.2f (%.2f s)\n", name,
+              fluid_opt, f.sections, f.max_err, f.med_err, f.beat_count_ratio, r.beats.steady, r.beats.stability, dt);
+  if (!check) return;
+  CHECK(r.beats.ok);
+  CHECK(f.max_err <= max_bound);
+  CHECK(f.sections >= min_sections && f.sections <= max_sections);
+  CHECK(f.beat_count_ratio > 0.98 && f.beat_count_ratio < 1.02);
+  CHECK(r.beats.steady == expect_steady);
+  CHECK(r.beats.stability >= 0 && r.beats.stability <= 1);
+  // Bar position stays continuous: beat i is a downbeat iff (i % 4 == phase); sections' bar_beat must agree.
+  std::size_t idx = 0;
+  for (std::size_t i = 0; i < r.beats.sections.size(); ++i) {
+    const TempoSection& ts = r.beats.sections[i];
+    while (idx + 1 < r.beats.beats_ms.size() && std::fabs(r.beats.beats_ms[idx] - ts.first_beat_ms) > 0.5 &&
+           r.beats.beats_ms[idx] < ts.first_beat_ms)
+      ++idx;
+    CHECK(std::fabs(r.beats.beats_ms[idx] - ts.first_beat_ms) < 0.5);
+    CHECK(ts.bar_beat == int(((long(idx) - r.beats.downbeat_phase) % 4 + 4) % 4) + 1);
+  }
+}
+
+void test_fluid(bool check) {
+  const bool opts[] = {false, true};
+  for (bool fo : opts) {
+    const bool chk = check && fo;
+    std::printf(" -- fluid_grid %s\n", fo ? "on" : "off");
+    {
+      auto b = make_beats(0.4, 240.0, [](double) { return 124.0; }, 0.0, 1);
+      run_fluid("steady control 124", b, 240.0, fo, true, 3.0, 1, 1, chk);
+    }
+    {
+      auto b = make_beats(0.4, 240.0, [](double t) { return 118.0 + 4.0 * t / 240.0; }, 8.0, 2);
+      run_fluid("drummer 118->122 jitter8", b, 240.0, fo, false, 16.0, 3, 32, chk);
+    }
+    {
+      auto b = make_beats(0.4, 150.0, [](double t) { return 100.0 + 20.0 * t / 150.0; }, 0.0, 3);
+      run_fluid("accel 100->120", b, 150.0, fo, false, 10.0, 3, 32, chk);
+    }
+    {
+      auto b = make_beats(0.4, 150.0, [](double t) { return 130.0 - 12.0 * t / 150.0; }, 0.0, 4);
+      run_fluid("rit 130->118", b, 150.0, fo, false, 10.0, 3, 32, chk);
+    }
+    {
+      auto b = make_beats(0.4, 60.0, [](double) { return 126.0; }, 0.0, 5);
+      const double t2 = b.back() + 60.0 / 126.0;
+      auto b2 = make_beats(t2, 120.0, [](double) { return 140.0; }, 0.0, 6);
+      b.insert(b.end(), b2.begin(), b2.end());
+      run_fluid("step 126->140", b, 120.0, fo, false, 10.0, 2, 4, chk);
+    }
+    {  // steady 124 BPM with a 12 s beat-less breakdown in the middle: must stay ONE section
+      auto b = make_beats(0.4, 90.0, [](double) { return 124.0; }, 0.0, 8);
+      std::vector<double> kept;
+      for (double t : b)
+        if (t < 30.0 || t > 42.0) kept.push_back(t);
+      Pcm p = render_beats(kept, 90.0, true, 4242);
+      for (double t = 30.0; t < 42.0; t += 4.0) {
+        add_note(p, t, 4.0, midi_hz(57), 0.2f, 3);
+        add_note(p, t, 4.0, midi_hz(64), 0.15f, 3);
+      }
+      AnalysisOptions o;
+      o.fluid_grid = fo;
+      AnalysisResult r = analyse(p.d.data(), p.frames, kRate, o);
+      std::vector<double> ex;  // beats outside the breakdown
+      const FluidStat f = fluid_stat(r.beats, kept);
+      std::printf("  %-28s fluid_opt=%d: sections=%zu max=%.1f med=%.1f ms steady=%d\n", "steady + breakdown", fo, f.sections,
+                  f.max_err, f.med_err, r.beats.steady);
+      if (chk) {
+        CHECK(r.beats.ok && f.sections == 1 && r.beats.steady);
+        CHECK(f.max_err < 4.0);
+      }
+    }
+    {
+      auto b = make_beats(0.4, 120.0, [](double) { return 124.0; }, 0.0, 7);
+      for (std::size_t k = 40; k < b.size(); ++k) b[k] -= 0.5 * 60.0 / 124.0;  // one half-beat dropped
+      run_fluid("dropped half-beat", b, 120.0, fo, true, 10.0, 1, 3, chk);
+    }
+  }
 }
 
 void test_tempo_change() {
@@ -299,6 +729,29 @@ int main() {
   }
   std::printf("downbeat\n");
   test_downbeat();
+  std::printf("grid drift\n");
+  test_grid_drift(128.0, 360.0, 0.237);
+  test_grid_drift(127.93, 360.0, 0.411);
+  test_grid_drift(174.02, 360.0, 0.052);
+  test_grid_drift(93.37, 360.0, 1.337);
+  std::printf("intros\n");
+  test_intro("pad intro 16 s @128", 128.0, 16.0, 1);
+  test_intro("silent 1.337 s @124", 124.0, 1.337, 0);
+  test_intro("noise-floor 2.5 s @128", 128.0, 2.5, 2);
+  // Octave policy: tempi are folded into 78..176, so 70 (kicks only) is reported as 140; 87 and 174 stay put.
+  test_intro("70 BPM kicks only (folds to 140)", 70.0, 0.5, 0, false, 140.0);
+  test_intro("70 BPM kicks+hats (folds to 140)", 70.0, 0.5, 0, true, 140.0);
+  test_intro("140 BPM", 140.0, 0.5, 0);
+  test_intro("87 BPM kicks only", 87.0, 0.5, 0, false);
+  test_intro("87 BPM kicks+hats", 87.0, 0.5, 0, true);
+  test_intro("174 BPM kicks only", 174.0, 0.5, 0, false);
+  test_intro("174 BPM kicks+hats", 174.0, 0.5, 0, true);
+  std::printf("audible range / load cue\n");
+  test_audible();
+  std::printf("downbeat set\n");
+  test_downbeat_set();
+  std::printf("fluid grids\n");
+  test_fluid(true);
   std::printf("tempo change\n");
   test_tempo_change();
   std::printf("key\n");

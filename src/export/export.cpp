@@ -16,6 +16,7 @@
 #include "anlz_writer.hpp"
 #include "bytes.hpp"
 #include "deckhand/export/export_check.hpp"
+#include "deckhand/export/export_preflight.hpp"
 #include "deckhand/log/log.hpp"
 
 namespace deckhand::usbexport {
@@ -194,6 +195,11 @@ struct TrackRec {
   std::uint64_t file_size = 0;
   std::string file_path, file_name, analyze_path, date;
   unsigned file_type = 0;
+  // Set when the audio is written as a converted 24-bit WAV instead of a plain copy.
+  bool converted = false;
+  int bitrate_kbps = 0, sample_rate = 0, depth = 16;
+  ConversionPlan plan;
+  FormatInfo fmt;
 };
 
 Row track_row(const TrackRec& r) {
@@ -204,12 +210,12 @@ Row track_row(const TrackRec& r) {
   b.assign(0x88, 0);
   set_le16(b, 0x00, 0x24);
   set_le32(b, 0x04, 0x000C0700);  // bitmask: meaning unknown, copied from observed exports (guess)
-  set_le32(b, 0x08, static_cast<std::uint32_t>(std::max(0, t.sample_rate)));
+  set_le32(b, 0x08, static_cast<std::uint32_t>(std::max(0, r.converted ? r.sample_rate : t.sample_rate)));
   set_le32(b, 0x10, static_cast<std::uint32_t>(r.file_size));
   set_le16(b, 0x18, 19048);
   set_le16(b, 0x1A, 30967);
   set_le32(b, 0x20, r.key);
-  set_le32(b, 0x30, static_cast<std::uint32_t>(std::max(0, t.bitrate)));
+  set_le32(b, 0x30, static_cast<std::uint32_t>(std::max(0, r.converted ? r.bitrate_kbps : t.bitrate)));
   set_le32(b, 0x34, static_cast<std::uint32_t>(std::max(0, t.track_number)));
   set_le32(b, 0x38, static_cast<std::uint32_t>(std::max(0.0, t.bpm) * 100.0 + 0.5));
   set_le32(b, 0x3C, r.genre);
@@ -217,7 +223,7 @@ Row track_row(const TrackRec& r) {
   set_le32(b, 0x44, r.artist);
   set_le32(b, 0x48, static_cast<std::uint32_t>(t.id));
   set_le16(b, 0x50, static_cast<std::uint32_t>(std::max(0, t.year)));
-  set_le16(b, 0x52, 16);
+  set_le16(b, 0x52, static_cast<std::uint32_t>(r.depth));
   set_le16(b, 0x54, static_cast<std::uint32_t>(std::min<std::int64_t>(0xFFFF, std::max<std::int64_t>(0, t.duration_ms) / 1000)));
   set_le16(b, 0x56, 0x29);
   b[0x58] = static_cast<std::uint8_t>(std::clamp(t.color_id, 0, 8));
@@ -539,6 +545,13 @@ class Txn {
     return entries_.back().tmp;
   }
 
+  // Registers `final` for a file the caller writes itself; returns the temporary path.
+  bool stage_file(const fs::path& final, fs::path& tmp, std::string& error) {
+    if (!mkdirs(final.parent_path(), error)) return false;
+    tmp = stage(final);
+    return true;
+  }
+
   bool write(const fs::path& final, const Bytes& data, std::string& error) {
     if (!mkdirs(final.parent_path(), error)) return false;
     const fs::path tmp = stage(final);
@@ -634,10 +647,13 @@ std::uintmax_t available_space(const fs::path& root) {
 struct CopyPlan {
   fs::path from, to;
   std::uint64_t size = 0;
+  bool convert = false;  // write as 24-bit WAV instead of copying
+  FormatInfo fmt;
+  ConversionPlan plan;
 };
 
 bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<ExportPlaylist>& lists,
-                 const ExportOptions& opt, Txn& txn, std::string& error) {
+                 const ExportOptions& opt, Txn& txn, std::string& error, ExportResult* result) {
   if (opt.destination.empty()) {
     error = "export: no destination";
     return false;
@@ -650,6 +666,19 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
   const fs::path root = opt.destination;
   std::error_code ec;
   const std::string date = today();
+
+  // Compatibility check (bounded header reads) and, when asked, the 24-bit WAV fix.
+  const PlayerProfile* profile = find_player_profile(opt.player_profile);
+  if (!profile) {
+    error = "export: unknown player profile '" + opt.player_profile + "'";
+    return false;
+  }
+  PreflightReport pre;
+  std::map<int, std::size_t> pre_index;  // track id -> index in pre.tracks
+  if (result || opt.convert_incompatible) {
+    pre = preflight_export(tracks_in, *profile);
+    for (std::size_t i = 0; i < pre.tracks.size(); ++i) pre_index[pre.tracks[i].track_id] = i;
+  }
 
   // Dictionary tables.
   std::map<std::string, std::uint32_t> artists, genres, keys;
@@ -683,9 +712,29 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
       const auto sz = fs::file_size(src, fe);
       r.file_size = fe ? 0 : static_cast<std::uint64_t>(sz);
     }
-    const std::string ext = lower_ext(t->source_path);
+    std::string ext = lower_ext(t->source_path);
     r.file_type = file_type_of(ext);
     std::string fname = src.filename().string();
+    bool convert_this = false;
+    if (opt.convert_incompatible && !t->source_path.empty()) {
+      const auto pi = pre_index.find(t->id);
+      if (pi != pre_index.end()) {
+        const TrackPreflight& tp = pre.tracks[pi->second];
+        if (tp.verdict == Verdict::WillNotPlay && tp.fixable && plan_pcm24_conversion(tp.format, *profile, r.plan, nullptr)) {
+          convert_this = true;
+          r.converted = true;
+          r.fmt = tp.format;
+          r.file_size = r.plan.out_bytes;
+          r.bitrate_kbps = r.plan.bitrate_kbps;
+          r.sample_rate = r.plan.sample_rate;
+          r.depth = 24;
+          r.file_type = file_type_of("wav");
+          ext = "wav";
+          if (fname.empty()) fname = "track" + std::to_string(t->id);
+          fname = fs::path(fname).stem().string() + ".wav";
+        }
+      }
+    }
     if (fname.empty()) fname = "track" + std::to_string(t->id) + (ext.empty() ? "" : "." + ext);
     fname = sanitize_fs_name(fname, 255, "track");
     std::string rel;
@@ -720,8 +769,8 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
             const fs::path dest = root / rel;
             if (fs::exists(dest, xe)) {
               // Never touch a pre-existing file: reuse it only when it is the same audio, otherwise pick a new name.
-              if (!t->source_path.empty() && fs::is_regular_file(dest, xe) && fs::file_size(dest, xe) == r.file_size &&
-                  same_file_content(src, dest))
+              if (!convert_this && !t->source_path.empty() && fs::is_regular_file(dest, xe) &&
+                  fs::file_size(dest, xe) == r.file_size && same_file_content(src, dest))
                 reuse_existing = true;
               else
                 clash_on_disk = true;
@@ -741,7 +790,14 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
         if (!opt.copy_audio) {
           DH_LOG(Warn, "export: %s is not on the stick; DB points at %s", t->source_path.c_str(), rel.c_str());
         } else if (!t->source_path.empty() && !reuse_existing) {
-          copies.push_back({src, root / rel, r.file_size});
+          CopyPlan cp;
+          cp.from = src;
+          cp.to = root / rel;
+          cp.size = r.file_size;
+          cp.convert = convert_this;
+          cp.fmt = r.fmt;
+          cp.plan = r.plan;
+          copies.push_back(std::move(cp));
           audio_bytes += r.file_size;
         }
       }
@@ -862,8 +918,27 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
 
   // Stage everything.
   if (!txn.mkdirs(root, error)) return false;
-  for (const auto& c : copies)
-    if (!txn.copy(c.from, c.to, error)) return false;
+  for (const auto& c : copies) {
+    if (!c.convert) {
+      if (!txn.copy(c.from, c.to, error)) return false;
+      continue;
+    }
+    fs::path tmp;
+    if (!txn.stage_file(c.to, tmp, error)) return false;
+    std::string cerr;
+    if (!convert_to_pcm24_wav(c.from.string(), c.fmt, c.plan, tmp.string(), cerr)) {
+      error = "export: " + cerr;
+      return false;
+    }
+  }
+  if (result) {
+    result->report = pre;
+    for (auto& t : result->report.tracks) {
+      for (const auto& r : recs)
+        if (r.t->id == t.track_id && r.converted) t.converted = true;
+      if (t.converted) ++result->converted;
+    }
+  }
   for (const auto& r : recs) {
     const AnlzFiles a = build_anlz(*r.t, r.file_path, r.file_size, opt);
     const fs::path base = root / ("PIONEER/USBANLZ/" + analyze_dir(r.t->id)) / "ANLZ0000";
@@ -888,12 +963,12 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
 
 }  // namespace
 
-bool export_usb(const std::vector<ExportTrack>& tracks, const std::vector<ExportPlaylist>& playlists,
-                const ExportOptions& options, std::string& error) {
+static bool export_usb_impl(const std::vector<ExportTrack>& tracks, const std::vector<ExportPlaylist>& playlists,
+                            const ExportOptions& options, std::string& error, ExportResult* result) {
   error.clear();
   Txn txn;
   try {
-    if (export_impl(tracks, playlists, options, txn, error)) return true;
+    if (export_impl(tracks, playlists, options, txn, error, result)) return true;
   } catch (const std::exception& e) {
     error = std::string("export: ") + e.what();
   } catch (...) {
@@ -904,6 +979,17 @@ bool export_usb(const std::vector<ExportTrack>& tracks, const std::vector<Export
   } catch (...) {
   }
   return false;
+}
+
+bool export_usb(const std::vector<ExportTrack>& tracks, const std::vector<ExportPlaylist>& playlists,
+                const ExportOptions& options, std::string& error) {
+  return export_usb_impl(tracks, playlists, options, error, nullptr);
+}
+
+bool export_usb(const std::vector<ExportTrack>& tracks, const std::vector<ExportPlaylist>& playlists,
+                const ExportOptions& options, std::string& error, ExportResult& result) {
+  result = ExportResult{};
+  return export_usb_impl(tracks, playlists, options, error, &result);
 }
 
 }  // namespace deckhand::usbexport

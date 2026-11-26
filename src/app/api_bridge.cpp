@@ -19,6 +19,8 @@
 
 #include "deckhand/api/server.hpp"
 #include "deckhand/app/controls.hpp"
+#include "deckhand/export/export_preflight.hpp"
+#include "deckhand/import/interchange.hpp"
 #include "deckhand/library/library.hpp"
 #include "deckhand/log/log.hpp"
 
@@ -57,6 +59,66 @@ Json track_json(const TrackRow& t) {
   j.set("grid_locked", t.grid_locked);
   return j;
 }
+
+Json edit_json(const TrackEditRecord& e) {
+  Json j = Json::object();
+  j.set("id", e.id);
+  j.set("track_id", e.track_id);
+  j.set("batch_id", e.batch_id);
+  j.set("field", e.field);
+  j.set("old_value", e.old_value ? Json(*e.old_value) : Json());
+  j.set("new_value", e.new_value ? Json(*e.new_value) : Json());
+  j.set("edited_at", e.edited_at);
+  j.set("source", e.source);
+  return j;
+}
+
+Json undo_json(const UndoResult& u) {
+  Json j = Json::object();
+  j.set("applied", u.applied);
+  j.set("batch_id", u.batch_id);
+  return j;
+}
+
+Response undo_response(const UndoResult& u) {
+  if (u.status == UndoStatus::NotFound) return Response::error(404, "nothing to undo there (no such edit, or its track is gone)");
+  if (u.status == UndoStatus::Conflict) return Response::error(409, "a field changed again since this edit; nothing was undone");
+  return Response::ok(undo_json(u));
+}
+
+bool opt_bool(const Json& body, const char* key, bool def) { return body[key].is_bool() ? body[key].as_bool() : def; }
+
+Json export_stats_json(const InterchangeExportStats& s) {
+  Json j = Json::object();
+  j.set("tracks", s.tracks);
+  j.set("playlists", s.playlists);
+  j.set("cues", s.cues);
+  j.set("files", s.files);
+  return j;
+}
+
+Json import_stats_json(const InterchangeStats& s) {
+  Json j = Json::object();
+  j.set("dry_run", s.dry_run);
+  for (const auto& [k, v] : std::initializer_list<std::pair<const char*, int>>{
+           {"tracks_in_file", s.tracks_in_file}, {"tracks_added", s.tracks_added},
+           {"tracks_matched_by_path", s.tracks_matched_by_path}, {"tracks_matched_by_name", s.tracks_matched_by_name},
+           {"tracks_skipped", s.tracks_skipped}, {"tracks_missing_file", s.tracks_missing_file},
+           {"tracks_updated", s.tracks_updated}, {"cues", s.cues}, {"grids", s.grids}, {"marks_ignored", s.marks_ignored},
+           {"playlists_created", s.playlists_created}, {"playlists_merged", s.playlists_merged},
+           {"playlist_entries_added", s.playlist_entries_added},
+           {"playlist_entries_unresolved", s.playlist_entries_unresolved}, {"history_entries", s.history_entries}})
+    j.set(k, v);
+  Json missing = Json::array();
+  for (const std::string& p : s.missing_paths) missing.push_back(p);
+  j.set("missing_paths", std::move(missing));
+  Json warnings = Json::array();
+  for (const std::string& w : s.warnings) warnings.push_back(w);
+  j.set("warnings", std::move(warnings));
+  return j;
+}
+
+bool absolute_path(const std::string& p) { return !p.empty() && (p[0] == '/' || (p.size() > 2 && p[1] == ':')); }
 
 Json seconds_or_null(double frames, double rate) { return frames < 0 || rate <= 0 ? Json() : Json(frames / rate); }
 
@@ -704,6 +766,7 @@ struct ApiBridge::Impl {
       {
         std::lock_guard<std::mutex> lock(lib_mutex);
         if (!int_param(r, "id", id) || !lib.track(id)) return Response::error(404, "no such track");
+        EditScope api_edit("api");  // one journal batch for the whole request
         lib.edit_track(id, e);
         if (r.body["color"].is_number()) lib.set_track_color(id, static_cast<int>(r.body["color"].as_int()));
         if (r.body["grid_locked"].is_bool()) lib.set_grid_locked(id, r.body["grid_locked"].as_bool());
@@ -711,6 +774,88 @@ struct ApiBridge::Impl {
       }
       host.api_library_changed();
       return Response::ok(std::move(out));
+    });
+    s.add_route("GET", "/v1/library/tracks/{id}/history", "library:read", [this](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such track");
+      const auto it = r.query.find("limit");
+      const int limit = static_cast<int>(std::clamp<std::int64_t>(it == r.query.end() ? 50 : std::atoll(it->second.c_str()), 1, 200));
+      Json items = Json::array();
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        for (const TrackEditRecord& e : lib.track_history(id, limit, r.query.count("include_analysis") && r.query.at("include_analysis") == "1")) items.push_back(edit_json(e));
+      }
+      Json j = Json::object();
+      j.set("items", std::move(items));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("GET", "/v1/library/edits", "library:read", [this](const Request& r) {
+      const auto it = r.query.find("limit");
+      const int limit = static_cast<int>(std::clamp<std::int64_t>(it == r.query.end() ? 50 : std::atoll(it->second.c_str()), 1, 500));
+      Json items = Json::array();
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        for (const TrackEditRecord& e : lib.recent_edits(limit, r.query.count("include_analysis") && r.query.at("include_analysis") == "1")) items.push_back(edit_json(e));
+      }
+      Json j = Json::object();
+      j.set("items", std::move(items));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/edits/{id}/undo", "library:write", [this](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such edit");
+      UndoResult u;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        u = lib.undo_edit(id);
+      }
+      if (u.status == UndoStatus::Ok) host.api_library_changed();
+      return undo_response(u);
+    });
+    s.add_route("POST", "/v1/library/edit-batches/{id}/undo", "library:write", [this](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such edit batch");
+      UndoResult u;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        u = lib.undo_batch(id);
+      }
+      if (u.status == UndoStatus::Ok) host.api_library_changed();
+      return undo_response(u);
+    });
+    s.add_route("GET", "/v1/library/trash", "library:read", [this](const Request&) {
+      Json items = Json::array();
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        for (const DeletedTrack& d : lib.deleted_tracks()) {
+          Json t = Json::object();
+          t.set("id", d.id);
+          t.set("title", d.title);
+          t.set("artist", d.artist);
+          t.set("path", d.path);
+          t.set("deleted_at", d.deleted_at);
+          items.push_back(std::move(t));
+        }
+      }
+      Json j = Json::object();
+      j.set("items", std::move(items));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/trash/{id}/restore", "library:write", [this](const Request& r) {
+      std::int64_t id = 0, restored = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such track in the trash");
+      bool known = false, ok = false;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        for (const DeletedTrack& d : lib.deleted_tracks()) known = known || d.id == id;
+        ok = known && lib.restore_track(id, &restored);
+      }
+      if (!known) return Response::error(404, "no such track in the trash");
+      if (!ok) return Response::error(409, "the file is in the library again under another entry");
+      host.api_library_changed();
+      Json j = Json::object();
+      j.set("id", restored);
+      return Response::ok(std::move(j));
     });
     s.add_route("POST", "/v1/library/tracks", "library:write", [this](const Request& r) {
       const std::string path = r.body["path"].as_string();
@@ -962,6 +1107,119 @@ struct ApiBridge::Impl {
       }
       return Response::ok(std::move(a));
     });
+    // ---- interchange files: paths are on the machine running DeckHand ----
+    s.add_route("POST", "/v1/library/export/xml", "export", [this](const Request& r) {
+      const std::string path = r.body["path"].as_string();
+      if (!absolute_path(path)) return Response::error(400, "path must be an absolute file path");
+      InterchangeExportOptions o;
+      o.playlist_id = r.body["playlist_id"].as_int(0);
+      o.include_playlists = opt_bool(r.body, "include_playlists", true);
+      o.include_cues = opt_bool(r.body, "include_cues", true);
+      o.include_grid = opt_bool(r.body, "include_grid", true);
+      InterchangeExportStats st;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        st = export_library_xml(lib, path, o);
+      }
+      if (!st.ok) return Response::error(409, st.error);
+      return Response::ok(export_stats_json(st));
+    });
+    s.add_route("POST", "/v1/library/import/xml", "library:write", [this](const Request& r) {
+      const std::string path = r.body["path"].as_string();
+      if (!absolute_path(path)) return Response::error(400, "path must be an absolute file path");
+      InterchangeImportOptions o;
+      o.merge = opt_bool(r.body, "merge", o.merge);
+      o.overwrite_cues = opt_bool(r.body, "overwrite_cues", o.overwrite_cues);
+      o.overwrite_grid = opt_bool(r.body, "overwrite_grid", o.overwrite_grid);
+      o.overwrite_metadata = opt_bool(r.body, "overwrite_metadata", o.overwrite_metadata);
+      o.match_by_name = opt_bool(r.body, "match_by_name", o.match_by_name);
+      o.import_playlists = opt_bool(r.body, "import_playlists", o.import_playlists);
+      o.import_play_counts = opt_bool(r.body, "import_play_counts", o.import_play_counts);
+      o.dry_run = opt_bool(r.body, "dry_run", false);
+      InterchangeStats st;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        st = import_library_xml(lib, path, o);
+      }
+      if (!st.ok) return Response::error(409, st.error);
+      if (!o.dry_run) host.api_library_changed();
+      return Response::ok(import_stats_json(st));
+    });
+    s.add_route("POST", "/v1/library/playlists/{id}/export/m3u8", "export", [this](const Request& r) {
+      std::int64_t id = 0;
+      const std::string path = r.body["path"].as_string();
+      if (!int_param(r, "id", id)) return Response::error(404, "no such playlist");
+      if (!absolute_path(path)) return Response::error(400, "path must be an absolute file path");
+      InterchangeExportStats st;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        st = export_playlist_m3u8(lib, id, path, opt_bool(r.body, "relative_paths", false));
+      }
+      if (!st.ok) return Response::error(409, st.error);
+      return Response::ok(export_stats_json(st));
+    });
+    s.add_route("POST", "/v1/library/export/m3u8", "export", [this](const Request& r) {
+      const std::string dir = r.body["directory"].as_string();
+      if (!absolute_path(dir)) return Response::error(400, "directory must be an absolute folder path");
+      InterchangeExportStats st;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        st = export_all_playlists_m3u8(lib, dir, opt_bool(r.body, "relative_paths", true));
+      }
+      if (!st.ok) return Response::error(409, st.error);
+      return Response::ok(export_stats_json(st));
+    });
+    s.add_route("POST", "/v1/library/import/m3u8", "library:write", [this](const Request& r) {
+      const std::string path = r.body["path"].as_string();
+      if (!absolute_path(path)) return Response::error(400, "path must be an absolute file path");
+      M3uImportOptions o;
+      o.playlist_name = r.body["playlist_name"].as_string();
+      o.parent = r.body["parent"].as_int(0);
+      o.merge = opt_bool(r.body, "merge", o.merge);
+      o.add_missing_tracks = opt_bool(r.body, "add_missing_tracks", o.add_missing_tracks);
+      o.dry_run = opt_bool(r.body, "dry_run", false);
+      InterchangeStats st;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        st = import_playlist_m3u8(lib, path, o);
+      }
+      if (!st.ok) return Response::error(409, st.error);
+      if (!o.dry_run) host.api_library_changed();
+      return Response::ok(import_stats_json(st));
+    });
+    s.add_route("POST", "/v1/export/preflight", "export", [this](const Request& r) {
+      const std::string id = r.body["profile"].is_string() ? r.body["profile"].as_string() : std::string("club");
+      const usbexport::PlayerProfile* profile = usbexport::find_player_profile(id);
+      if (!profile) return Response::error(400, "unknown player profile");
+      std::vector<usbexport::ExportTrack> tracks;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        std::vector<std::int64_t> ids;
+        const Json& pl = r.body["playlist_ids"];
+        const Json& tr = r.body["track_ids"];
+        for (std::size_t i = 0; i < pl.size(); ++i)
+          for (const auto t : lib.playlist_track_ids(pl.at(i).as_int(0))) ids.push_back(t);
+        for (std::size_t i = 0; i < tr.size(); ++i) ids.push_back(tr.at(i).as_int(0));
+        if (pl.size() == 0 && tr.size() == 0) ids = lib.track_ids(0, "");
+        std::sort(ids.begin(), ids.end());
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        for (const auto t : ids) {
+          const auto row = lib.track(t);
+          if (!row) continue;
+          usbexport::ExportTrack e;
+          e.id = static_cast<int>(t);
+          e.source_path = row->path;
+          tracks.push_back(std::move(e));
+        }
+      }
+      const usbexport::PreflightReport report = usbexport::preflight_export(tracks, *profile);
+      return Response::ok(Json::parse(report.to_json()));
+    });
+    s.add_route("GET", "/v1/export/report", "library:read", [this](const Request&) {
+      const std::string text = host.api_export_report();
+      if (text.empty()) return Response::error(404, "no export has run yet");
+      return Response::ok(Json::parse(text));
+    });
     s.add_route("POST", "/v1/export", "export", [this](const Request& r) {
       const std::string dest = r.body["destination"].as_string();
       if (dest.empty() || dest[0] != '/') return Response::error(400, "destination must be an absolute folder");
@@ -969,7 +1227,10 @@ struct ApiBridge::Impl {
       const std::int64_t smart = r.body["smart_playlist_id"].as_int(0);  // exported as an ordinary playlist (passed on negative)
       const std::int64_t plain = r.body["playlist_id"].as_int(0);
       if (smart != 0 && plain != 0) return Response::error(400, "give playlist_id or smart_playlist_id, not both");
-      if (!host.api_export(dest, smart != 0 ? -smart : plain, error)) return Response::error(409, error);
+      const std::string profile = r.body["player_profile"].is_string() ? r.body["player_profile"].as_string() : std::string();
+      if (!profile.empty() && !usbexport::find_player_profile(profile)) return Response::error(400, "unknown player profile");
+      if (!host.api_export(dest, smart != 0 ? -smart : plain, error, opt_bool(r.body, "convert_incompatible", false), profile))
+        return Response::error(409, error);
       Response ok = Response::ok();
       ok.status = 202;
       return ok;

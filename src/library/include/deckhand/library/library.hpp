@@ -2,6 +2,7 @@
 // DeckHand's own library: tracks, playlists, cues, beatgrids. Thread-safe for
 // serialized use (SQLite full-mutex mode); callers keep queries short.
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <set>
 #include <string>
@@ -26,6 +27,13 @@ struct TrackRow {
   bool grid_locked = false;    // analysis never replaces a locked grid
   int play_count = 0;          // history entries of this track
   std::int64_t last_played_ms = 0;  // 0 = never
+};
+
+// Where a track starts when it is loaded: the user's own main cue wins, then what analysis found.
+struct TrackCues {
+  std::optional<double> main_cue_ms;    // set by the user (the main cue point)
+  std::optional<double> load_cue_ms;    // analysis: first confident downbeat at or after the first sound
+  std::optional<double> first_sound_ms; // analysis: first audible moment
 };
 
 struct PlaylistNode {
@@ -60,6 +68,47 @@ enum class SortKey { Default, Title, Artist, Album, Genre, Bpm, Key, Duration, R
 struct TrackEdit {
   std::optional<std::string> title, artist, album, genre, key, comment;
   std::optional<int> rating, year;
+};
+
+// One row of the edit journal: a single field of a track that changed. Values are the column's text form; nullopt = NULL.
+struct TrackEditRecord {
+  std::int64_t id = 0, track_id = 0;
+  std::int64_t batch_id = 0;  // edits made by one operation share it
+  std::string field;          // title, artist, album, genre, key, comment, rating, year, color, bpm, grid_locked
+  std::optional<std::string> old_value, new_value;
+  std::int64_t edited_at = 0;  // unix seconds
+  std::string source;          // 'user' | 'api' | 'import' | 'sync' | 'undo'
+};
+
+enum class UndoStatus { Ok, Conflict, NotFound };
+struct UndoResult {
+  UndoStatus status = UndoStatus::NotFound;
+  int applied = 0;           // fields restored
+  int conflicts = 0;         // fields that no longer hold the value the edit set (nothing is applied then)
+  std::int64_t batch_id = 0;  // the journal batch the undo itself was recorded in
+};
+
+// A track removed from the collection, kept for restore_track() until purge_deleted() drops it.
+struct DeletedTrack {
+  std::int64_t id = 0;
+  std::string path, title, artist;
+  std::int64_t deleted_at = 0;  // unix seconds
+};
+
+// Names the origin of the library edits made on this thread while it lives ('user' when no scope is open), and groups
+// them into one journal batch. Scopes nest: an inner scope keeps the outer source and batch unless `force` is set.
+class EditScope {
+ public:
+  explicit EditScope(const char* source, bool force = false);
+  ~EditScope();
+  EditScope(const EditScope&) = delete;
+  EditScope& operator=(const EditScope&) = delete;
+  std::int64_t batch() const;  // 0 until the first journalled change
+ private:
+  std::string saved_source_;
+  std::int64_t saved_batch_ = 0;
+  int saved_depth_ = 0;
+  bool forced_ = false;
 };
 
 struct HistoryEntry {
@@ -123,8 +172,9 @@ class Library {
   std::vector<Cue> cues(std::int64_t track_id);
   std::vector<BeatSection> beatgrid(std::int64_t track_id);
 
-  // Insert, or update the metadata of the track at this path. Returns its id.
-  std::int64_t upsert_track(const NewTrack& t);
+  // Insert, or update the metadata of the track at this path. Returns its id. An update leaves alone every field whose
+  // latest journal entry is a user or API edit, unless overwrite_edited is set.
+  std::int64_t upsert_track(const NewTrack& t, bool overwrite_edited = false);
   std::optional<std::int64_t> track_id_for_path(const std::string& abs_path);
 
   // A hot cue keeps its name and colour when it is set again (moved); clear_hot_cue forgets them.
@@ -141,6 +191,10 @@ class Library {
   // Track colour tag: 0 = none, else 0xRRGGBB.
   void set_track_color(std::int64_t track_id, int color);
   void set_bpm(std::int64_t track_id, double bpm);
+  // Load cue. Not journalled (a cue point is not metadata anyone re-imports).
+  TrackCues track_cues(std::int64_t track_id);
+  void set_main_cue_ms(std::int64_t track_id, std::optional<double> ms);
+  void set_analysis_cues(std::int64_t track_id, std::optional<double> load_cue_ms, std::optional<double> first_sound_ms);
   void replace_beatgrid(std::int64_t track_id, const std::vector<BeatSection>& grid);
 
   // Tags, analysis results, file location.
@@ -151,7 +205,30 @@ class Library {
   void set_track_path(std::int64_t track_id, const std::string& abs_path);
   // Rewrites every track path starting with old_prefix. Returns the number changed.
   int relink_prefix(const std::string& old_prefix, const std::string& new_prefix);
+  // Moves the track (cues, grid, playlist places) to the trash; restore_track() puts it back.
   void remove_track(std::int64_t track_id);
+  std::vector<DeletedTrack> deleted_tracks();
+  // False when the track is not in the trash or another track now has its file. Returns the id in `restored` (usually
+  // the old one).
+  bool restore_track(std::int64_t track_id, std::int64_t* restored = nullptr);
+  // Drops trash entries (and their edit history) older than the given age. Runs when the library opens.
+  int purge_deleted(int older_than_days = 30);
+
+  // Edit journal. Newest first. Entries with source 'analysis' (DeckHand's own analysis results) are left out unless asked
+  // for: they are not edits the user made, and undo lists should not offer them.
+  std::vector<TrackEditRecord> track_history(std::int64_t track_id, int limit = 50, bool include_analysis = false);
+  std::vector<TrackEditRecord> recent_edits(int limit = 50, bool include_analysis = false);
+  // For code that writes the tracks table itself (the sync engine): take a snapshot, change the row, then journal what
+  // differs under the current EditScope.
+  using FieldValues = std::vector<std::optional<std::string>>;
+  FieldValues edit_snapshot(std::int64_t track_id);
+  void edit_journal(std::int64_t track_id, const FieldValues& before);
+  // Fields whose latest journal entry is a user or API edit: imports leave them alone unless told to overwrite.
+  std::set<std::string> protected_fields(std::int64_t track_id);
+  void set_date_added(std::int64_t track_id, std::int64_t unix_seconds);  // not journalled
+  // Restores the old value only if the field still holds the edit's new value; otherwise reports a conflict.
+  UndoResult undo_edit(std::int64_t edit_id);
+  UndoResult undo_batch(std::int64_t batch_id);  // all or nothing
 
   // Playlists. Positions are 0-based; position -1 appends.
   std::int64_t create_playlist(std::int64_t parent, const std::string& name, bool is_folder);
@@ -195,6 +272,12 @@ class Library {
 
  private:
   void migrate();
+  void journal_record(std::int64_t track_id, const std::string& field, const std::optional<std::string>& old_value,
+                      const std::optional<std::string>& new_value);
+  void tracked(std::int64_t track_id, const char* source, const std::function<void()>& change);
+  UndoResult undo_records(const std::vector<TrackEditRecord>& newest_first);
+  int undo_one(const TrackEditRecord& e);  // 0 restored, 1 conflict, 2 track gone
+  std::vector<TrackEditRecord> read_edits(const char* where, std::int64_t arg, int limit, bool include_analysis = true);
   bool use_fts(const std::string& search) const;
   std::string search_pattern(const std::string& search) const;
   const std::set<std::int64_t>& missing_ids();  // tracks whose file is gone (rescanned at most every 5 s)

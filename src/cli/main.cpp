@@ -14,6 +14,7 @@
 #include "deckhand/api/auth.hpp"
 #include "deckhand/audio/engine.hpp"
 #include "deckhand/import/import.hpp"
+#include "deckhand/import/interchange.hpp"
 #include "deckhand/library/backup.hpp"
 #include "deckhand/library/library.hpp"
 #include "deckhand/midi/controller.hpp"
@@ -59,10 +60,14 @@ const char* arg_value(int argc, char** argv, const char* name, const char* fallb
 int usage() {
   std::fprintf(stderr,
                "usage: deckhandctl <command> [options]\n"
-               "  import     [--source DB] [--key-file FILE] [--analysis DIR] [--data DIR]\n"
+               "  import     [--source DB] [--key-file FILE] [--analysis DIR] [--data DIR] [--overwrite-edits]\n"
                "  playlists  [--data DIR]\n"
                "  list       [--playlist ID] [--search TEXT] [--data DIR]\n"
-               "  export DIR [--playlist ID] [--no-copy 1] [--data DIR]   write a club-player USB export\n"
+               "  export DIR [--playlist ID] [--no-copy 1] [--convert 1] [--profile ID] [--data DIR]   write a club-player USB export\n"
+               "  export-xml FILE [--playlist ID]     write the library as DJ library XML (collection, grids, cues, playlists)\n"
+               "  import-xml FILE [--dry-run 1] [--overwrite-metadata 1] [--overwrite-cues 1] [--overwrite-grid 1] [--no-merge 1]\n"
+               "  export-m3u8 FILE|DIR [--playlist ID] [--relative 1]   one playlist to a file, or (no --playlist) all into a folder\n"
+               "  import-m3u8 FILE [--name NAME] [--parent ID] [--dry-run 1]\n"
                "  backup                       copy the library into backups/   [--data DIR]\n"
                "  backups                      list the copies, newest first    [--data DIR]\n"
                "  restore FILE                 replace the library with a copy (quit DeckHand first)   [--data DIR]\n"
@@ -170,9 +175,53 @@ int main(int argc, char** argv) {
       o.analysis_root = arg_value(argc, argv, "--analysis", (src_dir + "/share").c_str());
       o.key = read_file_trimmed(arg_value(argc, argv, "--key-file", (data + "/source-v6.key").c_str()));
       o.scratch_dir = data + "/scratch";
+      for (int i = 2; i < argc; ++i) o.overwrite_edited = o.overwrite_edited || std::string(argv[i]) == "--overwrite-edits";
       const ImportStats s = import_library_v6(lib, o);
       std::printf("tracks added %d, updated %d; playlists %d; cues %d; beatgrids %d\n", s.tracks_added,
                   s.tracks_updated, s.playlists, s.cues, s.beatgrids);
+    } else if ((cmd == "export-xml" || cmd == "export-m3u8") && argc >= 3) {
+      const std::int64_t playlist = std::atoll(arg_value(argc, argv, "--playlist", "0"));
+      InterchangeExportStats st;
+      if (cmd == "export-xml") {
+        InterchangeExportOptions o;
+        o.playlist_id = playlist;
+        st = export_library_xml(lib, argv[2], o);
+      } else if (playlist) {
+        st = export_playlist_m3u8(lib, playlist, argv[2], std::atoi(arg_value(argc, argv, "--relative", "0")) != 0);
+      } else {
+        st = export_all_playlists_m3u8(lib, argv[2], std::atoi(arg_value(argc, argv, "--relative", "1")) != 0);
+      }
+      if (!st.ok) {
+        std::fprintf(stderr, "error: %s\n", st.error.c_str());
+        return 1;
+      }
+      std::printf("wrote %d tracks, %d playlists, %d cues, %d files\n", st.tracks, st.playlists, st.cues, st.files);
+    } else if ((cmd == "import-xml" || cmd == "import-m3u8") && argc >= 3) {
+      const bool dry = std::atoi(arg_value(argc, argv, "--dry-run", "0")) != 0;
+      InterchangeStats st;
+      if (cmd == "import-xml") {
+        InterchangeImportOptions o;
+        o.dry_run = dry;
+        o.merge = !std::atoi(arg_value(argc, argv, "--no-merge", "0"));
+        o.overwrite_metadata = std::atoi(arg_value(argc, argv, "--overwrite-metadata", "0")) != 0;
+        o.overwrite_cues = std::atoi(arg_value(argc, argv, "--overwrite-cues", "0")) != 0;
+        o.overwrite_grid = std::atoi(arg_value(argc, argv, "--overwrite-grid", "0")) != 0;
+        st = import_library_xml(lib, argv[2], o);
+      } else {
+        M3uImportOptions o;
+        o.dry_run = dry;
+        o.playlist_name = arg_value(argc, argv, "--name", "");
+        o.parent = std::atoll(arg_value(argc, argv, "--parent", "0"));
+        st = import_playlist_m3u8(lib, argv[2], o);
+      }
+      if (!st.ok) {
+        std::fprintf(stderr, "error: %s\n", st.error.c_str());
+        return 1;
+      }
+      std::printf("%s: %d tracks in file, %d added, %d matched, %d playlists created, %d entries added, %d cues%s\n",
+                  dry ? "dry run" : "imported", st.tracks_in_file, st.tracks_added,
+                  st.tracks_matched_by_path + st.tracks_matched_by_name, st.playlists_created, st.playlist_entries_added,
+                  st.cues, dry ? " (nothing written)" : "");
     } else if (cmd == "token" && argc >= 3) {
       api::TokenStore store(data + "/api-tokens.json");
       std::string error;
@@ -212,6 +261,8 @@ int main(int argc, char** argv) {
       for (int i = 3; i + 1 < argc; ++i)
         if (std::strcmp(argv[i], "--playlist") == 0) req.playlist_ids.push_back(std::atoll(argv[i + 1]));
       req.copy_audio = !std::atoi(arg_value(argc, argv, "--no-copy", "0"));
+      req.convert_incompatible = std::atoi(arg_value(argc, argv, "--convert", "0")) != 0;
+      req.player_profile = arg_value(argc, argv, "--profile", "");
       UsbExportResult res;
       std::string error;
       if (!export_library_to_usb(lib, req, res, error)) {
@@ -220,6 +271,8 @@ int main(int argc, char** argv) {
       }
       std::printf("exported %d tracks, %d playlists; %d files missing\n", res.tracks, res.playlists, res.missing_files);
       for (const auto& m : res.missing) std::printf("  missing: %s\n", m.c_str());
+      if (res.converted) std::printf("%d tracks written as 24-bit WAV\n", res.converted);
+      if (res.remaining_will_not_play) std::printf("warning: %d tracks a club player will not play (see docs/EXPORT.md)\n", res.remaining_will_not_play);
     } else if (cmd == "playlists") {
       for (const auto& p : lib.playlists())
         std::printf("%lld\t%s%s\t(%d)\n", static_cast<long long>(p.id), p.is_folder ? "[folder] " : "",

@@ -23,6 +23,7 @@
 #include "deckhand/app/api_bridge.hpp"
 #include "deckhand/app/capi.h"
 #include "deckhand/app/controls.hpp"
+#include "deckhand/app/keymap.hpp"
 #include "deckhand/app/stream_bridge.hpp"
 #include "deckhand/audio/engine.hpp"
 #include "deckhand/audio/grid_edit.hpp"
@@ -111,7 +112,7 @@ struct DeckInfo {
 };
 
 struct Job {
-  enum Kind { Load, Reattach, AddFile, Import, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample, Sync, SyncInfo, RestoreSamples,
+  enum Kind { Load, Reattach, AddFile, Import, SaveMainCue, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample, Sync, SyncInfo, RestoreSamples,
               SaveGrid, SaveMemCues, SaveHotStyle, SaveTrackColor, Reanalyse, PreviewLoad } kind = Load;
   int deck = -1;
   std::int64_t track_id = 0;
@@ -234,6 +235,13 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void scroll(float dy) { raw_.scroll += dy / (scale_ * fit_); }
   void key(dh_key key, std::uint32_t mods);
   void text(const char* utf8);
+  // Keyboard shortcuts (app_keys.cpp). key_event is the full-fidelity path (physical key, key-up, repeat); it returns true when
+  // a shortcut took the key, and the shell must then not also send its text. key() and text() stay for shells that only know those.
+  bool key_event(std::uint32_t physical, std::uint32_t character, std::uint32_t mods, bool down, bool repeat);
+  void key_release_all();
+  // For the API: the effective keymap as JSON, and replacing the user's overrides (a .dhkeys text; "" resets to the defaults).
+  std::string keymap_json();
+  bool keymap_set_user(const std::string& dhkeys_text, std::vector<std::string>& warnings, std::string& error);
   void open_file(const std::string& path, float x, float y);
   void audio_route() { audio_recheck_ = true; }
   const dh_frame* frame();
@@ -273,7 +281,12 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
     j.deck = deck >= 0 && !engine_->deck(deck).playing ? deck : -1;
     post(j);
   }
-  bool api_export(const std::string& destination, std::int64_t playlist_id, std::string& error) override {
+  std::string api_export_report() override {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return last_export_report_;
+  }
+  bool api_export(const std::string& destination, std::int64_t playlist_id, std::string& error, bool convert_incompatible,
+                  const std::string& player_profile) override {
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       if (exporting_) {
@@ -286,6 +299,8 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
     j.kind = Job::Export;
     j.path = destination;
     j.track_id = playlist_id;
+    j.flag = convert_incompatible;
+    j.text = player_profile;
     post(j);
     return true;
   }
@@ -436,13 +451,22 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   Rect inner_rect() const;
 
   // ---- overlays (app_panels.cpp) ----------------------------------------------------
-  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart };
+  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart, Shortcuts };
   bool overlay_open() const { return panel_ != Panel::None; }
   void open_panel(Panel p);
   void close_panel();
   void commit_settings();
   std::string export_what_();
   void draw_overlays();
+  // ---- keyboard shortcuts (app_keys.cpp)
+  void load_keymap();
+  bool save_keymap();
+  bool text_has_keyboard();  // a text field (search, rename, overlay field) is taking typed characters
+  void run_key_call(const KeyCall& c);
+  void do_ui_action(const std::string& name, bool has_value, double value);
+  void draw_shortcuts(const Rect& m);
+  void keys_commit_capture(const KeyChord& chord);
+  void keys_export_cheat_sheet();
   void draw_settings(const Rect& m);
   void draw_sampler(const Rect& m);
   void draw_learn(const Rect& m);
@@ -547,6 +571,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   bool input_stereo_ = false;             // audio.input_stereo
   float talk_depth_ = -12.0f;             // audio.mic_depth, dB
   bool importing_ = false, exporting_ = false;
+  std::string last_export_report_;  // JSON of the last export's compatibility check; state_mutex_
   std::atomic<bool> rows_dirty_{true};
   std::atomic<bool> audio_recheck_{false};
 
@@ -718,6 +743,23 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   bool export_other_ = false;  // the last entry of the export menu is "Other folder..." (needs choose_folder)
   Field* focus_ = nullptr;  // focused overlay field
   Field f_period_, f_port_, f_obs_host_, f_obs_port_, f_obs_source_, f_search_learn_;
+  Keymap keymap_;                       // keymap_mutex_
+  std::mutex keymap_mutex_;
+  std::string keymap_user_path_, keymap_warnings_;
+  std::string swallow_text_;            // the character of a key a shortcut took: its text event must not type it
+  struct KeysUi {
+    Field search;
+    std::string capture_control;        // the action being rebound ("" = none)
+    KeyAction capture_action;
+    bool capture_add = false;           // add a chord instead of replacing
+    bool have_pending = false;          // a chord that conflicts, waiting for replace / cancel
+    KeyChord pending;
+    KeyContext pending_ctx = KeyContext::Global;
+    std::string pending_other;          // what it is bound to now
+    std::string note;
+    bool confirm_reset = false;
+    float scroll = 0, content = 0;
+  } keys_ui_;
   Field f_title_, f_artist_, f_key_, f_rating_, f_relink_, f_relink_old_, f_sync_folder_, f_sync_name_, f_sync_pass_;
   Field* last_focus_ = nullptr;
   std::map<std::string, std::string> sv_;  // settings shown in the settings panel

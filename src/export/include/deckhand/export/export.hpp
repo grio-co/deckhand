@@ -66,6 +66,11 @@ struct ExportOptions {
   // of that file is thin (see docs/EXPORT.md); default off.
   bool write_ext_db = false;
   std::string tag_category = "DeckHand";  // name of the single tag category used for ExportTrack::tags
+  // Compatibility fix (see export_preflight.hpp, docs/EXPORT.md "Compatibility check"). Default off: files a club
+  // player cannot read are still copied unchanged and reported. When on, WAV/AIFF files stored as 32-bit
+  // integer or float are written to the stick as 24-bit PCM WAV (the source is never modified).
+  bool convert_incompatible = false;
+  std::string player_profile = "club";  // rule table used for the check; see player_profiles()
   // Test hooks. available_bytes_override >= 0 replaces the free-space query of the destination volume;
   // fail_after_commits >= 0 makes the commit phase fail after that many files were moved into place.
   std::int64_t available_bytes_override = -1;

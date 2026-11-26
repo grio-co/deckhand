@@ -520,6 +520,8 @@ void App::reanalyse(Library& lib, int deck, std::int64_t track_id) {
     return;
   }
   const TrackAnalysis an = analyse_track(*audio);
+  EditScope analysis_scope("analysis");  // the BPM stored below is DeckHand's own result
+  if (an.has_audible) lib.set_analysis_cues(track_id, an.suggested_cue_ms, an.first_audible_ms);
   if (!an.has_grid) {
     set_status(T("grid.no_result"));
     return;

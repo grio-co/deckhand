@@ -54,7 +54,7 @@ swiftc -O -swift-version 5 \
 
 cp "$ROOT"/controllers/*.dhmap "$APP/Contents/Resources/controllers/"
 cp "$ROOT/platform/macos/DeckHand.icns" "$APP/Contents/Resources/DeckHand.icns"
-cp -R "$ROOT/resources/lang" "$ROOT/resources/skins" "$APP/Contents/Resources/"
+cp -R "$ROOT/resources/lang" "$ROOT/resources/skins" "$ROOT/resources/keymaps" "$APP/Contents/Resources/"
 sed -e "s/@BUNDLE_ID@/$BUNDLE_ID/" -e "s/@VERSION@/$VERSION/g" \
     -e "s/@MIN_OS@/$(sw_vers -productVersion | cut -d. -f1).0/" \
     "$ROOT/platform/macos/Info.plist" > "$APP/Contents/Info.plist"

@@ -4,6 +4,8 @@
 #include "deckhand/sync/sync.hpp"
 #include "app_impl.hpp"
 
+#include <cctype>
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -57,6 +59,7 @@ App::App(const dh_platform& platform, const dh_config& config)
   talk_depth_ = std::clamp(static_cast<float>(std::atof(lib_->setting("audio.mic_depth", "-12").c_str())), -24.0f, 0.0f);
   variant_ = lib_->setting("ui.layout", "main") == "four" ? "four" : "main";
   load_prep_settings();
+  load_keymap();
   preview_master_ = lib_->setting("preview.master", "0") == "1";
 
   std::vector<std::string> folders;
@@ -410,6 +413,13 @@ void App::control_main() {
           decks_[e.deck].hot_label[e.slot].clear();
           decks_[e.deck].hot_color[e.slot] = -1;
         }
+      } else if (e.type == EventType::CueSet) {  // the main cue point is the track's load cue from now on
+        const DeckView dv = engine_->deck(e.deck);
+        if (dv.sample_rate > 0) {
+          j.kind = Job::SaveMainCue;
+          j.ms = e.frame / dv.sample_rate * 1000.0;
+          post(j);
+        }
       }
     }
     DeckView views[kMaxDecks];
@@ -551,6 +561,7 @@ void App::run_job(Library& lib, const Job& j) {
       set_status(T("status.imported", {{"added", s.tracks_added}, {"updated", s.tracks_updated}, {"playlists", s.playlists}}));
       break;
     }
+    case Job::SaveMainCue: lib.set_main_cue_ms(j.track_id, j.ms); break;
     case Job::SaveHotCue: lib.set_hot_cue(j.track_id, j.slot, j.ms, j.ms_end); break;
     case Job::ClearHotCue: lib.clear_hot_cue(j.track_id, j.slot); break;
     case Job::SaveGrid:
@@ -579,6 +590,8 @@ void App::run_job(Library& lib, const Job& j) {
       }
       UsbExportRequest req;
       req.destination = j.path;
+      req.convert_incompatible = j.flag || lib.setting("export.convert_incompatible") == "1";
+      req.player_profile = j.text.empty() ? lib.setting("export.player_profile") : j.text;
       if (j.track_id > 0) req.playlist_ids.push_back(j.track_id);
       else if (j.track_id < 0) req.smart_playlist_ids.push_back(-j.track_id);  // a smart playlist, sent negative
       UsbExportResult res;
@@ -591,6 +604,9 @@ void App::run_job(Library& lib, const Job& j) {
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
         exporting_ = false;
+        if (!res.report_json.empty())
+          last_export_report_ = "{\"report\":" + res.report_json + ",\"converted\":" + std::to_string(res.converted) +
+                                ",\"remaining_will_not_play\":" + std::to_string(res.remaining_will_not_play) + "}";
       }
       if (!ok) set_status(T("status.export_failed", {{"message", error}}));
       else if (res.missing_files) set_status(T("status.exported_missing", {{"tracks", res.tracks}, {"playlists", res.playlists}, {"missing", res.missing_files}}));
@@ -761,6 +777,8 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
   std::optional<double> gain = lib.gain_db(track_id);
   if (grid.empty() || !gain) {  // not analysed yet: do it once and keep the result
     const TrackAnalysis a = analyse_track(*audio);
+    EditScope analysis_scope("analysis");  // what is stored below is DeckHand's own result, not a user edit
+    if (a.has_audible) lib.set_analysis_cues(track_id, a.suggested_cue_ms, a.first_audible_ms);
     if (grid.empty() && a.has_grid && !grid_locked) {  // a locked grid is never replaced by analysis
       grid = a.grid;
       lib.replace_beatgrid(track_id, grid);
@@ -778,6 +796,7 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
     rows_dirty_ = true;
     DH_LOG(Info, "analysed %s: %.2f BPM, key %s, gain %+.1f dB", row->title.c_str(), a.bpm, a.key.c_str(), a.gain_db);
   }
+  loaded->cue_point = initial_cue_ms(lib, track_id, *audio) / 1000.0 * sr;
   for (const BeatSection& b : grid) {
     loaded->grid.push_back({b.first_beat_ms / 1000.0 * sr, b.bpm, b.bar_beat});
   }
@@ -963,7 +982,10 @@ void App::move_selection(int steps) {  // browse_mutex_ held
 void App::key(dh_key key, std::uint32_t mods) {
   if (focus_ && field_key(key)) return;  // an overlay text field has the keyboard
   if (panel_ != Panel::None) {
-    if (key == DH_KEY_ESCAPE) close_panel();
+    if (key == DH_KEY_ESCAPE) {
+      if (panel_ == Panel::Shortcuts && !keys_ui_.capture_control.empty()) keys_ui_.capture_control.clear();
+      else close_panel();
+    }
     return;
   }
   std::int64_t load_id = 0;
@@ -1036,6 +1058,16 @@ void App::key(dh_key key, std::uint32_t mods) {
 
 void App::text(const char* utf8) {
   if (!utf8 || !*utf8 || static_cast<unsigned char>(*utf8) < 0x20) return;
+  if (!swallow_text_.empty()) {  // the text event of a key a shortcut already took (shells that send both)
+    const std::string typed = utf8;
+    std::string key = swallow_text_;
+    swallow_text_.clear();
+    const auto fold = [](std::string s) {
+      for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      return s;
+    };
+    if (fold(typed) == fold(key)) return;
+  }
   if (focus_) {
     if (focus_->text.size() < 200) focus_->text += utf8;
     return;
@@ -1176,6 +1208,7 @@ void App::refresh_rows() {
 // engine and deck state. Shared by the single-window frame() and the multi-window begin_frame().
 void App::prepare_frame() {
   now_ = now_seconds();
+  swallow_text_.clear();
   if (frame_count_ < 900 && ++frame_count_ > 90 && panel_ == Panel::None) {  // test aid: DECKHAND_OPEN_PANEL=columns|smart|smart-new|cue1|settings opens that overlay once, for screenshots
     if (const char* want = std::getenv("DECKHAND_OPEN_PANEL")) {
       const std::string w = want;
@@ -1347,6 +1380,10 @@ void dh_app_pointer(dh_app* app, dh_ptr_kind kind, uint32_t, float x, float y, i
 void dh_app_scroll(dh_app* app, float, float, float, float dy) { app->app.scroll(dy); }
 void dh_app_key(dh_app* app, dh_key key, uint32_t mods) { app->app.key(key, mods); }
 void dh_app_text(dh_app* app, const char* utf8) { app->app.text(utf8); }
+bool dh_app_key_event(dh_app* app, uint32_t physical, uint32_t character, uint32_t mods, bool is_down, bool is_repeat) {
+  return app->app.key_event(physical, character, mods, is_down, is_repeat);
+}
+void dh_app_key_release_all(dh_app* app) { app->app.key_release_all(); }
 void dh_app_open_file(dh_app* app, const char* path, float x, float y) {
   if (path) app->app.open_file(path, x, y);
 }

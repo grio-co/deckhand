@@ -6,6 +6,21 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Metadata safety: every tag edit is journalled per field (up to 200 per track) and can be undone
+  singly or as a batch; imports no longer overwrite fields edited by hand unless asked; deleted
+  tracks go to a trash that keeps cues, grid and playlist places for 30 days. Library schema 5.
+  DeckHand never writes to audio files ([docs/BACKUP.md](docs/BACKUP.md)).
+- Library interchange: import and export of the whole library (tags, cues, loops, grids, playlist
+  tree) through the common DJ library XML, and M3U8 playlists in and out
+  ([docs/INTERCHANGE.md](docs/INTERCHANGE.md)). Not yet tried against files from other applications.
+- USB export compatibility check: reports before export which files a club player will not read
+  (for example 32-bit float WAV), and can write a 24-bit copy to the stick instead. The rule table
+  is unverified against hardware ([docs/EXPORT.md](docs/EXPORT.md)).
+- Analysis finds the first audible sound and suggests a load cue on the first downbeat; tracks load
+  at the user's own main cue (now remembered), else at that suggestion (`load_cue_mode` setting).
+- Customisable keyboard shortcuts (`.dhkeys`), two-handed defaults for the whole workflow, a
+  shortcuts panel with rebinding and a printable cheat sheet ([docs/SHORTCUTS.md](docs/SHORTCUTS.md)).
+  macOS and Linux forward full key events; Windows keeps the fixed keys for now. Untested on screen.
 - Sync: grid locks, smart playlists (including rules that name a playlist) and the browser
   column and key-notation settings now carry between devices.
 - Free-form skins on macOS: transparent, shaped windows whose empty areas let clicks through
@@ -113,6 +128,8 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 - Tests for the library, analysis, API, export, effects, scheduling, languages, skins and streaming.
 
 ### Fixed
+- Tempos within 0.05 of a whole number were rounded, drifting about 20 ms over six minutes
+  (174.02 BPM); they now snap only when the drift stays under 3 ms.
 - Windows: minimum window size no longer exceeds the screen at high display scaling; the
   `--screenshot` canvas scales with `DECKHAND_SCALE`; quit on session end stops the helper.
 - Tests: the analysis speed check is a real-time-factor bound; the export test uses its own temp folder.

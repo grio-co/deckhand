@@ -68,6 +68,12 @@ Send `Authorization: Bearer <token>`. Bodies and replies are JSON.
 | `GET /v1/schedule`, `DELETE /v1/schedule[/{id}]` | `read`, `control` | Pending scheduled commands |
 | `GET /v1/library/tracks` | `library:read` | `search`, `playlist`, `sort`, `desc`, `limit`, `offset` |
 | `GET`/`PATCH /v1/library/tracks/{id}`, `POST /v1/library/tracks` | `library:read` / `library:write` | Track with cues and grid; edit tags; add a file |
+| `GET /v1/library/tracks/{id}/history`, `GET /v1/library/edits` | `library:read` | Edit journal: every changed field with old and new value, source (`user`, `api`, `import`, `sync`, `undo`, `analysis`; the last is hidden unless `include_analysis=1`) and batch; 200 entries kept per track |
+| `POST /v1/library/edits/{id}/undo`, `POST /v1/library/edit-batches/{id}/undo` | `library:write` | Restore the old value(s); 409 if a field changed again since (nothing is undone) |
+| `GET /v1/library/trash`, `POST /v1/library/trash/{id}/restore` | `library:read` / `library:write` | Removed tracks (kept 30 days) and restoring one with its cues, grid and playlist places |
+| `POST /v1/library/export/xml`, `POST /v1/library/playlists/{id}/export/m3u8`, `POST /v1/library/export/m3u8` | `export` | Write the library as DJ library XML, or playlists as M3U8, to a server-side path ([INTERCHANGE.md](INTERCHANGE.md)) |
+| `POST /v1/library/import/xml`, `POST /v1/library/import/m3u8` | `library:write` | Import them; `dry_run` reports without writing; imported edits are journalled (source `import`) and keep user/API edits unless `overwrite_metadata` |
+| `POST /v1/export/preflight`, `GET /v1/export/report` | `export`, `library:read` | Check which tracks a club player can read before exporting; report of the last export. `POST /v1/export` takes `convert_incompatible` and `player_profile` |
 | `GET`/`POST /v1/library/playlists`, `PATCH`/`DELETE /v1/library/playlists/{id}` | `library:*` | Playlists and folders |
 | `POST /v1/library/playlists/{id}/tracks`, `DELETE .../tracks/{position}` | `library:write` | Playlist contents |
 | `GET /v1/decks/{n}/grid`, `POST /v1/decks/{n}/grid/{action}` | `read`, `control:deck:{n}` | Beat grid of the loaded track and its edits: `shift` (ms), `align`, `set_first_beat`, `downbeat`, `rotate`, `bpm_delta`, `set_bpm`, `scale`, `tap`, `add_section`, `remove_section`, `lock`, `reanalyse`, `undo`, `edit` |

@@ -1562,6 +1562,7 @@ struct SyncEngine::Impl {
   }
 
   void materialize_tracks(const std::set<std::string>& fps) {
+    EditScope sync_scope("sync");  // field changes arriving from the other device are journalled as sync edits
     Maps maps = track_maps();
     std::unordered_map<std::string, std::vector<std::int64_t>> all_ids;
     {
@@ -1574,12 +1575,10 @@ struct SyncEngine::Impl {
       auto& ids = all_ids[fp];
       if (!st.alive('T', fp)) {
         for (const auto id : ids) {
-          for (const char* sql : {"DELETE FROM tracks WHERE id = ?1", "DELETE FROM sync_track WHERE track_id = ?1",
-                                  "DELETE FROM import_map WHERE entity = 'track' AND local_id = ?1"}) {
-            Stmt d(db, sql);
-            d.bind(1, id);
-            d.run();
-          }
+          lib.remove_track(id);  // to the trash (also drops its import_map rows)
+          Stmt d(db, "DELETE FROM sync_track WHERE track_id = ?1");
+          d.bind(1, id);
+          d.run();
         }
         continue;
       }
@@ -1590,8 +1589,10 @@ struct SyncEngine::Impl {
         const auto it = e->f.find(name);
         return it == e->f.end() ? nullptr : &it->second.v;
       };
+      const bool existed = id != 0;
       if (!id) id = create_track_row(fp, e);
       if (!id) continue;
+      const Library::FieldValues before = existed ? lib.edit_snapshot(id) : Library::FieldValues();
       std::string sql = "UPDATE tracks SET ";
       std::vector<const Val*> vals;
       for (const auto& f : kTrackFields) {
@@ -1606,6 +1607,7 @@ struct SyncEngine::Impl {
         for (std::size_t i = 0; i < vals.size(); ++i) bind_opt(u, static_cast<int>(i + 1), *vals[i]);
         u.bind(static_cast<int>(vals.size() + 1), id);
         u.run();
+        lib.edit_journal(id, before);
       }
       if (const Val* g = field("grid")) {
         const auto want = decode_grid(g->t == Val::Text ? g->s : std::string());

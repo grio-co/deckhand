@@ -16,6 +16,8 @@ struct UsbExportRequest {
   // with playlist_ids empty every smart playlist goes.
   std::vector<std::int64_t> smart_playlist_ids;
   bool copy_audio = true;
+  bool convert_incompatible = false;  // write 32-bit / float WAV and AIFF as 24-bit WAV on the stick (see EXPORT.md)
+  std::string player_profile;         // rule table of the compatibility check; empty = "club"
 };
 
 // Smart playlists get this offset on the stick so their ids cannot meet a normal playlist's.
@@ -24,6 +26,10 @@ constexpr std::int64_t kSmartExportIdBase = 1000000;
 struct UsbExportResult {
   int tracks = 0, playlists = 0, missing_files = 0;
   std::vector<std::string> missing;  // first few missing paths
+  // Compatibility check of the export (PreflightReport::to_json()), empty when the export failed before it ran.
+  std::string report_json;
+  int converted = 0;               // tracks written as 24-bit WAV
+  int remaining_will_not_play = 0; // tracks a club player still will not play
 };
 
 // progress(done, total, title) is called from the calling thread; return false from it to cancel.

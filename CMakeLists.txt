@@ -270,6 +270,10 @@ foreach(t ${test_srcs})
     dh_broadcast dh_sync dh_platform)
   add_test(NAME ${n} COMMAND ${n} WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endforeach()
+# The keymap test checks the shipped shortcuts against the application's control table, which lives in dh_app.
+if(TARGET test_keymap)
+  target_link_libraries(test_keymap dh_app)
+endif()
 
 # ---- Linux platform tests (decoder, ALSA sequencer, text rasteriser) -------------------------
 if(UNIX AND NOT APPLE)
@@ -305,7 +309,8 @@ if(UNIX AND NOT APPLE)
       COMMAND ${CMAKE_COMMAND} -E make_directory ${DH_SHARE}/controllers
       COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/controllers ${DH_SHARE}/controllers
       COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/lang ${DH_SHARE}/lang
-      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/skins ${DH_SHARE}/skins)
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/skins ${DH_SHARE}/skins
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/keymaps ${DH_SHARE}/keymaps)
     include(GNUInstallDirs)
     # deckhand-engine must sit beside deckhand: the app starts it from its own folder (ARCHITECTURE.md, "Engine process").
     install(TARGETS deckhand deckhand-engine deckhandctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -318,7 +323,7 @@ if(UNIX AND NOT APPLE)
             DESTINATION ${CMAKE_INSTALL_DATADIR}/icons FILES_MATCHING PATTERN "*.png")
     install(DIRECTORY ${CMAKE_SOURCE_DIR}/controllers/ DESTINATION ${CMAKE_INSTALL_DATADIR}/deckhand/controllers
             FILES_MATCHING PATTERN "*.dhmap")
-    install(DIRECTORY ${CMAKE_SOURCE_DIR}/resources/lang ${CMAKE_SOURCE_DIR}/resources/skins
+    install(DIRECTORY ${CMAKE_SOURCE_DIR}/resources/lang ${CMAKE_SOURCE_DIR}/resources/skins ${CMAKE_SOURCE_DIR}/resources/keymaps
             DESTINATION ${CMAKE_INSTALL_DATADIR}/deckhand)
   endif()
 endif()
@@ -358,11 +363,12 @@ if(WIN32)
       COMMAND ${CMAKE_COMMAND} -E make_directory ${DH_SHARE}/controllers
       COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/controllers ${DH_SHARE}/controllers
       COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/lang ${DH_SHARE}/lang
-      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/skins ${DH_SHARE}/skins)
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/skins ${DH_SHARE}/skins
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/keymaps ${DH_SHARE}/keymaps)
     # deckhand-engine must sit beside deckhand: the app starts it from its own folder.
     install(TARGETS deckhand deckhand-engine deckhandctl RUNTIME DESTINATION .)
     install(DIRECTORY ${CMAKE_SOURCE_DIR}/controllers/ DESTINATION share/deckhand/controllers FILES_MATCHING PATTERN "*.dhmap")
-    install(DIRECTORY ${CMAKE_SOURCE_DIR}/resources/lang ${CMAKE_SOURCE_DIR}/resources/skins DESTINATION share/deckhand)
+    install(DIRECTORY ${CMAKE_SOURCE_DIR}/resources/lang ${CMAKE_SOURCE_DIR}/resources/skins ${CMAKE_SOURCE_DIR}/resources/keymaps DESTINATION share/deckhand)
   endif()
 endif()
 

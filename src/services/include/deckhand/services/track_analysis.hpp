@@ -14,8 +14,16 @@ struct TrackAnalysis {
   double bpm = 0;
   std::string key;     // wheel notation, e.g. "8A"
   double gain_db = 0;  // trim that brings the track to the reference loudness
+  bool has_audible = false;
+  double first_audible_ms = 0, last_audible_ms = 0;
+  double suggested_cue_ms = 0;  // load cue: first confident downbeat at or after the first sound
 };
 
 TrackAnalysis analyse_track(const TrackAudio& audio);
+
+// Where a track starts when it is loaded, in ms: the user's own main cue, else the analysis suggestion according to the
+// setting `load_cue_mode` (first_downbeat (default) | first_sound | file_start), else 0. A track analysed before load cues
+// existed gets a cheap level scan for its first sound here (no beat or key analysis) and keeps the result.
+double initial_cue_ms(Library& lib, std::int64_t track_id, const TrackAudio& audio);
 
 }  // namespace deckhand

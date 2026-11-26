@@ -116,7 +116,61 @@ struct OptionalTx {
   bool own;
 };
 
+// Who is editing, on this thread: set by EditScope, read when a change is journalled.
+struct EditContext {
+  std::string source = "user";
+  std::int64_t batch = 0;
+  int depth = 0;
+};
+thread_local EditContext g_edit;
+
+// The track fields the journal follows (column names; also the whitelist for undo).
+constexpr const char* kEditFields[] = {"title", "artist", "album", "genre", "key", "comment", "rating", "year", "color", "bpm", "grid_locked"};
+constexpr std::size_t kEditFieldCount = sizeof(kEditFields) / sizeof(kEditFields[0]);
+constexpr int kEditHistoryCap = 200;  // rows kept per track
+
+bool is_edit_field(const std::string& f) {
+  return std::find_if(std::begin(kEditFields), std::end(kEditFields), [&](const char* n) { return f == n; }) != std::end(kEditFields);
+}
+
+// Columns present in both tables, as "a, b, c" (minus `skip`).
+std::string shared_columns(Db& db, const char* a, const char* b, const char* skip = "") {
+  const std::string sql = std::string("SELECT name FROM pragma_table_info('") + a + "') WHERE name IN (SELECT name FROM pragma_table_info('" +
+                          b + "')) AND name != ?1 ORDER BY cid";
+  Stmt s(db, sql.c_str());
+  s.bind(1, skip);
+  std::string out;
+  while (s.step()) out += (out.empty() ? "\"" : ", \"") + s.text(0) + "\"";
+  return out;
+}
+
+std::int64_t unix_now() { return static_cast<std::int64_t>(std::time(nullptr)); }
+
 }  // namespace
+
+EditScope::EditScope(const char* source, bool force)
+    : saved_source_(g_edit.source), saved_batch_(g_edit.batch), saved_depth_(g_edit.depth), forced_(force) {
+  if (g_edit.depth == 0 || force) {
+    g_edit.source = source;
+    g_edit.batch = 0;
+  }
+  ++g_edit.depth;
+}
+
+EditScope::~EditScope() {
+  if (forced_) {
+    g_edit.source = saved_source_;
+    g_edit.batch = saved_batch_;
+    g_edit.depth = saved_depth_;
+    return;
+  }
+  if (--g_edit.depth == 0) {
+    g_edit.source = "user";
+    g_edit.batch = 0;
+  }
+}
+
+std::int64_t EditScope::batch() const { return g_edit.batch; }
 
 Library::Library(const std::string& db_path) {
   db_.open(db_path);
@@ -143,6 +197,11 @@ Library::Library(const std::string& db_path) {
   }
   db_.exec("INSERT OR IGNORE INTO library_roots(id, label, last_seen_path) VALUES (1, 'System', '/')");
   migrate();
+  try {
+    purge_deleted(30);
+  } catch (const std::exception& e) {
+    DH_LOG(Warn, "could not purge the trash: %s", e.what());
+  }
 }
 
 // schema.sql is version 1; later versions are applied here, one step at a time.
@@ -173,6 +232,28 @@ void Library::migrate() {
         "UPDATE schema_version SET version = 4;");
     tx.commit();
     DH_LOG(Info, "library migrated to schema %d (grid lock, smart playlists)", 4);
+  }
+  if (version < 5) {
+    // Metadata safety: an edit journal, and a trash that keeps removed tracks (with cues, grid, playlist places).
+    Transaction tx(db_);
+    for (const char* column : {"load_cue_ms", "first_sound_ms", "main_cue_ms"})
+      if (!has_column(db_, "tracks", column)) db_.exec(std::string("ALTER TABLE tracks ADD COLUMN ") + column + " REAL;");
+    db_.exec(
+        "CREATE TABLE IF NOT EXISTS track_edits ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, track_id INTEGER NOT NULL, field TEXT NOT NULL, old_value TEXT, new_value TEXT,"
+        " edited_at INTEGER NOT NULL, source TEXT NOT NULL, batch_id INTEGER NOT NULL);"
+        "CREATE INDEX IF NOT EXISTS idx_track_edits_track ON track_edits(track_id, id);"
+        "CREATE INDEX IF NOT EXISTS idx_track_edits_batch ON track_edits(batch_id);"
+        "CREATE TABLE IF NOT EXISTS trash_tracks AS SELECT * FROM tracks WHERE 0;"
+        "CREATE TABLE IF NOT EXISTS trash_cues AS SELECT * FROM cues WHERE 0;"
+        "CREATE TABLE IF NOT EXISTS trash_beatgrids AS SELECT * FROM beatgrids WHERE 0;"
+        "CREATE TABLE IF NOT EXISTS trash_playlist_tracks (track_id INTEGER NOT NULL, playlist_id INTEGER NOT NULL, position INTEGER NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS trash_import_map (track_id INTEGER NOT NULL, source TEXT NOT NULL, source_id TEXT NOT NULL);"
+        "CREATE INDEX IF NOT EXISTS idx_trash_tracks_id ON trash_tracks(id);"
+        "UPDATE schema_version SET version = 5;");
+    if (!has_column(db_, "trash_tracks", "deleted_at")) db_.exec("ALTER TABLE trash_tracks ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0;");
+    tx.commit();
+    DH_LOG(Info, "library migrated to schema %d (edit journal, trash)", 5);
   }
   {
     // Substring search index (FTS5 trigram, case-insensitive) kept in step with `tracks` by triggers. Optional: an
@@ -348,16 +429,25 @@ std::optional<std::int64_t> Library::track_id_for_path(const std::string& abs_pa
   return s.i64(0);
 }
 
-std::int64_t Library::upsert_track(const NewTrack& t) {
+std::int64_t Library::upsert_track(const NewTrack& t, bool overwrite_edited) {
   const auto existing = track_id_for_path(t.path);
   if (existing) {
-    Stmt u(db_,
-           "UPDATE tracks SET title=?1, artist=?2, album=?3, genre=?4, key=?5, comment=?6, bpm=?7,"
-           " duration_ms=?8, rating=?9, year=?10, bitrate=?11, sample_rate=?12 WHERE id=?13");
-    u.bind(1, t.title).bind(2, t.artist).bind(3, t.album).bind(4, t.genre).bind(5, t.key).bind(6, t.comment);
-    u.bind(7, t.bpm).bind(8, t.duration_ms).bind(9, t.rating).bind(10, t.year).bind(11, t.bitrate);
-    u.bind(12, t.sample_rate).bind(13, *existing);
-    u.run();
+    // Fields the user or the API edited since are kept, unless the caller asks for the imported values.
+    const std::set<std::string> keep = overwrite_edited ? std::set<std::string>() : protected_fields(*existing);
+    tracked(*existing, "import", [&] {
+      std::string sql = "UPDATE tracks SET duration_ms=?1, bitrate=?2, sample_rate=?3";
+      const auto field = [&](const char* name, int slot) {
+        if (!keep.count(name)) sql += std::string(", ") + name + "=?" + std::to_string(slot);
+      };
+      field("title", 4); field("artist", 5); field("album", 6); field("genre", 7); field("key", 8);
+      field("comment", 9); field("bpm", 10); field("rating", 11); field("year", 12);
+      sql += " WHERE id=?13";
+      Stmt u(db_, sql.c_str());
+      u.bind(1, t.duration_ms).bind(2, t.bitrate).bind(3, t.sample_rate);
+      u.bind(4, t.title).bind(5, t.artist).bind(6, t.album).bind(7, t.genre).bind(8, t.key).bind(9, t.comment);
+      u.bind(10, t.bpm).bind(11, t.rating).bind(12, t.year).bind(13, *existing);
+      u.run();
+    });
     return *existing;
   }
   Stmt i(db_,
@@ -367,9 +457,14 @@ std::int64_t Library::upsert_track(const NewTrack& t) {
   i.bind(1, kSystemRoot).bind(2, rel_of(t.path)).bind(3, t.title).bind(4, t.artist).bind(5, t.album);
   i.bind(6, t.genre).bind(7, t.key).bind(8, t.comment).bind(9, t.bpm).bind(10, t.duration_ms);
   i.bind(11, t.rating).bind(12, t.year).bind(13, t.bitrate).bind(14, t.sample_rate);
-  i.bind(15, extension_of(t.path)).bind(16, static_cast<std::int64_t>(std::time(nullptr)));
+  i.bind(15, extension_of(t.path)).bind(16, unix_now());
   i.run();
-  return db_.last_insert_id();
+  const std::int64_t id = db_.last_insert_id();
+  // A track id can be reused after its row went to the trash and was purged: start with a clean history.
+  Stmt h(db_, "DELETE FROM track_edits WHERE track_id = ?1");
+  h.bind(1, id);
+  h.run();
+  return id;
 }
 
 void Library::set_hot_cue(std::int64_t track_id, int slot, double start_ms, double end_ms) {
@@ -444,17 +539,21 @@ bool Library::grid_locked(std::int64_t track_id) {
 }
 
 void Library::set_grid_locked(std::int64_t track_id, bool locked) {
-  Stmt u(db_, "UPDATE tracks SET grid_locked = ?1 WHERE id = ?2");
-  u.bind(1, locked ? 1 : 0).bind(2, track_id);
-  u.run();
+  tracked(track_id, "user", [&] {
+    Stmt u(db_, "UPDATE tracks SET grid_locked = ?1 WHERE id = ?2");
+    u.bind(1, locked ? 1 : 0).bind(2, track_id);
+    u.run();
+  });
 }
 
 void Library::set_track_color(std::int64_t track_id, int color) {
-  Stmt u(db_, "UPDATE tracks SET color = ?1 WHERE id = ?2");
-  if (color <= 0) u.bind_null(1);
-  else u.bind(1, color);
-  u.bind(2, track_id);
-  u.run();
+  tracked(track_id, "user", [&] {
+    Stmt u(db_, "UPDATE tracks SET color = ?1 WHERE id = ?2");
+    if (color <= 0) u.bind_null(1);
+    else u.bind(1, color);
+    u.bind(2, track_id);
+    u.run();
+  });
 }
 
 void Library::clear_hot_cue(std::int64_t track_id, int slot) {
@@ -464,8 +563,39 @@ void Library::clear_hot_cue(std::int64_t track_id, int slot) {
 }
 
 void Library::set_bpm(std::int64_t track_id, double bpm) {
-  Stmt u(db_, "UPDATE tracks SET bpm = ?1 WHERE id = ?2");
-  u.bind(1, bpm).bind(2, track_id);
+  tracked(track_id, "user", [&] {
+    Stmt u(db_, "UPDATE tracks SET bpm = ?1 WHERE id = ?2");
+    u.bind(1, bpm).bind(2, track_id);
+    u.run();
+  });
+}
+
+TrackCues Library::track_cues(std::int64_t track_id) {
+  TrackCues c;
+  Stmt s(db_, "SELECT main_cue_ms, load_cue_ms, first_sound_ms FROM tracks WHERE id = ?1");
+  s.bind(1, track_id);
+  if (!s.step()) return c;
+  if (!s.is_null(0)) c.main_cue_ms = s.f64(0);
+  if (!s.is_null(1)) c.load_cue_ms = s.f64(1);
+  if (!s.is_null(2)) c.first_sound_ms = s.f64(2);
+  return c;
+}
+
+void Library::set_main_cue_ms(std::int64_t track_id, std::optional<double> ms) {
+  Stmt u(db_, "UPDATE tracks SET main_cue_ms = ?1 WHERE id = ?2");
+  if (ms) u.bind(1, *ms);
+  else u.bind_null(1);
+  u.bind(2, track_id);
+  u.run();
+}
+
+void Library::set_analysis_cues(std::int64_t track_id, std::optional<double> load_cue_ms, std::optional<double> first_sound_ms) {
+  Stmt u(db_, "UPDATE tracks SET load_cue_ms = ?1, first_sound_ms = ?2 WHERE id = ?3");
+  if (load_cue_ms) u.bind(1, *load_cue_ms);
+  else u.bind_null(1);
+  if (first_sound_ms) u.bind(2, *first_sound_ms);
+  else u.bind_null(2);
+  u.bind(3, track_id);
   u.run();
 }
 
@@ -482,36 +612,38 @@ void Library::replace_beatgrid(std::int64_t track_id, const std::vector<BeatSect
 }
 
 void Library::edit_track(std::int64_t track_id, const TrackEdit& e) {
-  Transaction tx(db_);
-  const auto text = [&](const char* column, const std::optional<std::string>& v) {
-    if (!v) return;
-    const std::string sql = std::string("UPDATE tracks SET ") + column + " = ?1 WHERE id = ?2";
-    Stmt u(db_, sql.c_str());
-    u.bind(1, *v).bind(2, track_id);
-    u.run();
-  };
-  const auto number = [&](const char* column, const std::optional<int>& v) {
-    if (!v) return;
-    const std::string sql = std::string("UPDATE tracks SET ") + column + " = ?1 WHERE id = ?2";
-    Stmt u(db_, sql.c_str());
-    u.bind(1, *v).bind(2, track_id);
-    u.run();
-  };
-  text("title", e.title);
-  text("artist", e.artist);
-  text("album", e.album);
-  text("genre", e.genre);
-  text("key", e.key);
-  text("comment", e.comment);
-  number("rating", e.rating);
-  number("year", e.year);
-  tx.commit();
+  tracked(track_id, "user", [&] {
+    const auto text = [&](const char* column, const std::optional<std::string>& v) {
+      if (!v) return;
+      const std::string sql = std::string("UPDATE tracks SET ") + column + " = ?1 WHERE id = ?2";
+      Stmt u(db_, sql.c_str());
+      u.bind(1, *v).bind(2, track_id);
+      u.run();
+    };
+    const auto number = [&](const char* column, const std::optional<int>& v) {
+      if (!v) return;
+      const std::string sql = std::string("UPDATE tracks SET ") + column + " = ?1 WHERE id = ?2";
+      Stmt u(db_, sql.c_str());
+      u.bind(1, *v).bind(2, track_id);
+      u.run();
+    };
+    text("title", e.title);
+    text("artist", e.artist);
+    text("album", e.album);
+    text("genre", e.genre);
+    text("key", e.key);
+    text("comment", e.comment);
+    number("rating", e.rating);
+    number("year", e.year);
+  });
 }
 
 void Library::set_key(std::int64_t track_id, const std::string& key) {
-  Stmt u(db_, "UPDATE tracks SET key = ?1 WHERE id = ?2");
-  u.bind(1, key).bind(2, track_id);
-  u.run();
+  tracked(track_id, "user", [&] {
+    Stmt u(db_, "UPDATE tracks SET key = ?1 WHERE id = ?2");
+    u.bind(1, key).bind(2, track_id);
+    u.run();
+  });
 }
 
 void Library::set_gain_db(std::int64_t track_id, double gain_db) {
@@ -555,7 +687,31 @@ int Library::relink_prefix(const std::string& old_prefix, const std::string& new
 }
 
 void Library::remove_track(std::int64_t track_id) {
-  Transaction tx(db_);
+  OptionalTx tx(db_);
+  {
+    Stmt e(db_, "SELECT 1 FROM tracks WHERE id = ?1");
+    e.bind(1, track_id);
+    if (!e.step()) return;
+  }
+  // Keep a copy of everything that belongs to the track so restore_track() can put it back as it was.
+  const auto copy = [&](const std::string& sql) {
+    Stmt c(db_, sql.c_str());
+    c.bind(1, track_id);
+    c.run();
+  };
+  for (const char* t : {"trash_cues", "trash_beatgrids", "trash_playlist_tracks", "trash_import_map"})
+    copy(std::string("DELETE FROM ") + t + " WHERE track_id = ?1");
+  copy("DELETE FROM trash_tracks WHERE id = ?1");
+  const std::string tcols = shared_columns(db_, "tracks", "trash_tracks");
+  copy("INSERT INTO trash_tracks(" + tcols + ", deleted_at) SELECT " + tcols + ", " + std::to_string(unix_now()) +
+       " FROM tracks WHERE id = ?1");
+  const std::string ccols = shared_columns(db_, "cues", "trash_cues", "id");
+  copy("INSERT INTO trash_cues(" + ccols + ") SELECT " + ccols + " FROM cues WHERE track_id = ?1");
+  const std::string gcols = shared_columns(db_, "beatgrids", "trash_beatgrids");
+  copy("INSERT INTO trash_beatgrids(" + gcols + ") SELECT " + gcols + " FROM beatgrids WHERE track_id = ?1");
+  copy("INSERT INTO trash_playlist_tracks(track_id, playlist_id, position) SELECT track_id, playlist_id, position FROM playlist_tracks WHERE track_id = ?1");
+  copy("INSERT INTO trash_import_map(track_id, source, source_id) SELECT local_id, source, source_id FROM import_map WHERE entity = 'track' AND local_id = ?1");
+
   std::vector<std::int64_t> lists;
   {
     Stmt s(db_, "SELECT DISTINCT playlist_id FROM playlist_tracks WHERE track_id = ?1");
@@ -567,14 +723,276 @@ void Library::remove_track(std::int64_t track_id) {
     std::erase(ids, track_id);
     set_playlist_tracks(list, ids);
   }
-  Stmt d(db_, "DELETE FROM tracks WHERE id = ?1");
-  d.bind(1, track_id);
-  d.run();
-  Stmt m(db_, "DELETE FROM import_map WHERE entity = 'track' AND local_id = ?1");
-  m.bind(1, track_id);
-  m.run();
+  copy("DELETE FROM tracks WHERE id = ?1");
+  copy("DELETE FROM import_map WHERE entity = 'track' AND local_id = ?1");
   tx.commit();
 }
+
+std::vector<DeletedTrack> Library::deleted_tracks() {
+  std::vector<DeletedTrack> out;
+  Stmt s(db_, "SELECT t.id, t.deleted_at, r.last_seen_path, t.rel_path, coalesce(t.title, ''), coalesce(t.artist, '')"
+              " FROM trash_tracks t LEFT JOIN library_roots r ON r.id = t.root_id ORDER BY t.deleted_at DESC, t.id DESC");
+  while (s.step()) {
+    DeletedTrack d;
+    d.id = s.i64(0);
+    d.deleted_at = s.i64(1);
+    d.path = join_path(s.is_null(2) ? "/" : s.text(2), s.text(3));
+    d.title = s.text(4);
+    d.artist = s.text(5);
+    out.push_back(std::move(d));
+  }
+  return out;
+}
+
+bool Library::restore_track(std::int64_t track_id, std::int64_t* restored) {
+  OptionalTx tx(db_);
+  std::int64_t root = 0;
+  std::string rel;
+  {
+    Stmt s(db_, "SELECT root_id, rel_path FROM trash_tracks WHERE id = ?1");
+    s.bind(1, track_id);
+    if (!s.step()) return false;
+    root = s.i64(0);
+    rel = s.text(1);
+  }
+  {
+    Stmt s(db_, "SELECT 1 FROM tracks WHERE root_id = ?1 AND rel_path = ?2");
+    s.bind(1, root).bind(2, rel);
+    if (s.step()) return false;  // the file is in the library again under another entry
+  }
+  bool id_free = true;
+  {
+    Stmt s(db_, "SELECT 1 FROM tracks WHERE id = ?1");
+    s.bind(1, track_id);
+    id_free = !s.step();
+  }
+  const std::string tcols = shared_columns(db_, "trash_tracks", "tracks", "id");
+  {
+    Stmt i(db_, ("INSERT INTO tracks(id, " + tcols + ") SELECT ?1, " + tcols + " FROM trash_tracks WHERE id = ?2").c_str());
+    if (id_free) i.bind(1, track_id);
+    else i.bind_null(1);
+    i.bind(2, track_id);
+    i.run();
+  }
+  const std::int64_t id = id_free ? track_id : db_.last_insert_id();
+  const auto copy = [&](const std::string& sql) {
+    Stmt c(db_, sql.c_str());
+    c.bind(1, id).bind(2, track_id);
+    c.run();
+  };
+  const std::string ccols = shared_columns(db_, "trash_cues", "cues", "id");
+  copy("INSERT INTO cues(track_id, " + ccols + ") SELECT ?1, " + ccols + " FROM trash_cues WHERE track_id = ?2");
+  const std::string gcols = shared_columns(db_, "trash_beatgrids", "beatgrids", "track_id");
+  copy("INSERT INTO beatgrids(track_id, " + gcols + ") SELECT ?1, " + gcols + " FROM trash_beatgrids WHERE track_id = ?2");
+  copy("INSERT OR REPLACE INTO import_map(source, entity, source_id, local_id) SELECT source, 'track', source_id, ?1 FROM trash_import_map WHERE track_id = ?2");
+  // Back into each playlist at its old place (clamped when the list has changed since).
+  std::vector<std::pair<std::int64_t, int>> places;
+  {
+    Stmt s(db_, "SELECT playlist_id, position FROM trash_playlist_tracks WHERE track_id = ?1 ORDER BY playlist_id, position");
+    s.bind(1, track_id);
+    while (s.step()) places.emplace_back(s.i64(0), static_cast<int>(s.i64(1)));
+  }
+  for (const auto& [list, pos] : places) {
+    Stmt e(db_, "SELECT 1 FROM playlists WHERE id = ?1");
+    e.bind(1, list);
+    if (!e.step()) continue;
+    auto ids = playlist_track_ids(list);
+    ids.insert(ids.begin() + std::min<std::ptrdiff_t>(pos, static_cast<std::ptrdiff_t>(ids.size())), id);
+    set_playlist_tracks(list, ids);
+  }
+  if (id != track_id) {
+    Stmt h(db_, "UPDATE track_edits SET track_id = ?1 WHERE track_id = ?2");
+    h.bind(1, id).bind(2, track_id);
+    h.run();
+  }
+  for (const char* t : {"trash_cues", "trash_beatgrids", "trash_playlist_tracks", "trash_import_map"}) {
+    Stmt d(db_, (std::string("DELETE FROM ") + t + " WHERE track_id = ?1").c_str());
+    d.bind(1, track_id);
+    d.run();
+  }
+  Stmt d(db_, "DELETE FROM trash_tracks WHERE id = ?1");
+  d.bind(1, track_id);
+  d.run();
+  tx.commit();
+  if (restored) *restored = id;
+  return true;
+}
+
+int Library::purge_deleted(int older_than_days) {
+  const std::int64_t cutoff = unix_now() - static_cast<std::int64_t>(std::max(0, older_than_days)) * 86400;
+  std::vector<std::int64_t> ids;
+  {
+    Stmt s(db_, "SELECT id FROM trash_tracks WHERE deleted_at <= ?1");
+    s.bind(1, cutoff);
+    while (s.step()) ids.push_back(s.i64(0));
+  }
+  if (ids.empty()) return 0;
+  OptionalTx tx(db_);
+  for (const auto id : ids) {
+    for (const char* t : {"trash_cues", "trash_beatgrids", "trash_playlist_tracks", "trash_import_map"}) {
+      Stmt d(db_, (std::string("DELETE FROM ") + t + " WHERE track_id = ?1").c_str());
+      d.bind(1, id);
+      d.run();
+    }
+    Stmt d(db_, "DELETE FROM trash_tracks WHERE id = ?1");
+    d.bind(1, id);
+    d.run();
+    Stmt h(db_, "DELETE FROM track_edits WHERE track_id = ?1 AND NOT EXISTS (SELECT 1 FROM tracks WHERE id = ?1)");
+    h.bind(1, id);
+    h.run();
+  }
+  tx.commit();
+  return static_cast<int>(ids.size());
+}
+
+// ---- edit journal ---------------------------------------------------------------------------------------------------
+
+Library::FieldValues Library::edit_snapshot(std::int64_t track_id) {
+  std::string sql = "SELECT ";
+  for (std::size_t i = 0; i < kEditFieldCount; ++i) {
+    const std::string f = kEditFields[i];
+    sql += (i ? ", " : "") + (f == "bpm" ? "CASE WHEN bpm IS NULL THEN NULL ELSE printf('%.15g', bpm) END"  // 126, not 126.0
+                                         : "CAST(" + f + " AS TEXT)");
+  }
+  sql += " FROM tracks WHERE id = ?1";
+  Stmt s(db_, sql.c_str());
+  s.bind(1, track_id);
+  FieldValues out;
+  if (!s.step()) return out;
+  for (std::size_t i = 0; i < kEditFieldCount; ++i) out.push_back(s.is_null(static_cast<int>(i)) ? std::nullopt : std::optional<std::string>(s.text(static_cast<int>(i))));
+  return out;
+}
+
+void Library::edit_journal(std::int64_t track_id, const FieldValues& before) {
+  if (before.empty()) return;
+  const FieldValues after = edit_snapshot(track_id);
+  if (after.size() != before.size()) return;
+  for (std::size_t i = 0; i < kEditFieldCount; ++i)
+    if (before[i] != after[i]) journal_record(track_id, kEditFields[i], before[i], after[i]);
+}
+
+void Library::journal_record(std::int64_t track_id, const std::string& field, const std::optional<std::string>& old_value,
+                             const std::optional<std::string>& new_value) {
+  Stmt i(db_, "INSERT INTO track_edits(track_id, field, old_value, new_value, edited_at, source, batch_id) VALUES (?1,?2,?3,?4,?5,?6,?7)");
+  i.bind(1, track_id).bind(2, field);
+  if (old_value) i.bind(3, *old_value);
+  else i.bind_null(3);
+  if (new_value) i.bind(4, *new_value);
+  else i.bind_null(4);
+  i.bind(5, unix_now()).bind(6, g_edit.source);
+  i.bind(7, g_edit.batch);  // 0 for the first row of a batch, fixed up below
+  i.run();
+  const std::int64_t row = db_.last_insert_id();
+  if (g_edit.batch == 0) {
+    g_edit.batch = row;  // a batch is named after its first row
+    Stmt b(db_, "UPDATE track_edits SET batch_id = ?1 WHERE id = ?1");
+    b.bind(1, row);
+    b.run();
+  }
+  Stmt p(db_, "DELETE FROM track_edits WHERE track_id = ?1 AND id NOT IN (SELECT id FROM track_edits WHERE track_id = ?1 ORDER BY id DESC LIMIT ?2)");
+  p.bind(1, track_id).bind(2, kEditHistoryCap);
+  p.run();
+}
+
+// One change of a track's journalled fields: the scope names the source (the default applies unless an outer scope exists).
+void Library::tracked(std::int64_t track_id, const char* source, const std::function<void()>& change) {
+  EditScope scope(source);
+  OptionalTx tx(db_);
+  const FieldValues before = edit_snapshot(track_id);
+  change();
+  edit_journal(track_id, before);
+  tx.commit();
+}
+
+std::vector<TrackEditRecord> Library::read_edits(const char* where, std::int64_t arg, int limit, bool include_analysis) {
+  const std::string sql = std::string("SELECT id, track_id, field, old_value, new_value, edited_at, source, batch_id FROM track_edits ") +
+                          where + (include_analysis ? "" : " AND source != 'analysis'") + " ORDER BY id DESC LIMIT ?2";
+  Stmt s(db_, sql.c_str());
+  s.bind(1, arg).bind(2, std::max(1, limit));
+  std::vector<TrackEditRecord> out;
+  while (s.step()) {
+    TrackEditRecord r;
+    r.id = s.i64(0);
+    r.track_id = s.i64(1);
+    r.field = s.text(2);
+    if (!s.is_null(3)) r.old_value = s.text(3);
+    if (!s.is_null(4)) r.new_value = s.text(4);
+    r.edited_at = s.i64(5);
+    r.source = s.text(6);
+    r.batch_id = s.i64(7);
+    out.push_back(std::move(r));
+  }
+  return out;
+}
+
+std::vector<TrackEditRecord> Library::track_history(std::int64_t track_id, int limit, bool include_analysis) {
+  return read_edits("WHERE track_id = ?1", track_id, limit, include_analysis);
+}
+
+std::vector<TrackEditRecord> Library::recent_edits(int limit, bool include_analysis) {
+  return read_edits("WHERE ?1 = ?1", 0, limit, include_analysis);
+}
+
+std::set<std::string> Library::protected_fields(std::int64_t track_id) {
+  std::set<std::string> keep;
+  Stmt l(db_, "SELECT field FROM track_edits WHERE id IN (SELECT max(id) FROM track_edits WHERE track_id = ?1 GROUP BY field)"
+              " AND source IN ('user', 'api')");
+  l.bind(1, track_id);
+  while (l.step()) keep.insert(l.text(0));
+  return keep;
+}
+
+void Library::set_date_added(std::int64_t track_id, std::int64_t unix_seconds) {
+  Stmt u(db_, "UPDATE tracks SET date_added = ?1 WHERE id = ?2");
+  u.bind(1, unix_seconds).bind(2, track_id);
+  u.run();
+}
+
+int Library::undo_one(const TrackEditRecord& e) {
+  if (!is_edit_field(e.field)) return 1;
+  const FieldValues now = edit_snapshot(e.track_id);
+  if (now.empty()) return 2;
+  const auto at = std::find_if(std::begin(kEditFields), std::end(kEditFields), [&](const char* n) { return e.field == n; });
+  const std::optional<std::string>& current = now[static_cast<std::size_t>(at - std::begin(kEditFields))];
+  if (current != e.new_value) return 1;
+  tracked(e.track_id, "undo", [&] {
+    Stmt u(db_, ("UPDATE tracks SET " + e.field + " = ?1 WHERE id = ?2").c_str());
+    if (e.old_value) u.bind(1, *e.old_value);
+    else u.bind_null(1);
+    u.bind(2, e.track_id);
+    u.run();
+  });
+  return 0;
+}
+
+// Applies the records newest first inside one transaction; a record whose field no longer holds its new value stops the
+// whole undo (nothing is changed). The undo is journalled with source 'undo', all rows in one batch.
+UndoResult Library::undo_records(const std::vector<TrackEditRecord>& rows) {
+  UndoResult r;
+  if (rows.empty()) return r;
+  EditScope scope("undo", true);
+  OptionalTx tx(db_);
+  int gone = 0;
+  for (const auto& e : rows) {
+    const int code = undo_one(e);
+    if (code == 0) ++r.applied;
+    else if (code == 1) ++r.conflicts;
+    else ++gone;
+  }
+  if (r.conflicts > 0 || gone > 0) {
+    r.status = r.conflicts > 0 ? UndoStatus::Conflict : UndoStatus::NotFound;
+    r.applied = 0;
+    return r;  // the transaction rolls back
+  }
+  r.status = UndoStatus::Ok;
+  r.batch_id = scope.batch();
+  tx.commit();
+  return r;
+}
+
+UndoResult Library::undo_edit(std::int64_t edit_id) { return undo_records(read_edits("WHERE id = ?1", edit_id, 1)); }
+
+UndoResult Library::undo_batch(std::int64_t batch_id) { return undo_records(read_edits("WHERE batch_id = ?1", batch_id, 1000000)); }
 
 std::int64_t Library::create_playlist(std::int64_t parent, const std::string& name, bool is_folder) {
   Stmt i(db_,

@@ -26,7 +26,11 @@ class ApiHost {
   virtual IEngine& api_engine() = 0;
   virtual bool api_load(int deck, std::int64_t track_id, std::string& error) = 0;
   virtual void api_add_file(const std::string& path, int deck) = 0;  // deck -1 = just add
-  virtual bool api_export(const std::string& destination, std::int64_t playlist_id, std::string& error) = 0;
+  // convert_incompatible / player_profile: the export's compatibility fix and rule table (profile empty = default).
+  virtual bool api_export(const std::string& destination, std::int64_t playlist_id, std::string& error,
+                          bool convert_incompatible, const std::string& player_profile) = 0;
+  // The compatibility report of the last export as JSON ({"report", "converted", "remaining_will_not_play"}), or empty.
+  virtual std::string api_export_report() { return {}; }
   virtual void api_library_changed() = 0;
   // start = true begins recording the master output; path receives the file in both cases.
   virtual bool api_record(bool start, std::string& path, std::string& error) = 0;

@@ -200,6 +200,18 @@ void dh_app_window_set_visible(dh_app* app, uint32_t window, bool visible);
 /* "Reset window arrangement" menu item. */
 void dh_app_windows_reset(dh_app* app);
 
+/* Keyboard shortcuts (customisable: resources/keymaps/default.dhkeys + <data>/keymap.dhkeys, docs/SHORTCUTS.md).
+   One key event. `physical` is the USB HID keyboard usage (page 0x07: A = 4 .. Z = 29, 1 = 30 .. 0 = 39, Enter 40,
+   Escape 41, Backspace 42, Tab 43, Space 44, F1 = 58 ..., arrows 79..82; SDL3 scancodes are these values) or 0 if the
+   shell only knows the character. `character` is the Unicode code point the key types without modifiers (0 = none).
+   mods = DH_MOD_*. Send key-up events too (is_down = false): keys bound as "hold" (cue, hot cues) need them.
+   Returns true when a shortcut took the key: do not then send the key's text (dh_app_text) or dh_app_key for it.
+   Returns false for keys that are not bound or while a text field has the keyboard; then continue as before with
+   dh_app_key / dh_app_text. Existing shells keep working unchanged without calling this. */
+bool dh_app_key_event(dh_app* app, uint32_t physical, uint32_t character, uint32_t mods, bool is_down, bool is_repeat);
+/* The window lost focus or the keyboard moved elsewhere: release every key still held (ends held cues). */
+void dh_app_key_release_all(dh_app* app);
+
 #ifdef __cplusplus
 }
 #endif

@@ -23,6 +23,7 @@ struct AnalysisOptions {
   double max_bpm = 200.0;
   double preferred_min_bpm = 78.0;   // octave errors are resolved towards this range
   double preferred_max_bpm = 176.0;
+  bool fluid_grid = true;            // follow tempo drift/changes with extra sections (off: coarse segmentation as before)
 };
 
 struct BeatGrid {
@@ -34,6 +35,8 @@ struct BeatGrid {
   double confidence = 0;             // 0..1 (how well beats fit the grid)
   int downbeat_phase = 0;            // beats_ms[i] is a downbeat when i % 4 == downbeat_phase
   double downbeat_confidence = 0;    // 0..1
+  bool steady = true;                // judged one steady tempo (a single section); false = fluid (several sections)
+  double stability = 1.0;            // 0..1: 1 = metronomic, lower = the tempo wanders / the grid needed many sections
 };
 
 struct KeyResult {
@@ -61,7 +64,23 @@ struct AnalysisResult {
   BeatGrid beats;
   KeyResult key;
   LoudnessResult loudness;
+  // Audible extent and load cue (always filled by analyse(), whatever options are set).
+  // has_audible is false for digital silence / pure noise floor; the three times are then 0.
+  bool has_audible = false;
+  double first_audible_ms = 0;       // first moment the track is really audible ("the start"), 0..duration
+  double last_audible_ms = 0;        // end of the last audible sound (>= first_audible_ms)
+  double suggested_cue_ms = 0;       // load cue: first confident downbeat at/after first sound, else first sound
 };
+
+struct AudibleRange {
+  bool ok = false;
+  double first_ms = 0;
+  double last_ms = 0;
+};
+// Level-based start/end of the audible part. Threshold is relative to the track's own loudness (about -30 dB
+// below its loud peaks, never below -56 dBFS) and must hold for a few ms, so a lone click/pop, dither or a quiet
+// noise-floor lead-in does not count; DC offset is removed; a fade-in counts from where it becomes clearly audible.
+AudibleRange find_audible_range(const float* pcm, std::uint64_t frames, std::uint32_t sample_rate);
 
 // `pcm` is interleaved stereo, `frames` sample frames long.
 BeatGrid analyse_beats(const float* pcm, std::uint64_t frames, std::uint32_t sample_rate,

@@ -46,6 +46,7 @@ const char* App::panel_role(Panel p) {
     case Panel::CueEdit: return "cue";
     case Panel::Columns: return "columns";
     case Panel::Smart: return "smart";
+    case Panel::Shortcuts: return "shortcuts";
     case Panel::None: break;
   }
   return "";

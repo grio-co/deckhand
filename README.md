@@ -19,7 +19,15 @@ full control API.
   and coloured hot cues, waveform zoom, headphone pre-listen, smart playlists, configurable
   browser columns.
 - Analysis: tempo with variable-tempo grids, downbeat, musical key and loudness (auto-gain), run
-  once per track on first load.
+  once per track on first load; grids follow drifting tempo; tracks load at the first sound or
+  your own main cue.
+- Metadata safety: per-field edit history with undo, imports that leave hand-edited fields alone,
+  a 30-day trash for deleted tracks (API and command line for now). Audio files are never written.
+- Moving in and out: whole-library import/export as DJ library XML, M3U8 playlists
+  ([docs/INTERCHANGE.md](docs/INTERCHANGE.md)).
+- Export check: names the files a club player will not read before you leave home, and can put a
+  24-bit copy on the stick instead.
+- Keyboard: customisable shortcuts with two-handed defaults ([docs/SHORTCUTS.md](docs/SHORTCUTS.md)).
 - Decks: MP3, AAC, FLAC, WAV, AIFF; scrolling three-band waveforms with beat grid; cue, hot cues,
   loops, beat jump, tempo, beat sync, scratch and nudge; key lock and key shift; quantise; slip;
   reverse.

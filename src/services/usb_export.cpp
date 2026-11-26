@@ -9,6 +9,7 @@
 #include "deckhand/audio/track.hpp"
 #include "deckhand/library/palette.hpp"
 #include "deckhand/export/export.hpp"
+#include "deckhand/export/export_preflight.hpp"
 #include "deckhand/log/log.hpp"
 
 namespace deckhand {
@@ -162,7 +163,14 @@ bool export_library_to_usb(Library& lib, const UsbExportRequest& request, UsbExp
     ExportOptions options;
     options.destination = request.destination;
     options.copy_audio = request.copy_audio;
-    if (!export_usb(tracks, playlists, options, error)) return false;
+    options.convert_incompatible = request.convert_incompatible;
+    if (!request.player_profile.empty()) options.player_profile = request.player_profile;
+    ExportResult report;
+    const bool exported = export_usb(tracks, playlists, options, error, report);
+    result.report_json = report.report.to_json();
+    result.converted = static_cast<int>(report.converted);
+    result.remaining_will_not_play = static_cast<int>(report.remaining_will_not_play());
+    if (!exported) return false;
     result.tracks = static_cast<int>(tracks.size());
     for (const auto& p : playlists) result.playlists += p.is_folder ? 0 : 1;
     DH_LOG(Info, "exported %d tracks and %d playlists to %s (%d files missing)", result.tracks, result.playlists,

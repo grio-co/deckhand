@@ -514,9 +514,15 @@ struct Segmenter {
   }
 };
 
-double snap_bpm(double bpm) {
+// Snap to 0.01, and to a whole number only when that cannot move the grid by more than ~3 ms across the section
+// (`span_beats` beats): a 6-minute track at 174.02 BPM must not be flattened to 174.00 (21 ms of drift).
+double snap_bpm(double bpm, double span_beats = 0) {
   double s = std::round(bpm * 100.0) / 100.0;
-  if (std::fabs(s - std::round(s)) < 0.05) s = std::round(s);
+  const double r = std::round(s);
+  if (std::fabs(s - r) < 0.05 && r > 0) {
+    const double drift_s = span_beats * std::fabs(60.0 / r - 60.0 / bpm);
+    if (drift_s < 0.003) s = r;
+  }
   return s;
 }
 
@@ -526,12 +532,74 @@ struct Section {
   double bpm = 0;
   std::size_t first_index = 0;
   std::size_t count = 0;
+  std::size_t back = 0;  // beats added in front when the first section was extended back to the track start
+  double k0 = 0;  // beat number (in the fitted point set) of the first beat
 };
 
 double median_of(std::vector<double> v) {
   if (v.empty()) return 0;
   std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(v.size() / 2), v.end());
   return v[v.size() / 2];
+}
+
+// ---- fluid (drifting / changing tempo) segmentation ----
+
+// Largest systematic deviation (seconds) of the beat times in [lo,hi) from their best straight line, measured through
+// a quadratic fit over the robust inliers (so jitter and stray detections barely count). 0 for short runs.
+double quad_peak(const std::vector<Pt>& p, std::size_t lo, std::size_t hi) {
+  if (hi - lo < 8) return 0;
+  const Line L = robust_fit(p, lo, hi, 0.03);
+  if (L.T <= 0) return 1e9;
+  const double k_ref = p[lo].k, t_ref = p[lo].t;
+  const double span = p[hi - 1].k - p[lo].k;
+  if (span <= 0) return 0;
+  const double kmid = 0.5 * (p[lo].k + p[hi - 1].k), h = 0.5 * span;
+  double s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, t0 = 0, t1 = 0, t2 = 0;
+  for (std::size_t i = lo; i < hi; ++i) {
+    if (std::fabs(p[i].t - (L.a + L.T * (p[i].k - k_ref))) >= 0.03) continue;
+    const double x = (p[i].k - kmid) / h, y = p[i].t - t_ref;
+    const double x2 = x * x;
+    s0 += 1; s1 += x; s2 += x2; s3 += x2 * x; s4 += x2 * x2;
+    t0 += y; t1 += x * y; t2 += x2 * y;
+  }
+  if (s0 < 8) return 0;
+  // Solve [s0 s1 s2; s1 s2 s3; s2 s3 s4] [a b c]^T = [t0 t1 t2]^T for c (Cramer).
+  const double det = s0 * (s2 * s4 - s3 * s3) - s1 * (s1 * s4 - s3 * s2) + s2 * (s1 * s3 - s2 * s2);
+  if (std::fabs(det) < 1e-9) return 0;
+  const double dc = s0 * (s2 * t2 - t1 * s3) - s1 * (s1 * t2 - t1 * s2) + t0 * (s1 * s3 - s2 * s2);
+  return std::fabs(dc / det) * (2.0 / 3.0);
+}
+
+// Noise of the beat times (seconds, rms-equivalent) from second differences of consecutive beats.
+double beat_jitter(const std::vector<Pt>& p) {
+  std::vector<double> d;
+  for (std::size_t i = 1; i + 1 < p.size(); ++i)
+    if (p[i].k - p[i - 1].k == 1 && p[i + 1].k - p[i].k == 1)
+      d.push_back(std::fabs(p[i + 1].t - 2 * p[i].t + p[i - 1].t));
+  if (d.size() < 8) return 0;
+  return 1.4826 * median_of(d) / std::sqrt(6.0);
+}
+
+// Cut [lo,hi) into the fewest runs that each stay within `tol` of a straight line (greedy), appended to `out`.
+void fluid_split(const std::vector<Pt>& p, std::size_t lo, std::size_t hi, double tol, std::size_t minlen,
+                 std::vector<std::pair<std::size_t, std::size_t>>& out) {
+  std::size_t i = lo;
+  const std::size_t first_out = out.size();
+  while (i < hi) {
+    std::size_t j = std::min(hi, i + minlen);
+    while (j < hi) {
+      const std::size_t nj = std::min(hi, j + 2);
+      if (quad_peak(p, i, nj) > tol) break;
+      j = nj;
+    }
+    out.emplace_back(i, j);
+    i = j;
+  }
+  if (out.size() - first_out >= 2 && out.back().second - out.back().first < 6) {
+    const std::size_t e = out.back().second;
+    out.pop_back();
+    out.back().second = e;
+  }
 }
 
 // ---------------------------------------------------------------- chroma / key
@@ -787,6 +855,8 @@ void detect_downbeats(BeatGrid& g, const Onset& od, const Chroma& ch) {
 
 // ---------------------------------------------------------------- beats
 
+constexpr std::size_t kMaxFluidSections = 64;
+
 BeatGrid beats_from(const Prepared& prep, const Chroma& chroma, const AnalysisOptions& opt) {
   BeatGrid g;
   if (prep.duration_s < kMinBeatSeconds) {
@@ -847,17 +917,56 @@ BeatGrid beats_from(const Prepared& prep, const Chroma& chroma, const AnalysisOp
   }
 
   // Constant tempo if one robust line explains the beats, otherwise segment.
+  const bool fluid = opt.fluid_grid;
+  const double jit = fluid ? beat_jitter(pts) : 0.0;
+  const double tol = fluid ? std::clamp(1.4 * jit, 0.006, 0.012) : 0.0;
+  const std::size_t minlen = 12;
   std::vector<std::pair<std::size_t, std::size_t>> leaves;
   const Line whole = robust_fit(pts, 0, pts.size(), 0.025);
   std::vector<Pt> work;
-  if (whole.T > 0 && whole.rms <= 0.012 && whole.frac >= 0.9) {
+  const bool whole_ok = whole.T > 0 && whole.rms <= 0.012 && whole.frac >= 0.9;
+  if (whole_ok && (!fluid || quad_peak(pts, 0, pts.size()) <= tol)) {
     work = pts;
     leaves.emplace_back(0, work.size());
   } else {
     work = clean_points(pts);
-    Segmenter seg(work);
-    seg.run(0, work.size());
-    leaves = seg.leaves;
+    if (whole_ok) {
+      leaves.emplace_back(0, work.size());
+    } else {
+      Segmenter seg(work);
+      seg.run(0, work.size());
+      leaves = seg.leaves;
+    }
+    if (fluid) {
+      // Re-split every run that still drifts away from a straight line; widen the tolerance if that makes too many.
+      std::vector<std::pair<std::size_t, std::size_t>> base = leaves;
+      for (double t = tol; t < 0.06; t *= 1.3) {
+        leaves.clear();
+        for (const auto& lf : base) {
+          if (lf.second - lf.first >= 2 * minlen && quad_peak(work, lf.first, lf.second) > t) fluid_split(work, lf.first, lf.second, t, minlen, leaves);
+          else leaves.push_back(lf);
+        }
+        if (leaves.size() <= kMaxFluidSections) break;
+      }
+      // Put each cut where the tempo really changes (best two-line fit within a few beats of the greedy cut).
+      Segmenter seg2(work);
+      for (std::size_t b = 1; b < leaves.size(); ++b) {
+        const std::size_t lo = leaves[b - 1].first, hi = leaves[b].second, m = leaves[b].first;
+        if (hi - lo < 12) continue;
+        const std::size_t a0 = std::max(lo + 6, m > 8 ? m - 8 : 0), a1 = std::min(hi - 6, m + 8);
+        double best = 1e30;
+        std::size_t bm = m;
+        for (std::size_t c = a0; c <= a1; ++c) {
+          const double v = seg2.sse(lo, c) + seg2.sse(c, hi);
+          if (v < best) {
+            best = v;
+            bm = c;
+          }
+        }
+        leaves[b - 1].second = bm;
+        leaves[b].first = bm;
+      }
+    }
   }
 
   // Merge neighbours that one line explains, then drop runs too short to be a real tempo section.
@@ -865,7 +974,8 @@ BeatGrid beats_from(const Prepared& prep, const Chroma& chroma, const AnalysisOp
     merged = false;
     for (std::size_t i = 0; i + 1 < leaves.size(); ++i) {
       const Line J = robust_fit(work, leaves[i].first, leaves[i + 1].second, 0.025);
-      if (J.T > 0 && J.rms <= 0.012 && J.frac >= 0.85) {
+      if (J.T > 0 && J.rms <= 0.012 && J.frac >= 0.85 &&
+          (!fluid || quad_peak(work, leaves[i].first, leaves[i + 1].second) <= tol)) {
         leaves[i].second = leaves[i + 1].second;
         leaves.erase(leaves.begin() + static_cast<std::ptrdiff_t>(i) + 1);
         merged = true;
@@ -873,8 +983,9 @@ BeatGrid beats_from(const Prepared& prep, const Chroma& chroma, const AnalysisOp
       }
     }
   }
+  const std::size_t min_section = fluid ? 6 : 16;
   for (std::size_t i = 0; i < leaves.size() && leaves.size() > 1;) {
-    if (leaves[i].second - leaves[i].first < 16) leaves.erase(leaves.begin() + static_cast<std::ptrdiff_t>(i));
+    if (leaves[i].second - leaves[i].first < min_section) leaves.erase(leaves.begin() + static_cast<std::ptrdiff_t>(i));
     else ++i;
   }
 
@@ -884,19 +995,26 @@ BeatGrid beats_from(const Prepared& prep, const Chroma& chroma, const AnalysisOp
     const Line L = robust_fit(work, lf.first, lf.second, 0.025);
     if (L.T <= 0 || L.inliers < 4) continue;
     Section s;
-    s.bpm = snap_bpm(60.0 / L.T);
+    s.bpm = snap_bpm(60.0 / L.T, work[lf.second - 1].k - work[lf.first].k);
     if (s.bpm <= 0) continue;
     s.T = 60.0 / s.bpm;
     // Re-centre the intercept for the snapped period over the inliers.
     const double k_ref = work[lf.first].k;
+    // The section starts at its first inlier beat (a stray first detection must not become a grid beat).
+    s.k0 = k_ref;
+    for (std::size_t i = lf.first; fluid && i < lf.second; ++i)
+      if (std::fabs(work[i].t - (L.a + L.T * (work[i].k - k_ref))) < 0.025) {
+        s.k0 = work[i].k;
+        break;
+      }
     double acc = 0;
     std::size_t n = 0;
     for (std::size_t i = lf.first; i < lf.second; ++i) {
       if (std::fabs(work[i].t - (L.a + L.T * (work[i].k - k_ref))) >= 0.025) continue;
-      acc += work[i].t - s.T * (work[i].k - k_ref);
+      acc += work[i].t - s.T * (work[i].k - s.k0);
       ++n;
     }
-    s.a = n ? acc / double(n) : L.a;
+    s.a = n ? acc / double(n) : L.a + L.T * (s.k0 - k_ref);
     inl += double(L.inliers);
     tot += double(lf.second - lf.first);
     rms_acc += L.rms * double(L.inliers);
@@ -906,11 +1024,56 @@ BeatGrid beats_from(const Prepared& prep, const Chroma& chroma, const AnalysisOp
     g.error = "beat grid could not be fitted";
     return g;
   }
+  // Fluid grids: hand each junction over at the beat where the neighbouring lines fit the raw detections best
+  // (a single dropped or added half-beat looks like a stray detection and would otherwise be left on the wrong line).
+  if (fluid && secs.size() > 1) {
+    for (std::size_t i = 0; i + 1 < secs.size(); ++i) {
+      Section& A = secs[i];
+      Section& B = secs[i + 1];
+      const double kb0 = B.k0;
+      double best = 1e30, best_k = kb0;
+      for (double kb = kb0 - 12; kb <= kb0 + 12; kb += 1) {
+        if (kb <= A.k0 + 3) continue;
+        if (i + 2 < secs.size() && kb >= secs[i + 2].k0 - 3) continue;
+        double cost = 0;
+        for (const Pt& q : pts) {
+          if (q.k < kb0 - 14 || q.k > kb0 + 14) continue;
+          const double rA = std::fabs(q.t - (A.a + A.T * (q.k - A.k0)));
+          const double rB = std::fabs(q.t - (B.a + B.T * (q.k - B.k0)));
+          cost += std::min(0.04, q.k < kb ? rA : rB);
+        }
+        cost += 1e-4 * std::fabs(kb - kb0);  // prefer the current cut on ties
+        if (cost < best) {
+          best = cost;
+          best_k = kb;
+        }
+      }
+      if (best_k != kb0) {
+        B.a += B.T * (best_k - B.k0);
+        B.k0 = best_k;
+      }
+      // A hole of more than one beat at the junction: if the onset envelope shows real hits where the next section's
+      // grid has beats, the tracker skipped them (typical after a half-beat edit): start that section earlier.
+      const double a_last = A.a + A.T * (B.k0 - 1 - A.k0);
+      const double a_old = B.a;
+      for (int j = 1; j <= 4; ++j) {
+        const double x = a_old - j * B.T;
+        if (x - a_last < 0.3 * B.T) break;
+        double pk = 0;
+        const long c = static_cast<long>(std::lround(x / od.hop_s));
+        for (long q = c - 4; q <= c + 4; ++q)
+          if (q >= 0 && q < static_cast<long>(od.env.size())) pk = std::max(pk, double(od.env[static_cast<std::size_t>(q)]));
+        if (pk < 1.5) break;
+        B.a = x;  // the section keeps its beat count; the extra beat is part of the (shortened) preceding gap
+      }
+    }
+  }
   // Extend the first section back to the start of the track.
   {
     Section& s = secs.front();
     const double m = std::floor((s.a + 0.002) / s.T);
     s.a = std::max(0.0, s.a - m * s.T);
+    s.back = static_cast<std::size_t>(std::max(0.0, m));
   }
   // Generate beats.
   for (std::size_t i = 0; i < secs.size(); ++i) {
@@ -918,7 +1081,8 @@ BeatGrid beats_from(const Prepared& prep, const Chroma& chroma, const AnalysisOp
     s.first_index = g.beats_ms.size();
     std::size_t n;
     if (i + 1 < secs.size()) {
-      n = static_cast<std::size_t>(std::max<long>(1, std::lround((secs[i + 1].a - s.a) / s.T)));
+      n = fluid ? static_cast<std::size_t>(std::max<long>(1, std::lround(secs[i + 1].k0 - s.k0)) + static_cast<long>(s.back))
+                : static_cast<std::size_t>(std::max<long>(1, std::lround((secs[i + 1].a - s.a) / s.T)));
     } else {
       n = static_cast<std::size_t>(std::max(1.0, std::ceil((prep.duration_s - s.a) / s.T)));
     }
@@ -942,6 +1106,16 @@ BeatGrid beats_from(const Prepared& prep, const Chroma& chroma, const AnalysisOp
   const double frac = tot > 0 ? inl / tot : 0;
   const double rms = inl > 0 ? rms_acc / inl : 0.03;
   g.confidence = clamp01(frac * (1.0 - rms / 0.03));
+  {
+    double lo_bpm = 1e9, hi_bpm = 0;
+    for (const Section& sc : secs) {
+      lo_bpm = std::min(lo_bpm, sc.bpm);
+      hi_bpm = std::max(hi_bpm, sc.bpm);
+    }
+    g.steady = hi_bpm - lo_bpm <= 0.5;
+    const double rel = g.bpm > 0 ? (hi_bpm - lo_bpm) / g.bpm : 0;
+    g.stability = clamp01(1.0 - rel / 0.1) * (1.0 - 0.5 * clamp01(rms / 0.012));
+  }
   g.ok = true;
   return g;
 }
@@ -1041,6 +1215,82 @@ LoudnessResult loudness_of(const float* pcm, std::uint64_t frames, std::uint32_t
   return r;
 }
 
+// ---------------------------------------------------------------- audible range
+
+// Peak level per 2 ms block of the DC-removed mono signal.
+std::vector<float> block_peaks(const float* pcm, std::uint64_t frames, std::uint32_t rate, std::size_t& block) {
+  block = std::max<std::size_t>(1, static_cast<std::size_t>(rate / 500));
+  const std::size_t nb = static_cast<std::size_t>((frames + block - 1) / block);
+  std::vector<float> pk(nb, 0.f);
+  const double a = 1.0 - std::exp(-2.0 * kPi * 20.0 / double(rate));  // one-pole DC tracker, ~20 Hz
+  double dc = 0.5 * (double(pcm[0]) + double(pcm[1]));  // start at the first sample: a constant offset is not a step
+  for (std::size_t b = 0; b < nb; ++b) {
+    const std::uint64_t i0 = std::uint64_t(b) * block, i1 = std::min<std::uint64_t>(frames, i0 + block);
+    float m = 0;
+    for (std::uint64_t i = i0; i < i1; ++i) {
+      const double v = 0.5 * (double(pcm[2 * i]) + double(pcm[2 * i + 1]));
+      dc += a * (v - dc);
+      const float h = static_cast<float>(std::fabs(v - dc));
+      if (h > m) m = h;
+    }
+    pk[b] = m;
+  }
+  return pk;
+}
+
+}  // namespace
+
+AudibleRange find_audible_range(const float* pcm, std::uint64_t frames, std::uint32_t rate) {
+  AudibleRange r;
+  if (pcm == nullptr || frames == 0 || rate < 8000) return r;
+  try {
+    std::size_t block = 0;
+    const std::vector<float> pk = block_peaks(pcm, frames, rate, block);
+    const std::size_t n = pk.size();
+    std::vector<float> sorted(pk);
+    const std::size_t q = std::min(n - 1, static_cast<std::size_t>(0.98 * double(n)));
+    std::nth_element(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(q), sorted.end());
+    const double ref = sorted[q];
+    const double thr = std::max(ref * 0.0316, 0.0016);  // -30 dB relative, floor about -56 dBFS
+    if (ref < thr * 1.5 || !(ref > 0.0016)) return r;
+    const double ms_per_block = 1000.0 * double(block) / double(rate);
+    const std::size_t win = std::max<std::size_t>(3, static_cast<std::size_t>(30.0 / ms_per_block));
+    const std::size_t need = 3;  // blocks above threshold within the window (a pop is 1 block)
+    auto above = [&](std::size_t b) { return pk[b] >= thr; };
+    auto qualifies = [&](std::size_t b, int dir) {  // run of `win` blocks starting at b going in dir
+      std::size_t c = 0;
+      for (std::size_t k = 0; k < win; ++k) {
+        const long idx = static_cast<long>(b) + dir * static_cast<long>(k);
+        if (idx < 0 || idx >= static_cast<long>(n)) break;
+        if (above(static_cast<std::size_t>(idx))) ++c;
+      }
+      return c >= need;
+    };
+    long first = -1, last = -1;
+    for (std::size_t b = 0; b < n; ++b)
+      if (above(b) && qualifies(b, +1)) { first = static_cast<long>(b); break; }
+    for (std::size_t b = n; b-- > 0;)
+      if (above(b) && qualifies(b, -1)) { last = static_cast<long>(b); break; }
+    if (first < 0 || last < first) return r;
+    // Back off to where the attack/decay actually begins/ends (12 dB lower), within 60 ms / 250 ms.
+    const double low = thr * 0.25;
+    long f = first;
+    for (long k = 0; k < static_cast<long>(60.0 / ms_per_block) && f > 0 && pk[static_cast<std::size_t>(f - 1)] >= low; ++k) --f;
+    long l = last;
+    for (long k = 0; k < static_cast<long>(250.0 / ms_per_block) && l + 1 < static_cast<long>(n) &&
+                     pk[static_cast<std::size_t>(l + 1)] >= low; ++k) ++l;
+    const double dur_ms = 1000.0 * double(frames) / double(rate);
+    r.first_ms = std::clamp(double(f) * ms_per_block, 0.0, dur_ms);
+    r.last_ms = std::clamp(double(l + 1) * ms_per_block, r.first_ms, dur_ms);
+    r.ok = true;
+  } catch (...) {
+    r = AudibleRange{};
+  }
+  return r;
+}
+
+namespace {
+
 bool bad_input(const float* pcm, std::uint64_t frames, std::uint32_t rate) {
   return pcm == nullptr || frames == 0 || rate < 8000;
 }
@@ -1132,6 +1382,10 @@ AnalysisResult analyse(const float* pcm, std::uint64_t frames, std::uint32_t rat
     return r;
   }
   r.duration_ms = double(frames) * 1000.0 / double(rate);
+  const AudibleRange ar = find_audible_range(pcm, frames, rate);
+  r.has_audible = ar.ok;
+  r.first_audible_ms = ar.first_ms;
+  r.last_audible_ms = ar.last_ms;
   try {
     if (o.beats || o.key) {
       const Prepared p = prepare(pcm, frames, rate);
@@ -1143,6 +1397,21 @@ AnalysisResult analyse(const float* pcm, std::uint64_t frames, std::uint32_t rat
       }
     }
     if (o.loudness) r.loudness = loudness_of(pcm, frames, rate);
+    if (ar.ok) {
+      r.suggested_cue_ms = ar.first_ms;
+      const BeatGrid& g = r.beats;
+      if (g.ok && g.confidence >= 0.5 && g.bpm > 0) {
+        const double beat_ms = 60000.0 / g.bpm;
+        for (std::size_t i = 0; i < g.beats_ms.size(); ++i) {
+          if (static_cast<int>(i % 4) != g.downbeat_phase) continue;
+          const double t = g.beats_ms[i];
+          if (t < ar.first_ms - 15.0) continue;
+          if (t <= ar.first_ms + beat_ms && t <= ar.last_ms) r.suggested_cue_ms = t;
+          break;
+        }
+      }
+      r.suggested_cue_ms = std::clamp(r.suggested_cue_ms, 0.0, r.duration_ms);
+    }
   } catch (...) {
     r.error = "internal error";
     return r;

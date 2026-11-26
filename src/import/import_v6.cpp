@@ -112,7 +112,7 @@ ImportStats import_library_v6(Library& lib, const ImportOptions& o) {
     if (t.title.empty()) t.title = fs::path(t.path).stem().string();
 
     const bool known = lib.track_id_for_path(t.path).has_value();
-    const std::int64_t id = lib.upsert_track(t);
+    const std::int64_t id = lib.upsert_track(t, o.overwrite_edited);
     known ? ++stats.tracks_updated : ++stats.tracks_added;
     track_ids[source_id] = id;
     put_map.bind(1, kSource).bind(2, "track").bind(3, source_id).bind(4, id);

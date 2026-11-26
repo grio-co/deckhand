@@ -81,6 +81,11 @@ bool App::field_key(dh_key key) {
 void App::close_panel() {
   if (panel_ == Panel::Settings) commit_settings();
   if (panel_ == Panel::Learn) hub_->learn_cancel();
+  if (panel_ == Panel::Shortcuts) {
+    keys_ui_.capture_control.clear();
+    keys_ui_.have_pending = false;
+    keys_ui_.confirm_reset = false;
+  }
   panel_ = Panel::None;
   focus_ = nullptr;
 }
@@ -176,6 +181,10 @@ void App::open_panel(Panel p) {
       break;
     }
     case Panel::Export: begin_export_menu(); break;
+    case Panel::Shortcuts:
+      keys_ui_ = KeysUi();
+      key_release_all();
+      break;
     case Panel::Learn: {
       learn_list_.clear();
       learn_action_.clear();
@@ -270,6 +279,7 @@ Rect App::panel_size(float w, float h, std::string& title) {
     case Panel::Relink: m = {0, 0, std::min(560.0f, w - 24), std::min(250.0f, h - 24)}; title = T("relink.title"); break;
     case Panel::Columns: m = {0, 0, std::min(400.0f, w - 24), std::min(496.0f, h - 24)}; title = T("browser.columns_title"); break;
     case Panel::Smart: m = {0, 0, std::min(720.0f, w - 24), std::min(470.0f, h - 24)}; title = T("smart.title"); break;
+    case Panel::Shortcuts: m = {0, 0, std::min(700.0f, w - 24), std::min(580.0f, h - 24)}; title = T("keys.title"); break;
     case Panel::CueEdit:
       m = {0, 0, std::min(430.0f, w - 24), std::min(250.0f, h - 24)};
       title = cue_edit_slot_ >= 0 ? T("cue.edit_hot", {{"slot", cue_edit_slot_ + 1}}) : T("cue.edit_memory");
@@ -311,6 +321,7 @@ void App::draw_panel_body(const Rect& m, const std::string& title) {
   else if (panel_ == Panel::Columns) draw_columns_panel(m);
   else if (panel_ == Panel::Smart) draw_smart_editor(m);
   else if (panel_ == Panel::Relink) draw_relink(m);
+  else if (panel_ == Panel::Shortcuts) draw_shortcuts(m);
 }
 
 void App::draw_overlays() {
@@ -426,6 +437,14 @@ void App::draw_settings(const Rect& m) {
   float y = body.y + 4 - panel_scroll_;
   const float line = 28;
 
+  ui_heading(x, y, T("settings.keys"));
+  y += 18;
+  if (ui_button({x, y, 260, 24}, T("keys.open"))) {
+    open_panel(Panel::Shortcuts);
+    dl_.pop_clip();
+    return;
+  }
+  y += line;
   ui_heading(x, y, T("settings.language"));
   y += 18;
   {

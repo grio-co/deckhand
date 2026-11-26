@@ -788,6 +788,124 @@ paths:
         "404": {$ref: "#/components/responses/NotFound"}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/library/tracks/{id}/history:
+    parameters:
+      - {$ref: "#/components/parameters/TrackId"}
+    get:
+      tags: [Library]
+      operationId: getTrackHistory
+      summary: Edit history of one track
+      description: "Required scope: `library:read`. The journal of field changes, newest first; at most 200 entries are kept per track. `limit` 1..200 (default 50). Entries with source `analysis` (DeckHand's own analysis results) are left out unless `include_analysis=1`."
+      x-scope: "library:read"
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200}}
+        - {name: include_analysis, in: query, schema: {type: string, enum: ["1"]}}
+      responses:
+        "200":
+          description: The edits.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/EditList"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/edits:
+    get:
+      tags: [Library]
+      operationId: listRecentEdits
+      summary: Recent edits across the library
+      description: "Required scope: `library:read`. Newest first; `limit` 1..500 (default 50)."
+      x-scope: "library:read"
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500}}
+        - {name: include_analysis, in: query, schema: {type: string, enum: ["1"]}}
+      responses:
+        "200":
+          description: The edits.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/EditList"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/edits/{id}/undo:
+    parameters:
+      - {name: id, in: path, required: true, description: Edit id., schema: {type: integer, format: int64, minimum: 0}}
+    post:
+      tags: [Library]
+      operationId: undoEdit
+      summary: Undo one edit
+      description: "Required scope: `library:write`. Restores the old value only while the field still holds the value this edit set; otherwise 409 and nothing changes. The undo is journalled with source `undo`."
+      x-scope: "library:write"
+      responses:
+        "200":
+          description: Undone.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/UndoResult"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/edit-batches/{id}/undo:
+    parameters:
+      - {name: id, in: path, required: true, description: "Batch id (`batch_id` of an edit).", schema: {type: integer, format: int64, minimum: 0}}
+    post:
+      tags: [Library]
+      operationId: undoEditBatch
+      summary: Undo every edit of one operation
+      description: "Required scope: `library:write`. All or nothing: if any field changed again since, 409 and nothing is undone."
+      x-scope: "library:write"
+      responses:
+        "200":
+          description: Undone.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/UndoResult"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/trash:
+    get:
+      tags: [Library]
+      operationId: listTrash
+      summary: Removed tracks that can still be restored
+      description: "Required scope: `library:read`. Removed tracks are kept 30 days (with cues, beat grid and playlist places), then purged when the library opens."
+      x-scope: "library:read"
+      responses:
+        "200":
+          description: The removed tracks, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: "#/components/schemas/TrashedTrack"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/trash/{id}/restore:
+    parameters:
+      - {name: id, in: path, required: true, description: Id the track had when it was removed., schema: {type: integer, format: int64, minimum: 0}}
+    post:
+      tags: [Library]
+      operationId: restoreTrack
+      summary: Restore a removed track
+      description: "Required scope: `library:write`. Cues, beat grid and playlist places come back. 409 when the file has been added to the library again under another entry."
+      x-scope: "library:write"
+      responses:
+        "200":
+          description: Restored. `id` is the track's id (usually the old one).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: {type: integer, format: int64}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/library/playlists:
     get:
       tags: [Library]
@@ -1205,6 +1323,195 @@ paths:
               schema: {$ref: "#/components/schemas/Error"}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/library/export/xml:
+    post:
+      tags: [Library]
+      operationId: exportLibraryXml
+      summary: Write the library as DJ library XML
+      description: "Required scope: `export`. Writes the file; the response counts what was written. See docs/INTERCHANGE.md."
+      x-scope: "export"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: {type: string, description: Absolute path on the machine running DeckHand.}
+                playlist_id: {type: integer, format: int64, description: "0 = whole library"}
+                include_playlists: {type: boolean}
+                include_cues: {type: boolean}
+                include_grid: {type: boolean}
+      responses:
+        "200":
+          description: Counts: tracks, playlists, cues, files.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/import/xml:
+    post:
+      tags: [Library]
+      operationId: importLibraryXml
+      summary: Import a DJ library XML file
+      description: "Required scope: `library:write`. All or nothing. `dry_run` does the work and rolls it back, so the counts are exact. Imported changes are journalled with source `import`; fields the user or API edited are kept unless `overwrite_metadata`."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: {type: string, description: Absolute path on the machine running DeckHand.}
+                merge: {type: boolean}
+                overwrite_cues: {type: boolean}
+                overwrite_grid: {type: boolean}
+                overwrite_metadata: {type: boolean}
+                match_by_name: {type: boolean}
+                import_playlists: {type: boolean}
+                import_play_counts: {type: boolean}
+                dry_run: {type: boolean}
+      responses:
+        "200":
+          description: Statistics of the import.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/playlists/{id}/export/m3u8:
+    parameters:
+      - {$ref: "#/components/parameters/PlaylistId"}
+    post:
+      tags: [Library]
+      operationId: exportPlaylistM3u8
+      summary: Write one playlist as M3U8
+      description: "Required scope: `export`. A folder id exports every playlist below it, flattened."
+      x-scope: "export"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: {type: string, description: Absolute path on the machine running DeckHand.}
+                relative_paths: {type: boolean}
+      responses:
+        "200":
+          description: Counts.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/export/m3u8:
+    post:
+      tags: [Library]
+      operationId: exportAllPlaylistsM3u8
+      summary: Write every playlist as M3U8 files
+      description: "Required scope: `export`. One file per playlist, folders as directories."
+      x-scope: "export"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                directory: {type: string, description: Absolute folder.}
+                relative_paths: {type: boolean}
+      responses:
+        "200":
+          description: Counts.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/import/m3u8:
+    post:
+      tags: [Library]
+      operationId: importPlaylistM3u8
+      summary: Import an M3U8 playlist
+      description: "Required scope: `library:write`. `dry_run` reports without writing."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: {type: string, description: Absolute path on the machine running DeckHand.}
+                playlist_name: {type: string}
+                parent: {type: integer, format: int64}
+                merge: {type: boolean}
+                add_missing_tracks: {type: boolean}
+                dry_run: {type: boolean}
+      responses:
+        "200":
+          description: Statistics of the import.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/export/preflight:
+    post:
+      tags: [Library]
+      operationId: exportPreflight
+      summary: Check what a club player can read, before exporting
+      description: "Required scope: `export`. Give `playlist_ids` and/or `track_ids` (none = whole library) and a `profile` (default `club`). 400 for an unknown profile. The body is the compatibility report."
+      x-scope: "export"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                profile: {type: string, default: club}
+                playlist_ids: {type: array, items: {type: integer, format: int64}}
+                track_ids: {type: array, items: {type: integer, format: int64}}
+      responses:
+        "200":
+          description: The report: profile, summary and one entry per track.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/export/report:
+    get:
+      tags: [Export]
+      operationId: getExportReport
+      summary: Compatibility report of the last export
+      description: "Required scope: `library:read`. `report`, `converted` (tracks written as 24-bit WAV) and `remaining_will_not_play`. 404 until an export has run."
+      x-scope: "library:read"
+      responses:
+        "200":
+          description: The report.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/settings/{key}:
     parameters:
       - {name: key, in: path, required: true, description: Setting name (for example `api.port`)., schema: {type: string, maxLength: 64}}
@@ -1474,6 +1781,36 @@ components:
         year: {type: integer, minimum: 0, maximum: 9999}
         color: {type: integer, minimum: 0, maximum: 16777215, description: "Colour tag: 0 = none, else 0xRRGGBB."}
         grid_locked: {type: boolean, description: Lock or unlock the beat grid against analysis.}
+    EditRecord:
+      type: object
+      properties:
+        id: {type: integer, format: int64}
+        track_id: {type: integer, format: int64}
+        batch_id: {type: integer, format: int64, description: Edits made by one operation share it.}
+        field: {type: string, enum: [title, artist, album, genre, key, comment, rating, year, color, bpm, grid_locked]}
+        old_value: {type: string, nullable: true, description: "The column's text form; null = empty."}
+        new_value: {type: string, nullable: true}
+        edited_at: {type: integer, format: int64, description: Unix seconds.}
+        source: {type: string, enum: [user, api, import, sync, undo, analysis]}
+    EditList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/EditRecord"}
+    UndoResult:
+      type: object
+      properties:
+        applied: {type: integer, description: Fields restored.}
+        batch_id: {type: integer, format: int64, description: The journal batch the undo was recorded in.}
+    TrashedTrack:
+      type: object
+      properties:
+        id: {type: integer, format: int64}
+        title: {type: string}
+        artist: {type: string}
+        path: {type: string}
+        deleted_at: {type: integer, format: int64, description: Unix seconds.}
     Playlist:
       type: object
       required: [id, parent, name, folder, tracks]
@@ -1526,6 +1863,8 @@ components:
         destination: {type: string, description: Absolute destination folder, e.g. a mounted drive.}
         playlist_id: {type: integer, format: int64, default: 0, description: Playlist to export; 0 = whole library (including every smart playlist).}
         smart_playlist_id: {type: integer, format: int64, default: 0, description: Smart playlist to export as an ordinary playlist of the tracks it matches now. Not together with playlist_id.}
+        convert_incompatible: {type: boolean, default: false, description: "Write 32-bit and float WAV/AIFF as 24-bit WAV on the stick (the source is never changed). The result is in GET /v1/export/report."}
+        player_profile: {type: string, default: club, description: Rule table of the compatibility check. Unknown = 400.}
     PathRequest:
       type: object
       required: [path]

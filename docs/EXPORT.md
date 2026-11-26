@@ -7,7 +7,7 @@ sections) and the crate-digger Kaitai descriptions (`rekordbox_pdb.ksy`, `rekord
 GPL code were used. **Nothing here has been verified on hardware or against a vendor-made export yet**; every
 guess is listed below so the comparison harness can regression-test it the day a reference stick exists.
 
-API: `src/export/include/deckhand/export/export.hpp` (`export_usb`, `read_export`; bool + error string, no
+API: `src/export/include/deckhand/export/export.hpp` (`export_usb`, `read_export`; compatibility check in `export_preflight.hpp`; bool + error string, no
 exceptions) and `export_check.hpp` (`validate_export`, `compare_exports`, `sanitize_fs_name`, `fat_path_problems`).
 
 ## Layout written
@@ -154,6 +154,55 @@ ANLZ
     from the `.2EX` file in the protocol analysis, so both are written there. PQT2 / PSSI: see above (omitted).
 20. **Undocumented.** The `P<3 hex>/<8 hex>` folder naming is not described in the sources; only the path stored
     in track string 14 matters to a player. Written: hash-like value derived from the track id, unique per id.
+
+## Compatibility check (`export_preflight.hpp`, `format_probe.hpp`)
+Players read fewer formats than a computer does. The classic trap is 32-bit float WAV: it plays everywhere on a
+computer and silently fails to load in the club. `preflight_export(tracks, profile)` finds such files **before**
+the stick is taken anywhere; `export_usb(..., ExportResult&)` carries the same report back with every export.
+
+- **Probe** (`probe_format(path)`): dependency-free header sniffer, bounded reads, never reads a whole file and
+  never throws. Returns container, codec, sample rate, bit depth, float-vs-integer, channels, MP3 bitrate/VBR.
+  Covers WAV (fmt chunk, WAVE_FORMAT_EXTENSIBLE sub-format GUIDs, IEEE float, RF64/BW64), AIFF/AIFC (COMM, `NONE`,
+  `twos`, `sowt`, `fl32`/`fl64`, `in24`/`in32`), FLAC (STREAMINFO), MP3 (ID3v2 skipped, first frame confirmed by
+  the next, Xing/Info/VBRI), MP4/M4A (atoms down to `stsd`: AAC vs ALAC, ALAC depth and rate from its cookie,
+  FairPlay `sinf`/`drms`/`M4P ` brand = copy-protected), Ogg (Opus/Vorbis), ASF/WMA. Anything else, truncated or
+  hostile input comes back `recognized=false` (or `truncated=true`); the tests cut every format at many offsets.
+- **Rule table** (`player_profiles()`, one table in `export_preflight.cpp`, data only): profiles `club` (current
+  generation, default) and `club_legacy` (FLAC/ALAC refused). The first matching rule decides; each rule has a
+  stable id, a plain-language message and a source flag. **`documented`** = the project's list of known-solid
+  rules; **`unverified`** = a conservative guess. **None of the table was checked against hardware. Before
+  trusting it, check every rule against the manual of the player you will use, and edit the table.**
+
+  | id | verdict | source |
+  |---|---|---|
+  | `pcm.float` (32/64-bit float WAV/AIFF) | will not play | documented |
+  | `pcm.int32` (32-bit integer WAV/AIFF) | will not play | documented |
+  | `pcm.ok` (16/24-bit integer, 44.1/48/88.2/96 kHz) | ok | documented |
+  | `mp3.ok`, `aac.ok` (44.1/48 kHz) | ok | documented |
+  | `flac.ok`, `alac.ok` (<= 24-bit, <= 96 kHz) | warning: current players read it, older ones cannot (`club_legacy`: will not play) | documented |
+  | `opus.unsupported`, `vorbis.unsupported`, `ogg.unsupported`, `wma.unsupported` | will not play | documented |
+  | `drm.protected` (`.m4p`, FairPlay) | will not play | documented |
+  | `pcm.rate` (16/24-bit at another rate, e.g. 192 kHz), `pcm.bits` (8-bit), `pcm.little_endian_aiff`, `mp3.rate`, `mp3.layer` (layer I/II), `aac.rate` | warning | unverified |
+  | `pcm.codec` (ADPCM, A-law, ... in WAV/AIFF), `flac.depth|rate`, `alac.depth|rate` (> 24-bit or > 96 kHz), `format.unsupported` | will not play | unverified |
+
+  Stick-level checks (not in the table): `source.missing`, `source.empty`, `file.too_large` (> 4 GB on FAT32),
+  `path.too_long` (database path > 500 bytes), `name.changed` (characters FAT32/exFAT cannot store: renamed on
+  the stick), `file.unrecognized` / `file.damaged`, `ext.mismatch` (named .mp3 but contains WAV: players choose
+  the decoder by name).
+- **Report**: per track `ok` / `warning` / `will_not_play`, the issues with reason id, message and source flag, and
+  `fixable`. `PreflightReport::text()` and `to_json()` render it. The export itself never refuses because of the
+  report: it proceeds and returns the report in `ExportResult`.
+- **Fix** (`ExportOptions::convert_incompatible`, default off): a fixable file is written to the stick as a 24-bit
+  integer PCM WAV (`<name>.wav`, clamped, no dithering, sample rate kept). The user's source is only ever read.
+  The database row describes the converted file (name, size, file type WAV, bitrate = rate x 24 x channels,
+  sample depth 24), the ANLZ path and `validate_export` agree with it. A converted file is never reused from a
+  previous export; a name clash gets a ` (2)` suffix as usual.
+  **Limits**: this module has no decoder (it must not depend on `audio`), so the conversion is done straight from
+  the parsed header, as pure byte conversion, and only covers 32-bit integer and 32/64-bit float **WAV/AIFF/AIFF-C**
+  (mono or stereo, at 44.1/48/88.2/96 kHz). Files at other rates would need resampling, which is out of scope: they
+  stay `will_not_play` and the message says so. FLAC, ALAC, Ogg and the rest are not converted; re-encode them in an
+  audio editor. Converted files carry no tags (the database holds the metadata) and are limited to < 4 GB.
+- Tests: `tests/test_export_preflight.cpp`.
 
 ## Validator: `validate_export(root, report, options)`
 Reads the stick only. Errors (stable codes in `ValidationReport::issues`): `pdb.header`, `pdb.table_range`,

@@ -132,7 +132,30 @@ final class ShellView: NSView {
 
   // keyboard ---------------------------------------------------------------------------------------------
   override func flagsChanged(with event: NSEvent) { sendModifiers(event) }
+  /// macOS virtual key codes -> USB HID keyboard usages (the physical key the core's shortcuts are bound to).
+  private static let hidFromMac: [UInt16: UInt32] = [
+    0: 4, 11: 5, 8: 6, 2: 7, 14: 8, 3: 9, 5: 10, 4: 11, 34: 12, 38: 13, 40: 14, 37: 15, 46: 16, 45: 17, 31: 18, 35: 19,
+    12: 20, 15: 21, 1: 22, 17: 23, 32: 24, 9: 25, 13: 26, 7: 27, 16: 28, 6: 29,
+    18: 30, 19: 31, 20: 32, 21: 33, 23: 34, 22: 35, 26: 36, 28: 37, 25: 38, 29: 39,
+    36: 40, 53: 41, 51: 42, 48: 43, 49: 44, 27: 45, 24: 46, 33: 47, 30: 48, 42: 49, 41: 51, 39: 52, 50: 53, 43: 54, 47: 55, 44: 56,
+    122: 58, 120: 59, 99: 60, 118: 61, 96: 62, 97: 63, 98: 64, 100: 65, 101: 66, 109: 67, 103: 68, 111: 69,
+    105: 104, 107: 105, 113: 106,
+    114: 73, 115: 74, 116: 75, 117: 76, 119: 77, 121: 78, 124: 79, 123: 80, 125: 81, 126: 82,
+    71: 83, 75: 84, 67: 85, 78: 86, 69: 87, 76: 88, 83: 89, 84: 90, 85: 91, 86: 92, 87: 93, 88: 94, 89: 95, 91: 96, 92: 97, 82: 98, 65: 99,
+  ]
+
+  /// The shortcuts see every key (including releases, for held cues). A key a shortcut takes is not typed or navigated.
+  private func sendKey(_ event: NSEvent, down: Bool) -> Bool {
+    let mods = shell.modifiers(event)
+    dh_app_modifiers(shell.core, mods)
+    let character = event.charactersIgnoringModifiers?.unicodeScalars.first?.value ?? 0
+    return dh_app_key_event(shell.core, Self.hidFromMac[event.keyCode] ?? 0, character < 0xF700 ? character : 0, mods, down, down && event.isARepeat)
+  }
+  override func keyUp(with event: NSEvent) {
+    if !sendKey(event, down: false) { super.keyUp(with: event) }
+  }
   override func keyDown(with event: NSEvent) {
+    if sendKey(event, down: true) { return }
     let mods = shell.modifiers(event)
     let keys: [UInt16: dh_key] = [126: DH_KEY_UP, 125: DH_KEY_DOWN, 123: DH_KEY_LEFT, 124: DH_KEY_RIGHT,
                                   36: DH_KEY_ENTER, 76: DH_KEY_ENTER, 53: DH_KEY_ESCAPE, 51: DH_KEY_BACKSPACE, 48: DH_KEY_TAB]
@@ -255,7 +278,10 @@ final class ShellEntry: NSObject, NSWindowDelegate {
   func windowDidChangeScreen(_ notification: Notification) { view.syncDrawable() }
   func windowDidChangeBackingProperties(_ notification: Notification) { view.syncDrawable() }
   func windowDidBecomeKey(_ notification: Notification) { dh_app_window_event(shell.core, id, DH_WE_FOCUS, 1, 0) }
-  func windowDidResignKey(_ notification: Notification) { dh_app_window_event(shell.core, id, DH_WE_FOCUS, 0, 0) }
+  func windowDidResignKey(_ notification: Notification) {
+    dh_app_key_release_all(shell.core)  // a key still held (cue) must not stay down
+    dh_app_window_event(shell.core, id, DH_WE_FOCUS, 0, 0)
+  }
   func windowDidMiniaturize(_ notification: Notification) { dh_app_window_event(shell.core, id, DH_WE_MINIMIZED, 1, 0) }
   func windowDidDeminiaturize(_ notification: Notification) { dh_app_window_event(shell.core, id, DH_WE_MINIMIZED, 0, 0) }
   func windowShouldClose(_ sender: NSWindow) -> Bool {

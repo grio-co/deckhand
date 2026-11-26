@@ -43,11 +43,31 @@ TrackAnalysis analyse_track(const TrackAudio& audio) {
     out.key = r.key.wheel;
     out.has_key = true;
   }
+  out.has_audible = r.has_audible;
+  out.first_audible_ms = r.first_audible_ms;
+  out.last_audible_ms = r.last_audible_ms;
+  out.suggested_cue_ms = r.suggested_cue_ms;
   if (r.loudness.ok) {
     out.gain_db = auto_gain_db(r.loudness);
     out.has_gain = true;
   }
   return out;
+}
+
+double initial_cue_ms(Library& lib, std::int64_t track_id, const TrackAudio& audio) {
+  TrackCues c = lib.track_cues(track_id);
+  if (c.main_cue_ms) return *c.main_cue_ms;
+  const std::string mode = lib.setting("load_cue_mode", "first_downbeat");
+  if (mode == "file_start") return 0;
+  if (!c.first_sound_ms && !c.load_cue_ms && audio.frames > 0 && !audio.pcm.empty()) {
+    const AudibleRange r = find_audible_range(audio.pcm.data(), audio.frames, audio.sample_rate);
+    if (r.ok) {
+      c.first_sound_ms = r.first_ms;
+      lib.set_analysis_cues(track_id, std::nullopt, r.first_ms);
+    }
+  }
+  if (mode == "first_sound") return c.first_sound_ms.value_or(0);
+  return c.load_cue_ms ? *c.load_cue_ms : c.first_sound_ms.value_or(0);
 }
 
 }  // namespace deckhand

@@ -53,7 +53,7 @@ them in [CHANGELOG.md](CHANGELOG.md).
       removing tombstones altogether needs per-device acknowledgements
 - [x] Sync grid locks, smart playlists and the browser settings
 - [ ] Preparation follow-ups: reorder
-      columns by dragging headers; fade when a preview replaces another; persist the main cue point;
+      columns by dragging headers; fade when a preview replaces another;
       tests for the USB export glue; pinch zoom
 - [ ] Bluetooth MIDI pairing: try with a real device
 - [ ] Skins: port shaped and multi-window skins to the Windows and Linux shells (docs/SHELL-WINDOWS.md);
@@ -67,6 +67,78 @@ them in [CHANGELOG.md](CHANGELOG.md).
       then the CDJ-3000 test; 11 format details are still undocumented guesses
 - [ ] Vendored dependencies for portable builds; CI does not yet run the shell screenshot checks
 - [ ] iOS app (pull request open; touch layout pending; add `design/icon/ios/AppIcon.appiconset`)
+
+## Target feature set (owner's list, 2026-11-26: parity with the leading club-standard prep and
+## performance software, and more). `[x]` exists, `[~]` partly or in progress, `[ ]` not started.
+
+Library and discovery
+- [x] Analysis: BPM, variable beat grid, key, loudness, three-band waveforms
+- [x] First-sound load cue (user's main cue remembered), grid drift fix, downbeat tests (synthetic audio only)
+- [ ] Phrase analysis (intro / verse / chorus / breakdown / outro) shown on the waveform
+- [ ] Vocal position detection on the waveform (falls out of stems)
+- [ ] Automatic hot cue and memory cue suggestions from phrases and from the user's own cue habits
+- [ ] Track suggestions from the library by tempo, key, genre, energy and play history
+- [~] Two-player audition for set preparation (preview player exists; add a second player, EQ, crossfader)
+- [~] Browser: column view, filters and smart playlists exist; add layout presets, a second browser
+      pane, recursive folder view, automatic relocation of missing files
+- [ ] Shared (collaborative) playlists through the sync folder
+- [x] Metadata safety: edit history, undo, restorable trash (API and CLI; no trash or history screen yet)
+- [x] Library import/export through the common DJ library XML and M3U8 (untested against other applications' files)
+- [ ] Streaming services and promo pools: each needs a partner agreement and account; pick services
+      with the owner before any work
+- [x] USB export for club players (offline-verified; hardware test pending)
+- [x] Export compatibility check and on-stick 24-bit conversion (rule table unverified against hardware; no panel for the report yet)
+- [ ] SD card export, and backup/restore of an exported device library
+
+Performance
+- [x] Four decks, beat sync, key shift/lock, quantise, slip, loops, sampler, effect slots, colour effects
+- [ ] Key sync (match keys automatically); 16 hot cue slots per track (check current count)
+- [~] Stems: offline separation with a disk cache (in progress); then per-deck stem playback,
+      mute/solo/FX per stem, stem pads on controllers
+- [ ] Linked mix points: tie a cue in one track to a cue in another for a timed hand-over
+- [ ] Sampler: 16 slots, 8-pattern step sequencer, sample scratch, loop slicing
+- [ ] More effects: beat-synced set, build-up/drop "merge" effect, isolator and mixer-style effects
+- [ ] Timecode vinyl control (DVS): needs an audio interface with phono inputs to test
+- [x] MIDI learn, custom mappings (`.dhmap`), master output from the computer
+- [~] Custom keyboard shortcuts: keymap, defaults, panel (never run on screen; Linux change uncompiled; Windows on fixed keys)
+
+Visuals, lighting, recording
+- [ ] Video decks: mix video files, stills and camera input in step with the audio
+- [ ] Lighting: DMX output (Art-Net / sACN / USB DMX) driven by beats and phrases
+- [x] Mix recording
+- [ ] Record from an analogue input (vinyl) with track splitting; export an edited track
+
+Sync
+- [x] Library sync through any replicated folder, passphrase-encrypted
+- [ ] Sync the audio files themselves (optional, per playlist) and analysis data, so a second
+      device needs no re-analysis
+- [ ] Loading from cloud storage directly on club players is a closed vendor service: not possible
+      clean-room; the answer here is fast, verified USB/SD export
+
+Gaps in the incumbent that DeckHand should close (owner's list, 2026-11-26)
+- [~] Pre-analysed stems with a disk cache (in progress; no model ships until one has clearly
+      permissive weights); then stems written to the USB stick as ordinary tracks for players
+      that cannot separate
+- [~] Fluid beat grid: drifting tempo, live drummers and tempo jumps become as many sections as
+      needed (within ~10 ms on synthetic tests); untested on real recordings
+- [ ] Cues follow the grid: when the grid is shifted or re-anchored, offer to move hot cues, memory
+      cues and loops with it (per edit, undoable)
+- [ ] Remove analysis selectively across many tracks (grid, key, phrases, vocals, stems, waveform,
+      gain) without re-analysing the rest
+- [ ] Automix with per-track in/out points, play length, transition type and beat-matched hand-over;
+      queue with "play next" insertion instead of append-only
+- [ ] Library clean-up: duplicate finder (same audio, different file or tags) with merge of cues and
+      playlists; opt-in metadata and key fill from an open music database
+- [ ] Effect chains: user-ordered chains with routing per deck/stem/master; host Audio Unit / VST3
+      plug-ins in the engine process (crash-isolated)
+- [~] Any controller: open `.dhmap` mappings and learn exist; ship mappings for common controllers
+      from other makers (each untested until someone has the hardware)
+- [x] No paid tiers: recording, two-player preparation, filters and sync are in the one free build
+- [x] Sync through any replicated folder, not tied to one cloud provider
+
+Beyond the list
+- [x] Skins with shaped, floating windows; REST + WebSocket API; engine in its own process;
+      OBS integration; portable mode; no account, no subscription
 
 ## Known limits of the current build
 - Tracks are decoded fully into memory.

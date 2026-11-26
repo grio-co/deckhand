@@ -14,6 +14,7 @@ struct ImportOptions {
   std::string key;            // database key, supplied by the user's local configuration
   std::string analysis_root;  // folder that analysis file paths are relative to
   std::string scratch_dir;    // where the working copy is placed
+  bool overwrite_edited = false;  // true: imported values replace fields the user or the API edited (default: kept)
 };
 
 struct ImportStats {

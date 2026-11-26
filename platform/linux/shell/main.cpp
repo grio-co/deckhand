@@ -118,6 +118,9 @@ std::uint32_t modifiers(SDL_Keymod m) {
   return mods;
 }
 
+// The character a key types without modifiers (SDL keycodes of printable keys are their Unicode code points), else 0.
+uint32_t key_char(SDL_Keycode k) { return k >= 0x20 && k < 0x7F ? static_cast<uint32_t>(k) : 0; }
+
 int map_key(SDL_Keycode k) {
   switch (k) {
     case SDLK_UP: return DH_KEY_UP;
@@ -317,8 +320,15 @@ int main(int argc, char** argv) {
       switch (e.type) {
         case SDL_EVENT_QUIT:
         case SDL_EVENT_WINDOW_CLOSE_REQUESTED: running = false; break;
-        case SDL_EVENT_WINDOW_FOCUS_LOST: sync_mods(0); break;
-        case SDL_EVENT_KEY_UP: sync_mods(modifiers(e.key.mod)); break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+          sync_mods(0);
+          dh_app_key_release_all(core);
+          break;
+        case SDL_EVENT_KEY_UP:
+          sync_mods(modifiers(e.key.mod));
+          // SDL3 scancodes are USB HID usages, which is what the core's keyboard shortcuts are bound to.
+          dh_app_key_event(core, static_cast<uint32_t>(e.key.scancode), key_char(e.key.key), modifiers(e.key.mod), false, false);
+          break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
           sync_mods(modifiers(SDL_GetModState()));
           if (e.button.button == SDL_BUTTON_LEFT)
@@ -339,6 +349,8 @@ int main(int argc, char** argv) {
         }
         case SDL_EVENT_KEY_DOWN: {
           sync_mods(modifiers(e.key.mod));
+          if (dh_app_key_event(core, static_cast<uint32_t>(e.key.scancode), key_char(e.key.key), modifiers(e.key.mod), true, e.key.repeat))
+            break;  // a shortcut took the key (its text event is dropped by the core)
           const int key = map_key(e.key.key);
           if (key) dh_app_key(core, static_cast<dh_key>(key), modifiers(e.key.mod));
           break;
