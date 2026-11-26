@@ -284,6 +284,8 @@ elseif(UNIX)
   add_library(dh_platform STATIC ${linux_srcs})
   target_link_libraries(dh_platform PUBLIC dh_audio dh_midi PkgConfig::FFMPEG PkgConfig::ALSA)
 endif()
+# The export glue decodes files, and decode_file() lives in the platform library (link order matters to GNU ld).
+target_link_libraries(dh_services PUBLIC dh_platform)
 
 # ---- programs -----------------------------------------------------------------
 # The audio engine in its own process: owns the output device, recorder and controller hub so the UI can crash
