@@ -158,7 +158,10 @@ bool RemoteEngine::establish(std::string& error, bool allow_spawn, bool& spawned
     std::uint32_t child = 0;
     if (!spawn_detached(helper, args, opt_.data_dir + "/deckhand-engine.out", child, error)) return false;
     spawned = true;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    // On a heavily loaded machine the helper has taken over 20 s to open its devices and answer.
+    // The loop below already stops early if the helper exits, so a generous limit costs nothing
+    // in the normal case and avoids falling back to in-process audio with a late helper left running.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     bool up = false;
     while (std::chrono::steady_clock::now() < deadline) {
       bool mismatch = false;
