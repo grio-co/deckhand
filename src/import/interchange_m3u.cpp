@@ -314,6 +314,10 @@ InterchangeStats import_playlist_m3u8(Library& lib, const std::string& path, con
       } else if (p[0] == '/') {
         p = generic_utf8(from_utf8(p).lexically_normal());
       }
+#ifdef _WIN32
+      for (char& c : p)  // native separators, so paths match the library's
+        if (c == '/') c = '\\';
+#endif
       e.path = p;
       entries.push_back(std::move(e));
     }
