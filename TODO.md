@@ -62,7 +62,7 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [ ] USB export: run `compare_exports` against a reference stick (docs/EXPORT.md says how to make one),
       then the CDJ-3000 test; 11 format details are still undocumented guesses
 - [ ] Vendored dependencies for portable builds; CI does not yet run the shell screenshot checks
-- [ ] iOS app (pull request open; touch layout pending)
+- [ ] iOS app (pull request open; touch layout pending; add `design/icon/ios/AppIcon.appiconset`)
 
 ## Known limits of the current build
 - Tracks are decoded fully into memory.

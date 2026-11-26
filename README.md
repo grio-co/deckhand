@@ -1,5 +1,7 @@
 # DeckHand
 
+<img src="design/icon/deckhand-icon-512.png" width="128" alt="DeckHand icon">
+
 [![CI](https://github.com/grio-co/deckhand/actions/workflows/ci.yml/badge.svg)](https://github.com/grio-co/deckhand/actions/workflows/ci.yml)
 
 A stable, skinnable, cross-platform DJ application with CDJ-compatible USB export and a

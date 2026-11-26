@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="100 100 824 824" width="1024" height="1024">
+<g transform="rotate(22.5 512 512)"><rect x="491" y="172" width="42" height="260" fill="#000"/><rect x="478" y="110" width="68" height="112" rx="34" fill="#000"/></g>
+<g transform="rotate(67.5 512 512)"><rect x="491" y="172" width="42" height="260" fill="#000"/><rect x="478" y="110" width="68" height="112" rx="34" fill="#000"/></g>
+<g transform="rotate(112.5 512 512)"><rect x="491" y="172" width="42" height="260" fill="#000"/><rect x="478" y="110" width="68" height="112" rx="34" fill="#000"/></g>
+<g transform="rotate(157.5 512 512)"><rect x="491" y="172" width="42" height="260" fill="#000"/><rect x="478" y="110" width="68" height="112" rx="34" fill="#000"/></g>
+<g transform="rotate(202.5 512 512)"><rect x="491" y="172" width="42" height="260" fill="#000"/><rect x="478" y="110" width="68" height="112" rx="34" fill="#000"/></g>
+<g transform="rotate(247.5 512 512)"><rect x="491" y="172" width="42" height="260" fill="#000"/><rect x="478" y="110" width="68" height="112" rx="34" fill="#000"/></g>
+<g transform="rotate(292.5 512 512)"><rect x="491" y="172" width="42" height="260" fill="#000"/><rect x="478" y="110" width="68" height="112" rx="34" fill="#000"/></g>
+<g transform="rotate(337.5 512 512)"><rect x="491" y="172" width="42" height="260" fill="#000"/><rect x="478" y="110" width="68" height="112" rx="34" fill="#000"/></g>
+<circle cx="512" cy="512" r="311" fill="none" stroke="#000" stroke-width="26" />
+<circle cx="512" cy="512" r="199" fill="none" stroke="#000" stroke-width="26" />
+<circle cx="512" cy="512" r="278" fill="none" stroke="#000" stroke-width="8" opacity="0.55" />
+<circle cx="512" cy="512" r="250" fill="none" stroke="#000" stroke-width="8" opacity="0.55" />
+<circle cx="512" cy="512" r="224" fill="none" stroke="#000" stroke-width="8" opacity="0.55" />
+<circle cx="512" cy="512" r="124" fill="#000" />
+<rect x="500" y="200" width="24" height="126" rx="6" fill="#000"/>
+</svg>

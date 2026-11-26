@@ -4,6 +4,7 @@
 <dict>
   <key>CFBundleName</key><string>DeckHand</string>
   <key>CFBundleDisplayName</key><string>DeckHand</string>
+  <key>CFBundleIconFile</key><string>DeckHand</string>
   <key>CFBundleExecutable</key><string>DeckHand</string>
   <key>CFBundleIdentifier</key><string>@BUNDLE_ID@</string>
   <key>CFBundlePackageType</key><string>APPL</string>

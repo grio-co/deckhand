@@ -6,6 +6,10 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Application icon: a ship's helm whose rim is a record. macOS .icns, Windows .ico, Linux
+  desktop icons and window icon, an iOS icon set, overlay favicon; `tools/make_icons.sh`
+  regenerates everything ([docs/BRAND.md](docs/BRAND.md)).
+- Skin concepts: ten skull skin mockups in `design/skull-skins/` (designs only, not yet skins).
 - Windows: the engine runs as a separate process by default (music survives a UI crash or
   kill; the UI re-attaches); `deckhandctl hid` lists HID devices; engine-check scripts.
 - SQLCipher is now built from a pinned, vendored source on every platform with full-text

@@ -53,6 +53,7 @@ swiftc -O -swift-version 5 \
   -framework CoreMIDI -framework IOKit -framework CoreAudioKit -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
 
 cp "$ROOT"/controllers/*.dhmap "$APP/Contents/Resources/controllers/"
+cp "$ROOT/platform/macos/DeckHand.icns" "$APP/Contents/Resources/DeckHand.icns"
 cp -R "$ROOT/resources/lang" "$ROOT/resources/skins" "$APP/Contents/Resources/"
 sed -e "s/@BUNDLE_ID@/$BUNDLE_ID/" -e "s/@VERSION@/$VERSION/g" \
     -e "s/@MIN_OS@/$(sw_vers -productVersion | cut -d. -f1).0/" \

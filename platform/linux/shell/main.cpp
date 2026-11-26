@@ -26,6 +26,7 @@
 #include "deckhand/app/capi.h"
 #include "deckhand/audio/engine.hpp"
 #include "renderer.hpp"
+#include "window_icon.hpp"
 #include "text.hpp"
 
 namespace fs = std::filesystem;
@@ -243,6 +244,11 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "DeckHand needs OpenGL 3.3 or OpenGL ES 3.0: %s\n", SDL_GetError());
     SDL_Quit();
     return 1;
+  }
+  if (SDL_Surface* icon = SDL_CreateSurfaceFrom(kWindowIconSize, kWindowIconSize, SDL_PIXELFORMAT_ABGR8888,
+                                                const_cast<std::uint32_t*>(kWindowIconPixels), kWindowIconSize * 4)) {
+    SDL_SetWindowIcon(window, icon);  // task bar and window list on X11; Wayland uses the .desktop icon
+    SDL_DestroySurface(icon);
   }
   SDL_SetWindowMinimumSize(window, 1100, 700);
   const bool vsync = SDL_GL_SetSwapInterval(1);

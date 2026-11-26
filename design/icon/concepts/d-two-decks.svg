@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<defs>
+<linearGradient id="bg" x1="0.15" y1="0" x2="0.85" y2="1"><stop offset="0" stop-color="#14405E"/><stop offset="1" stop-color="#07121F"/></linearGradient>
+<radialGradient id="bgGlow" cx="0.5" cy="0.42" r="0.6"><stop offset="0" stop-color="#2FE0C6" stop-opacity="0.16"/><stop offset="1" stop-color="#2FE0C6" stop-opacity="0"/></radialGradient>
+<radialGradient id="shadow" cx="0.5" cy="0.56" r="0.45"><stop offset="0.7" stop-color="#000" stop-opacity="0.38"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+<linearGradient id="brass" x1="0.1" y1="0" x2="0.9" y2="1"><stop offset="0" stop-color="#FFE0A0"/><stop offset="0.5" stop-color="#F0A93A"/><stop offset="1" stop-color="#9C5A17"/></linearGradient>
+<linearGradient id="brassR" x1="0.9" y1="0" x2="0.1" y2="1"><stop offset="0" stop-color="#FFE0A0"/><stop offset="0.55" stop-color="#F0A93A"/><stop offset="1" stop-color="#9C5A17"/></linearGradient>
+<linearGradient id="vinyl" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#233246"/><stop offset="0.5" stop-color="#0C141E"/><stop offset="1" stop-color="#05090E"/></linearGradient>
+<linearGradient id="label" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#B8FFF2"/><stop offset="0.5" stop-color="#2FE0C6"/><stop offset="1" stop-color="#0E8F86"/></linearGradient>
+</defs>
+<rect width="1024" height="1024" fill="url(#bg)"/><rect width="1024" height="1024" fill="url(#bgGlow)"/><rect width="1024" height="1024" fill="url(#shadow)"/>
+<circle cx="362" cy="512" r="272" fill="url(#brassR)" />
+<circle cx="362" cy="512" r="250" fill="url(#vinyl)" />
+<circle cx="362" cy="512" r="225" fill="none" stroke="#fff" stroke-width="2.5" opacity="0.1" />
+<circle cx="362" cy="512" r="200" fill="none" stroke="#fff" stroke-width="2.5" opacity="0.1" />
+<circle cx="362" cy="512" r="175" fill="none" stroke="#fff" stroke-width="2.5" opacity="0.1" />
+<circle cx="362" cy="512" r="78" fill="url(#label)" />
+<circle cx="362" cy="512" r="13" fill="#07121F" />
+<circle cx="662" cy="512" r="272" fill="url(#brassR)" />
+<circle cx="662" cy="512" r="250" fill="url(#vinyl)" />
+<circle cx="662" cy="512" r="225" fill="none" stroke="#fff" stroke-width="2.5" opacity="0.1" />
+<circle cx="662" cy="512" r="200" fill="none" stroke="#fff" stroke-width="2.5" opacity="0.1" />
+<circle cx="662" cy="512" r="175" fill="none" stroke="#fff" stroke-width="2.5" opacity="0.1" />
+<circle cx="662" cy="512" r="78" fill="url(#brass)" />
+<circle cx="662" cy="512" r="13" fill="#07121F" />
+<clipPath id="lensA"><circle cx="362" cy="512" r="272"/></clipPath>
+<g clip-path="url(#lensA)"><circle cx="662" cy="512" r="272" fill="#2FE0C6" opacity="0.28"/></g>
+<rect x="172" y="812" width="680" height="34" rx="17" fill="#0C141E" stroke="url(#brass)" stroke-width="8"/>
+<rect x="452" y="782" width="120" height="94" rx="22" fill="url(#brass)"/>
+<rect x="506" y="792" width="12" height="74" rx="6" fill="#0C141E"/>
+</svg>
