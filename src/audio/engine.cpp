@@ -336,6 +336,9 @@ struct Engine::Impl {
     double pos = 0;
     bool playing = false, master = false, drop = false;
     float level = 0.7f, amp = 0;
+    LoadedTrack* old = nullptr;  // the preview just replaced, fading out under the new one
+    double old_pos = 0;
+    float old_amp = 0;
   } pv;
   float prev_bus[kChunk * 2];  // the preview of this chunk, level applied
   Snapshot<PreviewView> preview_view;
@@ -1084,7 +1087,14 @@ struct Engine::Impl {
       case Op::PreviewLoad: {
         LoadedTrack* nt = c.track;
         if (!nt) return true;
-        if (pv.trk) garbage.push(pv.trk);
+        if (pv.trk && pv.amp > 1e-3f) {  // audible: let it fade instead of stopping dead
+          if (pv.old) garbage.push(pv.old);
+          pv.old = pv.trk;
+          pv.old_pos = pv.pos;
+          pv.old_amp = pv.amp;
+        } else if (pv.trk) {
+          garbage.push(pv.trk);
+        }
         pv.drop = false;
         pv.trk = nt;  // a new preview starts paused: the caller decides when it is heard
         pv.pos = 0;
@@ -1884,6 +1894,26 @@ struct Engine::Impl {
     // pre-listen: headphones only (the master only when asked), linear interpolation like a deck, short fades at start / stop
     {
       std::memset(prev_bus, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
+      bool heard = false;
+      if (pv.old) {  // about 80 ms from full level to silence
+        const TrackAudio& a = *pv.old->audio;
+        const double ratio = static_cast<double>(a.sample_rate) / sr;
+        const std::int64_t total = static_cast<std::int64_t>(a.frames);
+        const float decay = static_cast<float>(std::exp(-1.0 / (0.012 * sr)));
+        for (int i = 0; i < n; ++i) {
+          float l = 0, r = 0;
+          if (pv.old_pos < static_cast<double>(total)) read_frame(a.data(), total, pv.old_pos, l, r);
+          prev_bus[i * 2] = l * pv.old_amp * pv.level;
+          prev_bus[i * 2 + 1] = r * pv.old_amp * pv.level;
+          pv.old_amp *= decay;
+          pv.old_pos += ratio;
+        }
+        heard = true;
+        if (pv.old_amp <= 1e-3f) {
+          garbage.push(pv.old);
+          pv.old = nullptr;
+        }
+      }
       if (pv.trk && (pv.playing || pv.amp > 1e-4f)) {
         const TrackAudio& a = *pv.trk->audio;
         const double ratio = static_cast<double>(a.sample_rate) / sr;
@@ -1893,8 +1923,8 @@ struct Engine::Impl {
           pv.amp += ((pv.playing ? 1.0f : 0.0f) - pv.amp) * slew;
           float l = 0, r = 0;
           if (pv.pos < static_cast<double>(total)) read_frame(a.data(), total, pv.pos, l, r);
-          prev_bus[i * 2] = l * pv.amp * pv.level;
-          prev_bus[i * 2 + 1] = r * pv.amp * pv.level;
+          prev_bus[i * 2] += l * pv.amp * pv.level;
+          prev_bus[i * 2 + 1] += r * pv.amp * pv.level;
           if (pv.playing) {
             pv.pos += ratio;
             if (pv.pos >= static_cast<double>(total)) {
@@ -1903,8 +1933,7 @@ struct Engine::Impl {
             }
           }
         }
-        if (pv.master)
-          for (int i = 0; i < n * 2; ++i) master[i] += prev_bus[i];
+        heard = true;
         if (pv.drop && pv.amp <= 1e-3f) {
           garbage.push(pv.trk);
           pv.trk = nullptr;
@@ -1918,6 +1947,8 @@ struct Engine::Impl {
         pv.pos = 0;
         pv.drop = false;
       }
+      if (heard && pv.master)
+        for (int i = 0; i < n * 2; ++i) master[i] += prev_bus[i];
     }
 
     // master tempo: the manual value, else the first playing deck
@@ -2678,6 +2709,8 @@ Engine::~Engine() {
     delete d.trk;
     delete d.stems;
   }
+  delete impl_->pv.trk;
+  delete impl_->pv.old;
   collect_garbage();
 }
 

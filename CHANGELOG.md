@@ -6,6 +6,8 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Pre-listen: replacing a playing preview fades the old one out instead of cutting it off.
+- Tests for the library-to-USB export step.
 - Skull skin (`skull`): a shaped, transparent skull with the decks in the eye sockets, one waveform
   ribbon through both eyes, hot cues and stems on the teeth, the mixer in the open mouth, effects
   down the spine, and a ribcage library, femur sampler and bone trays as floating windows.

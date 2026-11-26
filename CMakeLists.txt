@@ -344,6 +344,8 @@ target_link_libraries(test_stems_graph dh_stems)
 target_include_directories(test_stems_graph PRIVATE src/stems)
 target_compile_definitions(test_stems_graph PRIVATE DH_STEMS_TEST_DIR="${CMAKE_SOURCE_DIR}/tools/stems_test_models" DH_STEMS_MODELS_DIR="${CMAKE_SOURCE_DIR}/third_party/models" DH_STEMS_SKELETON_DIR="${CMAKE_SOURCE_DIR}/resources/stem-models/skeletons")
 add_test(NAME test_stems_graph COMMAND test_stems_graph WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+# The export glue test needs the services module as well.
+target_link_libraries(test_usb_export dh_services)
 
 # ---- Linux platform tests (decoder, ALSA sequencer, text rasteriser) -------------------------
 if(UNIX AND NOT APPLE)

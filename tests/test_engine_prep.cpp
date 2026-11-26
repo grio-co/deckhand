@@ -269,6 +269,23 @@ int main() {
     e.preview_load(sine_track(5, 100));
     run(e, 256);
     CHECK(e.preview().loaded && e.preview().length == 220500 && e.preview().position == 0);
+    // replacing one that is playing: it fades out instead of stopping dead, each time
+    e.send(cmd(Op::PreviewPlay, 0, 0, 1));
+    auto before = run(e, 22050);
+    for (int again = 0; again < 2; ++again) {
+      e.preview_load(sine_track(5, 100));
+      auto after = run(e, 441);
+      float first = 0;
+      for (std::size_t i = 0; i < 441; ++i) first = std::max(first, std::fabs(after[i * 4 + 2]));
+      CHECK(first > 0.03f);
+      CHECK(std::fabs(after[2] - before[before.size() - 2]) < 0.03f);  // no step at the swap
+      CHECK(!e.preview().playing && e.preview().position == 0);
+      e.send(cmd(Op::PreviewPlay, 0, 0, 1));
+      before = run(e, 8820);  // long enough for the earlier fade to end
+    }
+    e.send(cmd(Op::PreviewPlay, 0, 0, 0));
+    run(e, 8820);
+    CHECK(first_sound(run(e, 8820), 4, 2, 2205) < 0);
     // routing to the master is an explicit switch
     e.send(cmd(Op::PreviewMaster, 0, 0, 1));
     e.send(cmd(Op::PreviewPlay, 0, 0, 1));

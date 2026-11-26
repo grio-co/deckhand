@@ -53,8 +53,8 @@ them in [CHANGELOG.md](CHANGELOG.md).
       removing tombstones altogether needs per-device acknowledgements
 - [x] Sync grid locks, smart playlists and the browser settings
 - [x] Reorder columns by dragging headers; pinch zoom on the waveform (macOS; not yet tried on a trackpad)
-- [ ] Preparation follow-ups: fade when a preview replaces another; tests for the USB export glue;
-      pinch zoom on Linux, check it on a Windows touchpad
+- [x] Preview fades out when another replaces it; tests for the USB export glue
+- [ ] Preparation follow-ups: pinch zoom on Linux, check it on a Windows touchpad
 - [ ] Bluetooth MIDI pairing: try with a real device
 - [ ] Skins: port shaped and multi-window skins to the Windows and Linux shells (docs/SHELL-WINDOWS.md);
       drag tracks between windows; Window menu and shortcuts are untested; the `skull` skin exists (try it on
