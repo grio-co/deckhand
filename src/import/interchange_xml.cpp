@@ -936,6 +936,9 @@ std::string interchange_url_to_path(const std::string& url) {
   if (out.size() >= 3 && out[0] == '/' && std::isalpha(static_cast<unsigned char>(out[1])) && out[2] == ':' &&
       (out.size() == 3 || out[3] == '/'))
     out.erase(0, 1);  // "/C:/Music" -> "C:/Music"
+#ifdef _WIN32
+  std::replace(out.begin(), out.end(), '/', '\\');  // native separators, so paths match the library's
+#endif
   return out;
 }
 
