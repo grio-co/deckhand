@@ -14,7 +14,8 @@ rm -rf "$W"; mkdir -p "$APP"
 cp "$BUILD/deckhand.exe" "$BUILD/deckhand-engine.exe" "$APP/"
 cp -r "$BUILD/share" "$APP/share"
 : > "$APP/portable"
-export DECKHAND_LOG=info DECKHAND_ENGINE_PROCESS=separate
+export DECKHAND_LOG=info
+unset DECKHAND_ENGINE_PROCESS  # the check is of the default mode
 # a 90 s tone: one second of audio (integer cycles, two beats) repeated
 perl -e 'my $r=44100; my $d=""; for my $i (0..$r-1){ my $t=$i/$r; my $beat=($t*2)-int($t*2); my $env=exp(-8*$beat);
   my $v=int(32767*0.5*($env*sin(6.28318*80*$t)+0.2*sin(6.28318*440*$t))); $d.=pack("s<s<",$v,$v);} $d = $d x 90;

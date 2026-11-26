@@ -69,7 +69,7 @@ function Ok($m) { Write-Host "PASS $m" }
 function Bad($m) { Write-Host "FAIL $m"; $script:Fail = 1 }
 
 $env:DECKHAND_LOG = "info"
-$env:DECKHAND_ENGINE_PROCESS = "separate"
+Remove-Item Env:DECKHAND_ENGINE_PROCESS -ErrorAction SilentlyContinue  # the check is of the default mode
 $Base = "http://127.0.0.1:7373/v1"
 $script:Token = ""
 function Api([string]$Method, [string]$Path, [string]$Body = "") {
