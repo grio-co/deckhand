@@ -1,6 +1,7 @@
 #include "executor.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cstring>
 #include <filesystem>
@@ -13,6 +14,17 @@ namespace fs = std::filesystem;
 namespace {
 constexpr std::int64_t kFoldLimit = 1 << 20;  // larger constant-input results are recomputed instead of kept
 constexpr std::size_t kAlign = 64;
+float half_to_float(std::uint16_t h) {
+  std::uint32_t sign = std::uint32_t(h & 0x8000u) << 16, e = (h >> 10) & 31u, m = h & 1023u, bits;
+  if (e == 0) {
+    if (m == 0) bits = sign;
+    else { int sh = 0; while (!(m & 0x400u)) { m <<= 1; ++sh; } m &= 1023u; bits = sign | (std::uint32_t(113 - sh) << 23) | (m << 13); }
+  } else if (e == 31) bits = sign | 0x7f800000u | (m << 13);
+  else bits = sign | ((e + 112u) << 23) | (m << 13);
+  float f;
+  std::memcpy(&f, &bits, 4);
+  return f;
+}
 std::size_t round_up(std::size_t n) { return (n + kAlign - 1) / kAlign * kAlign; }
 }  // namespace
 
@@ -58,7 +70,8 @@ struct Executor::Impl {
   std::uint8_t* arena = nullptr;
   std::shared_ptr<SharedArena> shared;
   std::size_t arena_size = 0, weights_size = 0;
-  bool planned = false, keep_all = false;
+  bool planned = false, keep_all = false, profiling = false;
+  std::map<std::string, double> prof;
   std::vector<Shape> plan_shapes;
   std::vector<std::shared_ptr<std::vector<std::uint8_t>>> weight_files;
 
@@ -122,14 +135,23 @@ struct Executor::Impl {
         if (!f) { f = load_weights(path); weight_files.push_back(f); }
         std::int64_t numel = 1;
         for (auto d : tp.dims) { if (d < 0 || d > (std::int64_t(1) << 40)) throw GraphError("bad dimension in '" + tp.name + "'"); numel *= d; if (numel > (std::int64_t(1) << 40)) throw GraphError("tensor too large"); }
-        std::int64_t esz = tp.data_type == 1 ? 4 : tp.data_type == 7 ? 8 : 0;
+        std::int64_t esz = tp.data_type == 1 ? 4 : tp.data_type == 7 ? 8 : tp.data_type == 10 ? 2 : 0;
         if (!esz) throw GraphError("external initializer '" + tp.name + "' has an unsupported type");
         std::int64_t len = tp.length >= 0 ? tp.length : numel * esz;
         if (tp.offset < 0 || len != numel * esz || std::uint64_t(tp.offset) + std::uint64_t(len) > f->size())
           throw GraphError("initializer '" + tp.name + "' points outside the weights file");
         Tensor t;
-        t.dt = tp.data_type == 1 ? DType::F32 : DType::I64;
+        t.dt = tp.data_type == 7 ? DType::I64 : DType::F32;
         for (auto d : tp.dims) t.shape.push(d);
+        if (tp.data_type == 10) {  // half precision on disk, float32 compute: widen once at load
+          Tensor w = make_owned(DType::F32, t.shape);
+          const std::uint8_t* src = f->data() + tp.offset;
+          float* dst = w.f();
+          for (std::int64_t i = 0; i < numel; ++i) dst[i] = half_to_float(std::uint16_t(src[2 * i] | (src[2 * i + 1] << 8)));
+          weights_size += w.bytes();
+          v.t = w;
+          continue;
+        }
         t.data = f->data() + tp.offset;
         t.owner = f;
         v.t = t;
@@ -175,6 +197,7 @@ struct Executor::Impl {
       vals[std::size_t(id)].is_output = true;
     }
     for (auto& v : vals) if (v.last_use < v.def) v.last_use = v.def;
+    weight_files.clear();  // tensors that view a file keep it alive themselves; widened (half) files are freed here
     pool = std::make_unique<ThreadPool>(1);
   }
 
@@ -190,9 +213,9 @@ struct Executor::Impl {
     const Tensor* ins[64];
     int nin = int(nd.in.size());
     for (int i = 0; i < nin; ++i) ins[i] = nd.in[std::size_t(i)] < 0 ? nullptr : &vals[std::size_t(nd.in[std::size_t(i)])].t;
-    Tensor outs[16];
+    Tensor outs[64];
     int nout = int(nd.out.size());
-    if (nout > 16) throw GraphError("too many outputs");
+    if (nout > 64) throw GraphError("too many outputs");
     OpCtx c;
     c.pool = pool.get();
     c.scratch = &scratch;
@@ -317,7 +340,9 @@ struct Executor::Impl {
   void fast_run() {
     if (shared) arena = shared->data();
     for (int k : schedule) {
+      auto t0 = profiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
       try { execute(std::size_t(k), false); } catch (const GraphError& e) { throw GraphError(describe(std::size_t(k)) + ": " + e.what()); }
+      if (profiling) prof[nodes[std::size_t(k)].proto->op_type] += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     }
   }
 };
@@ -350,6 +375,8 @@ std::unique_ptr<Executor> Executor::open(const std::string& model_path, const st
   }
 }
 
+void Executor::set_profiling(bool on) { p_->profiling = on; }
+std::map<std::string, double> Executor::profile() const { return p_->prof; }
 void Executor::set_shared_arena(std::shared_ptr<SharedArena> a) { p_->shared = std::move(a); }
 void Executor::set_threads(int t) { p_->pool = std::make_unique<ThreadPool>(t); }
 int Executor::threads() const { return p_->pool->threads(); }

@@ -17,7 +17,14 @@ void sgemm(bool trans_a, bool trans_b, int M, int N, int K, float alpha, const f
 // Always the portable implementation (used by tests to cross-check the system BLAS).
 void sgemm_portable(bool trans_a, bool trans_b, int M, int N, int K, float alpha, const float* A, int lda, const float* B,
                     int ldb, float beta, float* C, int ldc);
+// out[i] = exp(in[i]) for n values (vForce on macOS; std::exp elsewhere). in == out is allowed.
+void vec_expf(const float* in, float* out, int n);
+
+// Tests and benchmarks can make sgemm() use the portable code even where a system BLAS exists.
+void set_force_portable_kernel(bool on);
+bool portable_kernel_forced();
 const char* kernel_backend_name();  // "accelerate" or "portable"
+//  // "accelerate" or "portable"
 
 // Small persistent pool. run() splits [0,n) into chunks of at least `grain` items, blocks until all are done, and runs
 // inline when called from a pool thread (no nested parallelism) or when the pool has one thread.

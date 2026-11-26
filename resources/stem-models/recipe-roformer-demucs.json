@@ -1,0 +1,33 @@
+{
+ "format": "deckhand-stems-catalogue/1",
+ "id": "recipe-roformer-demucs",
+ "name": "Best vocals + Demucs drums, bass and other (recipe)",
+ "kind": "recipe",
+ "summary": "Combines two installed models: Mel-Band RoFormer for the vocals, then Demucs v4 on what is left (mix minus vocals) for drums, bass and other. The four stems still add up exactly to the original. Downloads nothing; install both models first.",
+ "stems": [
+  "vocals",
+  "drums",
+  "bass",
+  "other"
+ ],
+ "quality": "Cleaner vocals than Demucs alone; drums, bass and other come from Demucs run on the instrumental.",
+ "speed": "Both networks run on every chunk: slower than either model alone.",
+ "files": [],
+ "requires": [
+  "melband-roformer-vocals",
+  "demucs-htdemucs"
+ ],
+ "licence": {
+  "summary": "This recipe contains no weights. Each model it combines keeps its own licence statement, shown when you install it: Demucs weights are research-use only, the RoFormer weights are declared MIT by their author. Using both together does not change either licence. You are responsible for checking that your use is within each.",
+  "statement_source": "https://github.com/facebookresearch/demucs/issues/327",
+  "code_licence": "MIT (DeckHand)",
+  "weights_licence": "each part under its own terms (see the two models)",
+  "restriction": "depends-on-parts",
+  "link": "https://github.com/facebookresearch/demucs/blob/main/LICENSE",
+  "training_data": "see the two models"
+ },
+ "upstream_url": "https://github.com/facebookresearch/demucs",
+ "install": {
+  "supported": true
+ }
+}

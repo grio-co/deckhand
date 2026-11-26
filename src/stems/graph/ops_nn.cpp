@@ -279,6 +279,23 @@ void op_softmax(OpCtx& c, const NodeProto& n, const Tensor* const* in, int nin) 
   c.alloc(0, DType::F32, a.shape);
   const float* X = a.f();
   float* O = c.outs[0].f();
+  if (inner == 1) {  // rows are contiguous: subtract the maximum, exponentiate with the vector routine, normalise
+    c.par(outer, std::max<std::int64_t>(1, kGrain / std::max<std::int64_t>(1, dim)), [&](std::int64_t b, std::int64_t e) {
+      for (std::int64_t r = b; r < e; ++r) {
+        const float* x = X + r * dim;
+        float* y = O + r * dim;
+        float mx = -INFINITY;
+        for (std::int64_t k = 0; k < dim; ++k) mx = std::max(mx, x[k]);
+        for (std::int64_t k = 0; k < dim; ++k) y[k] = x[k] - mx;
+        vec_expf(y, y, int(dim));
+        float s = 0.f;
+        for (std::int64_t k = 0; k < dim; ++k) s += y[k];
+        const float inv = 1.f / s;
+        for (std::int64_t k = 0; k < dim; ++k) y[k] *= inv;
+      }
+    });
+    return;
+  }
   c.par(outer * inner, std::max<std::int64_t>(1, kGrain / std::max<std::int64_t>(1, dim)), [&](std::int64_t b, std::int64_t e) {
     for (std::int64_t q = b; q < e; ++q) {
       std::int64_t o = q / inner, i = q % inner;

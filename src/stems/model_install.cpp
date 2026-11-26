@@ -65,7 +65,7 @@ bool parse_catalogue_entry(const std::string& text, CatalogueEntry& out, std::st
   c.speed = sget(j, "speed"); c.upstream_url = sget(j, "upstream_url");
   if (const Json* s = j.get("stems")) for (auto& x : s->a) if (x.is_str()) c.stems.push_back(x.s);
   const Json* files = j.get("files");
-  if (!files || files->t != Json::T::Arr || files->a.empty()) return fail(err, "no files");
+  if (!files || files->t != Json::T::Arr || (files->a.empty() && c.kind != "recipe")) return fail(err, "no files");  // a recipe downloads nothing
   for (auto& f : files->a) {
     CatalogueFile cf;
     cf.name = sget(f, "name"); cf.url = sget(f, "url"); cf.sha256 = sget(f, "sha256");
@@ -83,6 +83,10 @@ bool parse_catalogue_entry(const std::string& text, CatalogueEntry& out, std::st
   c.licence_summary = sget(*l, "summary"); c.licence_source = sget(*l, "statement_source"); c.licence_link = sget(*l, "link");
   c.weights_licence = sget(*l, "weights_licence"); c.code_licence = sget(*l, "code_licence"); c.training_data = sget(*l, "training_data");
   c.restriction = sget(*l, "restriction");
+  if (const Json* rq = j.get("requires")) {
+    if (rq->t != Json::T::Arr) return fail(err, "\"requires\" must be a list of model ids");
+    for (auto& r : rq->a) { if (!r.is_str() || r.s.empty()) return fail(err, "bad model id in \"requires\""); c.requires_ids.push_back(r.s); }
+  }
   if (const Json* in = j.get("install")) {
     const Json* sp = in->get("supported");
     c.install_supported = sp && sp->t == Json::T::Bool && sp->b;
@@ -164,6 +168,10 @@ InstallResult install_model(const fs::path& data, const CatalogueEntry& e, bool 
   auto bad = [&](const std::string& m) { r.ok = false; r.error = m; return r; };
   if (!accept) return bad("the licence has not been accepted");
   if (!e.install_supported) return bad("this model cannot be installed yet: " + (e.blocked_by.empty() ? std::string("conversion step missing") : e.blocked_by));
+  for (auto& id : e.requires_ids) {
+    ModelManifest mm;
+    if (!load_manifest(models_dir(data) / (id + ".dhstems.json"), mm, nullptr)) return bad("this entry needs \"" + id + "\" installed first");
+  }
   for (auto& f : e.files) if (!url_host_allowed(f.url) || !hex64(f.sha256) || !f.size) return bad("catalogue entry is not acceptable (host, hash or size)");
   const fs::path dir = models_dir(data) / e.id;
   std::error_code ec;
@@ -208,7 +216,7 @@ InstallResult install_model(const fs::path& data, const CatalogueEntry& e, bool 
 }
 
 std::function<bool(const fs::path&, const CatalogueEntry&, std::string*)> demucs_converter(const fs::path& data, const fs::path& skel) {
-  return [data, skel](const fs::path& dir, const CatalogueEntry& e, std::string* err) -> bool {
+  auto demucs = [data, skel](const fs::path& dir, const CatalogueEntry& e, std::string* err) -> bool {
     // One checkpoint = htdemucs; four = htdemucs_ft in the order of the upstream bag: drums, bass, other, vocals.
     static const char* const kBagStems[4] = {"drums", "bass", "other", "vocals"};
     const bool bag = e.files.size() == 4;
@@ -234,6 +242,54 @@ std::function<bool(const fs::path&, const CatalogueEntry&, std::string*)> demucs
     if (ec) return fail(err, "cannot write manifest");
     for (auto& f : e.files) fs::remove(dir / f.name, ec);  // the downloads are no longer needed
     return true;
+  };
+  auto roformer = [data, skel](const fs::path& dir, const CatalogueEntry& e, std::string* err) -> bool {
+    if (e.files.size() != 1) return fail(err, "not a single-checkpoint RoFormer entry");
+    std::error_code ec;
+    for (const char* n : {"roformer.onnx", "roformer.layout.json"}) {
+      fs::copy_file(skel / n, dir / n, fs::copy_options::overwrite_existing, ec);
+      if (ec) return fail(err, "skeleton missing: " + (skel / n).string());
+    }
+    if (!convert_checkpoint(dir / e.files[0].name, skel / "roformer.layout.json", dir / "roformer.weights", nullptr, err)) return false;
+    std::string sk;
+    if (!sha256_file(dir / "roformer.onnx", sk)) return fail(err, "cannot hash the skeleton");
+    std::ostringstream m;
+    m << "{\"format\":\"deckhand-stems-model/1\",\"id\":\"" << e.id << "\",\"name\":\"" << e.name << "\",\"file\":\"" << e.id << "/roformer.onnx\","
+      << "\"licence\":\"" << e.weights_licence << "\",\"source_url\":\"" << e.files[0].url << "\",\"sha256\":\"" << sk << "\","
+      << "\"sample_rate\":44100,\"segment_frames\":343980,\"overlap\":0.25,\"channels\":2,\"pipeline\":\"roformer-vocals\","
+      << "\"stems\":[\"vocals\",\"drums\",\"bass\",\"other\"]}\n";
+    fs::path mf = models_dir(data) / (e.id + ".dhstems.json"), part = mf;
+    part += ".part";
+    { std::ofstream f(part, std::ios::trunc); f << m.str(); if (!f) return fail(err, "cannot write manifest"); }
+    fs::rename(part, mf, ec);
+    if (ec) return fail(err, "cannot write manifest");
+    fs::remove(dir / e.files[0].name, ec);
+    return true;
+  };
+  // A recipe downloads nothing: it only records which two installed models it combines.
+  auto recipe = [data](const fs::path&, const CatalogueEntry& e, std::string* err) -> bool {
+    if (e.requires_ids.size() != 2) return fail(err, "a recipe names exactly two models");
+    for (auto& id : e.requires_ids) {
+      ModelManifest mm;
+      if (!load_manifest(models_dir(data) / (id + ".dhstems.json"), mm, nullptr)) return fail(err, "this recipe needs \"" + id + "\" installed first");
+    }
+    std::ostringstream m;
+    m << "{\"format\":\"deckhand-stems-model/1\",\"id\":\"" << e.id << "\",\"name\":\"" << e.name << "\","
+      << "\"licence\":\"" << e.weights_licence << "\",\"source_url\":\"" << e.upstream_url << "\","
+      << "\"sample_rate\":44100,\"segment_frames\":343980,\"overlap\":0.25,\"channels\":2,\"pipeline\":\"recipe-vocals-then-demucs\","
+      << "\"parts\":[\"" << e.requires_ids[0] << "\",\"" << e.requires_ids[1] << "\"],\"stems\":[\"vocals\",\"drums\",\"bass\",\"other\"]}\n";
+    fs::path mf = models_dir(data) / (e.id + ".dhstems.json"), part = mf;
+    part += ".part";
+    std::error_code ec;
+    { std::ofstream f(part, std::ios::trunc); f << m.str(); if (!f) return fail(err, "cannot write manifest"); }
+    fs::rename(part, mf, ec);
+    return ec ? fail(err, "cannot write manifest") : true;
+  };
+  return [demucs, roformer, recipe](const fs::path& dir, const CatalogueEntry& e, std::string* err) -> bool {
+    if (e.kind == "demucs") return demucs(dir, e, err);
+    if (e.kind == "roformer") return roformer(dir, e, err);
+    if (e.kind == "recipe") return recipe(dir, e, err);
+    return fail(err, "unknown model kind \"" + e.kind + "\"");
   };
 }
 

@@ -58,6 +58,9 @@ class Executor {
   const std::vector<std::string>& output_names() const;
   std::map<std::string, int> op_histogram() const;
   std::size_t arena_bytes() const;    // activation memory planned for dynamic values
+  // Seconds spent per operator type over all steady-state runs so far (empty unless set_profiling(true) was called before the run).
+  void set_profiling(bool on);
+  std::map<std::string, double> profile() const;
   std::size_t scratch_bytes() const;  // convolution work buffers
   std::size_t weights_bytes() const;  // initializer storage
   std::size_t node_count() const;

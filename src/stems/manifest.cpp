@@ -45,14 +45,22 @@ bool parse_manifest(const std::string& text, ModelManifest& m, std::string* err)
   o.id = str_of(j, "id");
   if (!id_ok(o.id)) return fail(err, "\"id\" must be 1-96 chars of A-Z a-z 0-9 . _ -");
   o.name = str_of(j, "name");
+  o.pipeline = str_of(j, "pipeline");
+  const bool recipe = o.pipeline == "recipe-vocals-then-demucs";  // runs two installed models: no file of its own
   o.file = str_of(j, "file");
-  if (!plain_name(o.file)) return fail(err, "\"file\" must be a plain file name next to the manifest");
+  if (!recipe && !plain_name(o.file)) return fail(err, "\"file\" must be a plain file name next to the manifest");
+  if (recipe) {
+    const Json* pt = j.get("parts");
+    if (!pt || pt->t != Json::T::Arr || pt->a.size() != 2) return fail(err, "\"parts\" must name the vocal model and the Demucs model");
+    for (auto& p : pt->a) { if (!p.is_str() || !id_ok(p.s)) return fail(err, "bad model id in \"parts\""); o.parts.push_back(p.s); }
+    o.file.clear();
+  }
   o.licence = str_of(j, "licence");
   if (o.licence.empty()) return fail(err, "\"licence\" is required");
   o.source_url = str_of(j, "source_url");
   if (o.source_url.empty()) return fail(err, "\"source_url\" is required");
   o.sha256 = str_of(j, "sha256");
-  if (!hex64(o.sha256)) return fail(err, "\"sha256\" must be 64 lower-case hex digits");
+  if (!recipe && !hex64(o.sha256)) return fail(err, "\"sha256\" must be 64 lower-case hex digits");
   const Json* v = j.get("sample_rate");
   if (!v || !v->is_num() || v->n < 8000 || v->n > 192000 || v->n != std::floor(v->n)) return fail(err, "\"sample_rate\" must be an integer 8000..192000");
   o.sample_rate = int(v->n);
@@ -68,8 +76,8 @@ bool parse_manifest(const std::string& text, ModelManifest& m, std::string* err)
   }
   if ((v = j.get("channels"))) { if (!v->is_num() || v->n != 2) return fail(err, "only \"channels\": 2 is supported"); }
   if ((v = j.get("overlap"))) { if (!v->is_num() || v->n < 0 || v->n > 0.5) return fail(err, "\"overlap\" must be 0..0.5"); o.overlap = float(v->n); }
-  o.pipeline = str_of(j, "pipeline");
-  if (!o.pipeline.empty() && o.pipeline != "htdemucs-core" && o.pipeline != "htdemucs-ft-core") return fail(err, "unknown \"pipeline\"");
+  if (!o.pipeline.empty() && o.pipeline != "htdemucs-core" && o.pipeline != "htdemucs-ft-core" && o.pipeline != "roformer-vocals" && !recipe)
+    return fail(err, "unknown \"pipeline\"");
   const Json* in = j.get("input");
   if (!o.pipeline.empty() && !in) {  // fixed-signature pipeline: tensor names come from the pipeline
     if ((v = j.get("execution_provider"))) o.execution_provider = v->is_str() ? v->s : "";
@@ -152,6 +160,7 @@ std::vector<ModelManifest> list_models(const fs::path& dir, std::vector<std::str
 }
 
 bool verify_model_file(const ModelManifest& m, std::string* err) {
+  if (m.pipeline == "recipe-vocals-then-demucs") return true;  // nothing of its own; the parts are verified when opened
   fs::path p = m.dir / m.file;
   std::error_code ec;
   if (!fs::is_regular_file(p, ec)) return fail(err, "model file missing: " + p.string());
@@ -165,6 +174,7 @@ std::unique_ptr<StemModel> open_model(const ModelManifest& m, int threads, std::
   if (!stems_available()) { fail(err, "this build has no model backend (stems are disabled at build time)"); return nullptr; }
   if (!verify_model_file(m, err)) return nullptr;
   // The built-in executor runs everything; ONNX Runtime (when compiled in) is used only where CoreML is asked for.
+  if (m.pipeline == "recipe-vocals-then-demucs") return detail::open_recipe(m, threads, err);
   if (detail::kHaveOnnx && m.execution_provider == "coreml") return detail::open_onnx(m, (m.dir / m.file).string(), threads, err);
   return detail::open_graph(m, (m.dir / m.file).string(), threads, err);
 }

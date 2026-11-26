@@ -825,7 +825,7 @@ void op_pad(OpCtx& c, const NodeProto& n, const Tensor* const* in, int nin) {
 }
 
 // ---- reductions ----------------------------------------------------------------------------------------------------------
-enum class Red { Mean, Sum, Prod, Max, Min };
+enum class Red { Mean, Sum, Prod, Max, Min, L2 };
 template <Red K>
 void op_reduce(OpCtx& c, const NodeProto& n, const Tensor* const* in, int nin) {
   const Tensor& a = need(in, nin, 0, "Reduce");
@@ -867,6 +867,10 @@ void op_reduce(OpCtx& c, const NodeProto& n, const Tensor* const* in, int nin) {
           T v = p[roff[0]];
           for (std::int64_t q = 1; q < R; ++q) v = K == Red::Max ? std::max(v, p[roff[std::size_t(q)]]) : std::min(v, p[roff[std::size_t(q)]]);
           out_p[o] = v;
+        } else if constexpr (K == Red::L2) {
+          double sq = 0;
+          for (std::int64_t q = 0; q < R; ++q) { double x = double(p[roff[std::size_t(q)]]); sq += x * x; }
+          out_p[o] = T(std::sqrt(sq));
         } else if constexpr (K == Red::Prod) {
           T v = 1;
           for (std::int64_t q = 0; q < R; ++q) v *= p[roff[std::size_t(q)]];
@@ -880,6 +884,22 @@ void op_reduce(OpCtx& c, const NodeProto& n, const Tensor* const* in, int nin) {
     });
   };
   if (a.dt == DType::F32) body(a.f(), c.outs[0].f()); else body(a.i(), c.outs[0].i());
+}
+
+
+// Einsum: only the outer product "...,f->...f" (rotary embedding tables) is implemented; any other equation is refused.
+void op_einsum(OpCtx& c, const NodeProto& n, const Tensor* const* in, int nin) {
+  std::string eq;
+  for (char ch : attr_str(n, "equation", "")) if (ch != ' ') eq += ch;
+  if (eq != "...,f->...f" || nin != 2) throw GraphError("Einsum: unsupported equation '" + eq + "' (only ...,f->...f)");
+  const Tensor& a = need(in, nin, 0, "Einsum");
+  const Tensor& f = need(in, nin, 1, "Einsum");
+  if (a.dt != DType::F32 || f.dt != DType::F32 || f.shape.rank != 1) throw GraphError("Einsum: needs a float tensor and a float vector");
+  Shape os = a.shape;
+  os.push(f.shape[0]);
+  c.alloc(0, DType::F32, os);
+  const std::int64_t na = a.numel(), nf = f.shape[0];
+  for (std::int64_t i = 0; i < na; ++i) for (std::int64_t j = 0; j < nf; ++j) c.outs[0].f()[i * nf + j] = a.f()[i] * f.f()[j];
 }
 
 }  // namespace
@@ -905,7 +925,8 @@ void register_basic_ops(std::vector<std::pair<std::string, OpFn>>& v) {
   v.push_back({"Range", &op_range}); v.push_back({"Tile", &op_tile}); v.push_back({"ScatterND", &op_scatternd}); v.push_back({"Pad", &op_pad});
   v.push_back({"ReduceMean", &op_reduce<Red::Mean>}); v.push_back({"ReduceSum", &op_reduce<Red::Sum>});
   v.push_back({"ReduceProd", &op_reduce<Red::Prod>}); v.push_back({"ReduceMax", &op_reduce<Red::Max>});
-  v.push_back({"ReduceMin", &op_reduce<Red::Min>});
+  v.push_back({"ReduceMin", &op_reduce<Red::Min>}); v.push_back({"ReduceL2", &op_reduce<Red::L2>});
+  v.push_back({"Einsum", &op_einsum});
 }
 
 }  // namespace deckhand::stems::graph

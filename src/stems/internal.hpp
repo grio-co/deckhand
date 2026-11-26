@@ -59,6 +59,7 @@ constexpr bool kHaveOnnx = false;
 #endif
 // Built-in graph executor backend (src/stems/graph); the default for every installed model.
 std::unique_ptr<StemModel> open_graph(const struct ModelManifest& m, const std::string& model_path, int threads, std::string* error);
+std::unique_ptr<StemModel> open_recipe(const struct ModelManifest& m, int threads, std::string* error);
 std::unique_ptr<StemModel> open_onnx(const struct ModelManifest& m, const std::string& model_path, int threads, std::string* error);
 
 }  // namespace deckhand::stems::detail

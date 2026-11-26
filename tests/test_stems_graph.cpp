@@ -26,6 +26,7 @@
 #include "deckhand/stems/manifest.hpp"
 #include "deckhand/stems/model_convert.hpp"
 #include "deckhand/stems/model_install.hpp"
+#include "deckhand/stems/roformer_dsp.hpp"
 #include "deckhand/stems/stems.hpp"
 #include "internal.hpp"
 #include "graph/executor.hpp"
@@ -159,7 +160,7 @@ static int run_fixtures(int threads, int repeats) {
 TEST(operators_against_reference_single_thread) {
   int n = run_fixtures(1, 2);
   std::printf("  %d operator cases (2 runs each)\n", n);
-  CHECK(n >= 80);
+  CHECK(n >= 85);
 }
 TEST(operators_against_reference_threaded) { run_fixtures(4, 2); }
 TEST(convolutions_are_exact_across_tile_borders) {
@@ -400,6 +401,35 @@ static std::vector<float> synth_mix(std::size_t n) {
   return m;
 }
 
+// Voice-like test signal: a vibrato tone with vowel formants (700 / 1200 Hz) over a plucked low harmonic bass and noise-burst drums.
+// Deterministic; the vocal model finds real vocal content in it, unlike in the pure sines of synth_mix().
+static std::vector<float> synth_vocalish(std::size_t n) {
+  std::vector<float> m(2 * n);
+  std::uint32_t s = 777;
+  double ph = 0;
+  const double pi = 3.14159265358979323846, notes[4] = {55.0, 65.4, 73.4, 82.4};
+  for (std::size_t i = 0; i < n; ++i) {
+    const double t = double(i) / 44100.0;
+    ph += 2 * pi * 220.0 * (1 + 0.01 * std::sin(2 * pi * 5 * t)) / 44100.0;
+    double voice = 0;
+    for (int h = 1; h < 30; ++h) {
+      double fr = h * 220.0, g = std::exp(-std::pow((fr - 700) / 150, 2)) + 0.6 * std::exp(-std::pow((fr - 1200) / 200, 2));
+      voice += g * std::sin(h * ph) / h;
+    }
+    double tn = std::fmod(t, 0.5), f0 = notes[int(t / 0.5) / 2 % 4], bass = 0;
+    for (int h = 1; h < 9; ++h) bass += std::sin(2 * pi * f0 * h * t) / h;
+    bass *= std::exp(-tn * 3) * 0.25;
+    s = s * 1664525u + 1013904223u;
+    double noise = (double(s >> 8) / double(1 << 24) - 0.5) * 2.0 * std::exp(-tn / 0.025) * 0.25;
+    s = s * 1664525u + 1013904223u;
+    double floor_noise = (double(s >> 8) / double(1 << 24) - 0.5) * 0.01;  // -50 dB noise floor: no digital silence in any band (the network normalises per band)
+    m[i] = float(0.35 * voice * 0.5 + bass + noise + floor_noise);
+    s = s * 1664525u + 1013904223u;
+    m[n + i] = float(0.35 * voice * 0.45 + bass + noise * 0.9 + (double(s >> 8) / double(1 << 24) - 0.5) * 0.01);
+  }
+  return m;
+}
+
 // Path of a converted htdemucs.weights, or "" when the checkpoint is not on this machine. DH_STEMS_WEIGHTS overrides.
 static std::string htdemucs_weights() {
   static std::string cached;
@@ -589,6 +619,387 @@ TEST(installer_converts_the_ft_bag) {
   for (auto& f : entry.files) CHECK(!fs::exists(dir / f.name));
   CHECK(fs::exists(models_root() / "demucs" / entry.files[0].name));  // the user's own files are untouched
   fs::remove_all(data);
+}
+
+
+// ---- Mel-Band RoFormer ------------------------------------------------------------------------------------------------------
+// An installed copy of the model (skeleton + weights converted from the checkpoint by the installer's converter), or "" when the
+// checkpoint is not on this machine. DH_STEMS_ROFORMER_DATA names an already prepared data folder instead.
+static fs::path roformer_data() {
+  static fs::path cached;
+  static bool done = false;
+  if (done) return cached;
+  done = true;
+  if (const char* e = std::getenv("DH_STEMS_ROFORMER_DATA")) { if (fs::exists(e)) cached = e; return cached; }
+  fs::path ck = models_root() / "roformer" / "MelBandRoformer.ckpt";
+  if (!fs::exists(ck)) return cached;
+  fs::path res = fs::path(DH_STEMS_SKELETON_DIR).parent_path();
+  CatalogueEntry entry;
+  bool found = false;
+  for (auto& e : list_catalogue(res)) if (e.id == "melband-roformer-vocals") { entry = e; found = true; }
+  CHECK(found && entry.install_supported && entry.files.size() == 1);
+  fs::path data = tmpdir("rfdata"), dir = models_dir(data) / entry.id;
+  g_cleanup.push_back(data);
+  fs::create_directories(dir);
+  std::error_code ec;
+  fs::create_symlink(fs::absolute(ck), dir / entry.files[0].name, ec);
+  if (ec) fs::copy_file(ck, dir / entry.files[0].name);
+  std::string err;
+  if (!demucs_converter(data, res / "skeletons")(dir, entry, &err)) { std::fprintf(stderr, "roformer convert: %s\n", err.c_str()); return cached; }
+  CHECK(fs::exists(fs::absolute(ck)));  // the user's checkpoint is untouched
+  return cached = data;
+}
+
+struct RoformerRun { std::vector<float> x, masks, vocals; };
+// The pipeline by hand (STFT -> network -> masks -> inverse STFT), so the network's own output can be inspected.
+static RoformerRun roformer_by_hand(const fs::path& data, const std::vector<float>& mix, double* net_seconds) {
+  fs::path dir = models_dir(data) / "melband-roformer-vocals";
+  std::string err;
+  auto ex = Executor::open((dir / "roformer.onnx").string(), "", 4, &err);
+  if (!ex) std::fprintf(stderr, "%s\n", err.c_str());
+  CHECK(ex);
+  auto lay = read_file(dir / "roformer.layout.json");
+  detail::Json j;
+  CHECK(detail::parse_json(std::string(lay.begin(), lay.end()), j, &err));
+  std::vector<std::pair<int, int>> bands;
+  for (auto& e : j.get("bands")->a) bands.push_back({int(e.a[0].n), int(e.a[1].n)});
+  RoformerDsp dsp;
+  CHECK(dsp.set_bands(bands, &err));
+  const std::size_t S = mix.size() / 2, T = RoformerDsp::frames_for(S);
+  RoformerRun r;
+  std::vector<float> stft;
+  dsp.analyse(mix.data(), S, stft, r.x);
+  InputBinding b;
+  b.name = "x"; b.data = r.x.data(); b.shape = Shape{1, std::int64_t(T), std::int64_t(dsp.features)};
+  auto t0 = std::chrono::steady_clock::now();
+  if (!ex->run({b}, &err)) std::fprintf(stderr, "roformer run: %s\n", err.c_str());
+  CHECK(err.empty() || ex->output("masks"));
+  *net_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  {  // steady state: the second run uses the planned arena; DH_STEMS_PROFILE=1 prints where the time goes
+    const bool prof = std::getenv("DH_STEMS_PROFILE") != nullptr;
+    ex->set_profiling(prof);
+    t0 = std::chrono::steady_clock::now();
+    CHECK(ex->run({b}, &err));
+    double second = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("  roformer network: first run %.2f s (with planning), second %.2f s; arena %.0f MB, scratch %.0f MB, weights %.0f MB\n", *net_seconds, second,
+                double(ex->arena_bytes()) / 1e6, double(ex->scratch_bytes()) / 1e6, double(ex->weights_bytes()) / 1e6);
+    if (prof) {
+      std::vector<std::pair<double, std::string>> v;
+      for (auto& kv : ex->profile()) v.push_back({kv.second, kv.first});
+      std::sort(v.rbegin(), v.rend());
+      for (std::size_t i = 0; i < v.size() && i < 8; ++i) std::printf("    %-12s %.2f s\n", v[i].second.c_str(), v[i].first);
+    }
+  }
+  const Tensor* m = ex->output("masks");
+  CHECK(m && m->numel() == std::int64_t(T * dsp.features));
+  r.masks.assign(m->f(), m->f() + m->numel());
+  dsp.synthesise(stft, r.masks.data(), S, r.vocals);
+  CHECK(r.vocals.size() == 2 * S);
+  if (const char* d = std::getenv("DH_STEMS_DUMP_DIR")) {  // for tools/stems_roformer_compare.py
+    auto dumpf = [&](const char* n, const void* p, std::size_t bytes) { std::ofstream(fs::path(d) / n, std::ios::binary).write(static_cast<const char*>(p), std::streamsize(bytes)); };
+    dumpf("rf_mix.bin", mix.data(), mix.size() * 4); dumpf("rf_x.bin", r.x.data(), r.x.size() * 4);
+    dumpf("rf_masks.bin", r.masks.data(), r.masks.size() * 4); dumpf("rf_vocals.bin", r.vocals.data(), r.vocals.size() * 4);
+  }
+  return r;
+}
+
+TEST(roformer_matches_reference) {
+  fs::path data = roformer_data();
+  if (data.empty()) { std::printf("  (no RoFormer checkpoint here: skipped)\n"); ++g_skipped; return; }
+  const std::size_t S = 343980;
+  auto mix = synth_vocalish(S);
+  double secs = 0;
+  RoformerRun r = roformer_by_hand(data, mix, &secs);
+  std::printf("  roformer network run (first, with planning): %.2f s\n", secs);
+  auto b = read_file(fs::path(DH_STEMS_TEST_DIR) / "roformer_ref.bin");
+  CHECK(b.size() > 32 && std::memcmp(b.data(), "DHRF1\n", 6) == 0);
+  Cursor c{b};
+  c.p = 6;
+  auto n = c.get<std::uint32_t>();
+  float m_rms = c.get<float>(), m_max = c.get<float>(), v_rms = c.get<float>(), v_max = c.get<float>();
+  auto check_one = [&](const std::vector<float>& t, float rms_ref, float max_ref, const char* what) {
+    double e = 0, mx = 0;
+    for (float v : t) { e += double(v) * v; mx = std::max(mx, double(std::fabs(v))); }
+    double rms = std::sqrt(e / double(t.size())), worst = 0;
+    for (std::uint32_t k = 0; k < n; ++k) {
+      std::size_t idx = std::size_t((std::uint64_t(k) * 2654435761ull + 12345ull) % std::uint64_t(t.size()));
+      worst = std::max(worst, std::fabs(double(t[idx]) - double(c.get<float>())));
+    }
+    std::printf("  %s: rms %.6f (ref %.6f), peak %.4f (ref %.4f), worst sampled abs error %.2e\n", what, rms, rms_ref, mx, max_ref, worst);
+    CHECK(std::fabs(rms - rms_ref) < 2e-3 * rms_ref + 1e-7);
+    CHECK(std::fabs(mx - max_ref) < 5e-3 * max_ref + 1e-6);
+    CHECK(worst < 5e-3 * max_ref + 1e-6);
+  };
+  check_one(r.masks, m_rms, m_max, "masks");
+  check_one(r.vocals, v_rms, v_max, "vocals");
+}
+
+// Through the manifest: the vocal slot is the network's vocals, drums and bass are silent, other is exactly mix - vocals.
+TEST(roformer_model_through_the_manifest) {
+  fs::path data = roformer_data();
+  if (data.empty()) { std::printf("  (no RoFormer checkpoint here: skipped)\n"); ++g_skipped; return; }
+  auto models = list_models(models_dir(data));
+  const ModelManifest* mm = nullptr;
+  for (auto& m : models) if (m.id == "melband-roformer-vocals") mm = &m;
+  CHECK(mm && mm->pipeline == "roformer-vocals");
+  std::string err;
+  CHECK(verify_model_file(*mm, &err));
+  auto model = open_model(*mm, 4, &err);
+  if (!model) std::fprintf(stderr, "%s\n", err.c_str());
+  CHECK(model);
+  const std::size_t S = 343980;
+  auto mix = synth_vocalish(S);
+  std::vector<float> out(std::size_t(kStemCount) * 2 * S);
+  auto t0 = std::chrono::steady_clock::now();
+  CHECK(model->run(mix.data(), out.data(), &err));
+  double first = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  t0 = std::chrono::steady_clock::now();
+  CHECK(model->run(mix.data(), out.data(), &err));
+  double second = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("  roformer model run: first %.2f s, second %.2f s (7.8 s chunk)\n", first, second);
+  double vmax = 0, d_sum = 0;
+  for (std::size_t i = 0; i < 2 * S; ++i) {
+    vmax = std::max(vmax, double(std::fabs(out[std::size_t(Vocals) * 2 * S + i])));
+    CHECK(out[std::size_t(Drums) * 2 * S + i] == 0.f && out[std::size_t(Bass) * 2 * S + i] == 0.f);
+    d_sum = std::max(d_sum, double(std::fabs(out[std::size_t(Vocals) * 2 * S + i] + out[std::size_t(Other) * 2 * S + i] - mix[i])));
+  }
+  std::printf("  vocals peak %.3f, vocals + other - mix: max %.2e\n", vmax, d_sum);
+  CHECK(vmax > 1e-4 && d_sum < 1e-6);
+}
+
+
+// ---- portable kernel versus the system BLAS, at scale -----------------------------------------------------------------------
+TEST(portable_sgemm_matches_the_system_blas_at_scale) {
+  struct Sz { int M, N, K; };
+  const Sz sizes[] = {{1000, 700, 300}, {257, 1025, 129}, {5, 2049, 7}, {64, 64, 1024}, {333, 17, 515}};
+  std::mt19937 g(11);
+  std::normal_distribution<float> nd;
+  for (auto z : sizes)
+    for (int ta = 0; ta < 2; ++ta)
+      for (int tb = 0; tb < 2; ++tb) {
+        std::vector<float> A(std::size_t(z.M) * z.K), B(std::size_t(z.K) * z.N), C0(std::size_t(z.M) * z.N);
+        for (auto& v : A) v = nd(g);
+        for (auto& v : B) v = nd(g);
+        for (auto& v : C0) v = nd(g);
+        auto C1 = C0, C2 = C0;
+        const int lda = ta ? z.M : z.K, ldb = tb ? z.K : z.N;
+        sgemm(ta, tb, z.M, z.N, z.K, 0.8f, A.data(), lda, B.data(), ldb, 0.3f, C1.data(), z.N);          // system BLAS (Accelerate on macOS)
+        sgemm_portable(ta, tb, z.M, z.N, z.K, 0.8f, A.data(), lda, B.data(), ldb, 0.3f, C2.data(), z.N);
+        double worst = 0, peak = 0;
+        for (std::size_t i = 0; i < C1.size(); ++i) { worst = std::max(worst, double(std::fabs(C1[i] - C2[i]))); peak = std::max(peak, double(std::fabs(C1[i]))); }
+        CHECK(worst < 1e-5 * peak * std::sqrt(double(z.K)) + 1e-5);
+      }
+}
+
+TEST(portable_kernel_speed_relative_to_the_system_blas) {  // reported, never asserted: timing must not make a test flaky
+  const int n = 768;
+  std::vector<float> A(std::size_t(n) * n, 0.5f), B(std::size_t(n) * n, 0.25f), C(std::size_t(n) * n);
+  auto bench = [&](bool portable) {
+    double best = 1e9;
+    for (int rep = 0; rep < 3; ++rep) {
+      auto t0 = std::chrono::steady_clock::now();
+      if (portable) sgemm_portable(false, false, n, n, n, 1.f, A.data(), n, B.data(), n, 0.f, C.data(), n);
+      else sgemm(false, false, n, n, n, 1.f, A.data(), n, B.data(), n, 0.f, C.data(), n);
+      best = std::min(best, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    }
+    return 2.0 * n * n * n / best / 1e9;
+  };
+  double sys = bench(false), port = bench(true);
+  std::printf("  768^3 sgemm: %s %.1f GFLOP/s, portable %.1f GFLOP/s (%.1f%%), one thread\n", kernel_backend_name(), sys, port, 100.0 * port / sys);
+}
+
+TEST(operators_on_the_portable_kernel) {
+  set_force_portable_kernel(true);
+  run_fixtures(1, 1);
+  set_conv_tiling_for_test(1, 3);
+  run_fixtures(3, 1);
+  set_conv_tiling_for_test(4 << 20, 256);
+  set_force_portable_kernel(false);
+}
+
+static std::string conv_model(bool two_d, int N, int C, int Hin, int Win, int M, int kh, int kw, int sh, int sw, int dh, int dw, int pad, int group) {
+  std::mt19937 g(3);
+  std::normal_distribution<float> nd;
+  auto floats = [&](std::size_t n, float sc) { std::string b(n * 4, '\0'); for (std::size_t i = 0; i < n; ++i) { float v = nd(g) * sc; std::memcpy(&b[i * 4], &v, 4); } return b; };
+  auto ints_attr = [&](const char* name, std::vector<int> v) {
+    std::string a, packed;
+    put_field(a, 1, name);
+    for (int x : v) put_varint(packed, std::uint64_t(x));
+    put_field(a, 8, packed);
+    put_int(a, 20, 7);
+    return a;
+  };
+  std::vector<int> ks, st, di, pd;
+  if (two_d) { ks = {kh, kw}; st = {sh, sw}; di = {dh, dw}; pd = {pad, pad, pad, pad}; } else { ks = {kw}; st = {sw}; di = {dw}; pd = {pad, pad}; }
+  std::string node, graph, model, opset;
+  put_field(node, 1, "x"); put_field(node, 1, "w"); put_field(node, 1, "b"); put_field(node, 2, "y"); put_field(node, 4, "Conv");
+  put_field(node, 5, ints_attr("kernel_shape", ks)); put_field(node, 5, ints_attr("strides", st));
+  put_field(node, 5, ints_attr("dilations", di)); put_field(node, 5, ints_attr("pads", pd));
+  { std::string a; put_field(a, 1, "group"); put_int(a, 3, std::uint64_t(group)); put_int(a, 20, 2); put_field(node, 5, a); }
+  put_field(graph, 1, node);
+  auto init = [&](const char* name, std::vector<int> dims, std::size_t n, float sc) {
+    std::string t;
+    for (int d : dims) put_int(t, 1, std::uint64_t(d));
+    put_int(t, 2, 1); put_field(t, 8, name); put_field(t, 9, floats(n, sc));
+    put_field(graph, 5, t);
+  };
+  std::vector<int> wd = two_d ? std::vector<int>{M, C / group, kh, kw} : std::vector<int>{M, C / group, kw};
+  std::size_t wn = 1;
+  for (int d : wd) wn *= std::size_t(d);
+  init("w", wd, wn, 0.2f);
+  init("b", {M}, std::size_t(M), 0.5f);
+  std::string vin, ty, tt, shape, vout;
+  for (int d : (two_d ? std::vector<int>{N, C, Hin, Win} : std::vector<int>{N, C, Win})) { std::string dim; put_int(dim, 1, std::uint64_t(d)); put_field(shape, 1, dim); }
+  put_int(tt, 1, 1); put_field(tt, 2, shape); put_field(ty, 1, tt);
+  put_field(vin, 1, "x"); put_field(vin, 2, ty); put_field(graph, 11, vin);
+  put_field(vout, 1, "y"); put_field(graph, 12, vout);
+  put_int(model, 1, 8); put_field(model, 7, graph);
+  put_int(opset, 2, 17); put_field(model, 8, opset);
+  return model;
+}
+
+TEST(portable_convolution_matches_the_system_blas_at_scale) {
+  struct Cfg { bool two_d; int N, C, H, W, M, kh, kw, sh, sw, dh, dw, pad, group; };
+  const Cfg cfgs[] = {
+      {false, 1, 48, 1, 3001, 96, 1, 8, 4, 4, 1, 1, 2, 1},   // strided 1-D, tile borders in the output
+      {false, 2, 32, 1, 1237, 32, 1, 3, 1, 1, 1, 5, 5, 4},   // dilated, grouped
+      {true, 1, 8, 41, 303, 16, 3, 5, 1, 2, 1, 2, 2, 2},      // 2-D, grouped, strided and dilated
+      {true, 1, 4, 64, 129, 24, 8, 1, 4, 1, 1, 1, 0, 1},      // the Demucs first-layer shape
+  };
+  for (int tile : {0, 1}) {
+    if (tile) set_conv_tiling_for_test(1, 7);  // tiny tiles: every tile border on every row
+    for (auto& c : cfgs) {
+      std::string bytes = conv_model(c.two_d, c.N, c.C, c.H, c.W, c.M, c.kh, c.kw, c.sh, c.sw, c.dh, c.dw, c.pad, c.group);
+      std::string err;
+      std::vector<float> x(std::size_t(c.N) * c.C * (c.two_d ? c.H : 1) * c.W);
+      std::mt19937 g(9);
+      std::normal_distribution<float> nd;
+      for (auto& v : x) v = nd(g);
+      std::vector<float> res[2];
+      for (int portable = 0; portable < 2; ++portable) {
+        set_force_portable_kernel(portable == 1);
+        auto ex = Executor::from_proto(parse_model(bytes_of(bytes)), ".", "", 3, &err);
+        if (!ex) std::fprintf(stderr, "%s\n", err.c_str());
+        CHECK(ex);
+        InputBinding b; b.name = "x"; b.data = x.data();
+        b.shape = c.two_d ? Shape{c.N, c.C, c.H, c.W} : Shape{c.N, c.C, c.W};
+        if (!ex->run({b}, &err)) std::fprintf(stderr, "%s\n", err.c_str());
+        CHECK(ex->run({b}, &err));
+        res[portable].assign(ex->output("y")->f(), ex->output("y")->f() + ex->output("y")->numel());
+      }
+      set_force_portable_kernel(false);
+      CHECK(res[0].size() == res[1].size() && res[0].size() > 1000);
+      double worst = 0, peak = 0;
+      for (std::size_t i = 0; i < res[0].size(); ++i) { worst = std::max(worst, double(std::fabs(res[0][i] - res[1][i]))); peak = std::max(peak, double(std::fabs(res[0][i]))); }
+      CHECK(worst < 2e-5 * peak + 1e-6);
+    }
+    set_conv_tiling_for_test(4 << 20, 256);
+  }
+}
+
+// ---- the recipe: RoFormer vocals, then Demucs on the remainder --------------------------------------------------------------
+TEST(recipe_vocals_then_demucs_sums_to_the_input) {
+  fs::path data = roformer_data();
+  fs::path ck = models_root() / "demucs" / "955717e8-8726e21a.th";
+  if (data.empty() || !fs::exists(ck)) { std::printf("  (RoFormer or Demucs checkpoint missing here: skipped)\n"); ++g_skipped; return; }
+  fs::path res = fs::path(DH_STEMS_SKELETON_DIR).parent_path();
+  std::string err;
+  CatalogueEntry dm, rec;
+  for (auto& e : list_catalogue(res)) { if (e.id == "demucs-htdemucs") dm = e; if (e.id == "recipe-roformer-demucs") rec = e; }
+  CHECK(!dm.id.empty() && !rec.id.empty() && rec.requires_ids.size() == 2 && rec.files.empty() && rec.install_supported);
+  auto conv = demucs_converter(data, res / "skeletons");
+  // the recipe refuses to install before both models are there
+  fs::path rdir = models_dir(data) / rec.id;
+  fs::create_directories(rdir);
+  fs::path dmdir = models_dir(data) / dm.id;
+  if (!fs::exists(models_dir(data) / (dm.id + ".dhstems.json"))) {
+    CHECK(!conv(rdir, rec, &err) && err.find("demucs-htdemucs") != std::string::npos);
+    fs::create_directories(dmdir);
+    std::error_code ec;
+    fs::create_symlink(fs::absolute(ck), dmdir / dm.files[0].name, ec);
+    if (ec) fs::copy_file(ck, dmdir / dm.files[0].name);
+    CHECK(conv(dmdir, dm, &err));
+  }
+  CHECK(conv(rdir, rec, &err));
+  auto models = list_models(models_dir(data));
+  const ModelManifest* mm = nullptr;
+  for (auto& m : models) if (m.id == rec.id) mm = &m;
+  CHECK(mm && mm->pipeline == "recipe-vocals-then-demucs" && mm->parts.size() == 2);
+  auto model = open_model(*mm, 4, &err);
+  if (!model) std::fprintf(stderr, "%s\n", err.c_str());
+  CHECK(model);
+  // 10 s of voice-like audio: two overlapping chunks through the real separate() with its exact mixture-consistency step
+  const std::size_t n = 441000;
+  auto mono = synth_vocalish(n);
+  Audio in;
+  in.sample_rate = 44100;
+  in.l.assign(mono.begin(), mono.begin() + std::ptrdiff_t(n));
+  in.r.assign(mono.begin() + std::ptrdiff_t(n), mono.end());
+  auto t0 = std::chrono::steady_clock::now();
+  SeparateResult r = separate(in, *model);
+  double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  CHECK(r.status == SeparateResult::Status::Ok);
+  double sum_err = 0, peak[4] = {0, 0, 0, 0};
+  for (std::size_t i = 0; i < n; ++i) {
+    double sl = 0, sr = 0;
+    for (int k = 0; k < 4; ++k) {
+      sl += r.stems[std::size_t(k)].l[i]; sr += r.stems[std::size_t(k)].r[i];
+      peak[k] = std::max(peak[k], double(std::fabs(r.stems[std::size_t(k)].l[i])));
+    }
+    sum_err = std::max({sum_err, std::fabs(sl - in.l[i]), std::fabs(sr - in.r[i])});
+  }
+  std::printf("  recipe, 10 s in %.1f s: stem peaks vocals %.3f drums %.3f bass %.3f other %.3f; max |sum of stems - input| = %.2e\n", secs, peak[0], peak[1], peak[2], peak[3], sum_err);
+  CHECK(sum_err < 1e-5);                      // "all stems on" is transparent
+  CHECK(peak[0] > 1e-3 && peak[1] > 1e-3 && peak[2] > 1e-3);  // every part of the recipe contributed
+}
+
+
+// ---- half-precision weights on disk (--half skeletons): converter writes IEEE half, the executor widens at load ----------------
+TEST(half_precision_weights_round_trip) {
+  fs::path d = tmpdir("half");
+  // converter: tiny_state.pt holds a.weight [2,3] = 0..5 and b.bias [4] (float16 0.5, -1, ..., 0.25); both are exact in half precision
+  fs::path tiny = fs::path(DH_STEMS_TEST_DIR) / "tiny_state.pt";
+  { std::ofstream(d / "l.json") << R"J({"format":"deckhand-stems-layout/1","total_bytes":64,"tensors":[
+    {"name":"a.weight","offset":0,"length":12,"shape":[2,3],"dtype":"float16"},{"name":"b.bias","offset":64,"length":8,"shape":[4],"dtype":"float16"}],
+    "ignore":["c.t","d.idx"]})J"; }
+  std::string err;
+  if (fs::exists(tiny)) {
+    // total_bytes 64 cannot hold the second tensor at offset 64: refused, nothing left behind
+    CHECK(!convert_checkpoint(tiny, d / "l.json", d / "w.bin", nullptr, &err) && !fs::exists(d / "w.bin.part"));
+    { std::ofstream(d / "l2.json") << R"J({"format":"deckhand-stems-layout/1","total_bytes":128,"tensors":[
+      {"name":"a.weight","offset":0,"length":12,"shape":[2,3],"dtype":"float16"},{"name":"b.bias","offset":64,"length":8,"shape":[4],"dtype":"float16"}],
+      "ignore":["c.t","d.idx"]})J"; }
+    CHECK(convert_checkpoint(tiny, d / "l2.json", d / "w.bin", nullptr, &err));
+    auto b = read_file(d / "w.bin");
+    CHECK(b.size() == 128 && b[0] == 0 && b[1] == 0 && b[2] == 0x00 && b[3] == 0x3c && b[4] == 0 && b[5] == 0x40);  // 0, 1.0 (0x3c00), 2.0 (0x4000)
+    CHECK(b[64] == 0 && b[65] == 0x38);                                                                              // 0.5 = 0x3800
+    CHECK(b[66] == 0 && b[67] == 0xbc);                                                                              // -1.0 = 0xbc00
+  }
+  // executor: y = x + w with w stored as external half data
+  std::vector<std::uint16_t> half = {0x3c00, 0x4000, 0xbc00, 0x3800, 0x0001, 0x7bff};  // 1, 2, -1, 0.5, 2^-24, 65504
+  { std::ofstream f(d / "h.bin", std::ios::binary); f.write(reinterpret_cast<const char*>(half.data()), std::streamsize(half.size() * 2)); }
+  std::string t, e1, e2, e3, vin, vout, ty, tt, shape, dim, node, graph, model, opset;
+  put_int(t, 1, 6); put_int(t, 2, 10); put_field(t, 8, "w");
+  put_field(e1, 1, "location"); put_field(e1, 2, "h.bin"); put_field(t, 13, e1);
+  put_field(e2, 1, "offset"); put_field(e2, 2, "0"); put_field(t, 13, e2);
+  put_field(e3, 1, "length"); put_field(e3, 2, "12"); put_field(t, 13, e3);
+  put_int(t, 14, 1);
+  put_field(node, 1, "x"); put_field(node, 1, "w"); put_field(node, 2, "y"); put_field(node, 4, "Add");
+  put_field(graph, 1, node); put_field(graph, 5, t);
+  put_int(dim, 1, 6); put_field(shape, 1, dim); put_int(tt, 1, 1); put_field(tt, 2, shape); put_field(ty, 1, tt);
+  put_field(vin, 1, "x"); put_field(vin, 2, ty); put_field(graph, 11, vin);
+  put_field(vout, 1, "y"); put_field(graph, 12, vout);
+  put_int(model, 1, 8); put_field(model, 7, graph);
+  put_int(opset, 2, 17); put_field(model, 8, opset);
+  auto ex = Executor::from_proto(parse_model(bytes_of(model)), d.string(), "", 1, &err);
+  if (!ex) std::fprintf(stderr, "%s\n", err.c_str());
+  CHECK(ex);
+  float in[6] = {10, 10, 10, 10, 10, 10};
+  InputBinding b; b.name = "x"; b.data = in; b.shape = Shape{6};
+  CHECK(ex->run({b}, &err));
+  const float want[6] = {11, 12, 9, 10.5f, 10.f + 5.9604645e-8f, 10.f + 65504.f};
+  for (int i = 0; i < 6; ++i) CHECK(ex->output("y")->f()[i] == want[i]);
+  fs::remove_all(d);
 }
 
 int main(int argc, char** argv) {

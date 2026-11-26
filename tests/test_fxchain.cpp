@@ -569,11 +569,13 @@ void test_remote(const std::string& helper) {
     }
     return n ? std::sqrt(sum / static_cast<double>(n)) : 0.0;
   };
-  drain_rms(0.5);
-  const double unity = drain_rms(0.8);
+  // Real time through a helper process: on a slow or busy machine the stream may take a while to
+  // carry audio and the edit a while to land, so wait for each state rather than for a fixed time.
+  double unity = 0;
+  for (int i = 0; i < 40 && unity <= 0.02; ++i) unity = drain_rms(0.5);
   remote.fx_set(kFxMaster, iso, FxField::Param, 0);
-  drain_rms(0.5);
-  const double killed = drain_rms(0.8);
+  double killed = unity;
+  for (int i = 0; i < 40 && !(killed < unity * 0.2); ++i) killed = drain_rms(0.5);
   std::printf("remote audio through the master chain: %.4f at unity, %.4f with the lows killed\n", unity, killed);
   CHECK(unity > 0.02 && killed < unity * 0.2);
   remote.stream_enable(false);

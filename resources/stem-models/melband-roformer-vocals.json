@@ -9,7 +9,7 @@
   "instrumental"
  ],
  "quality": "Checkpoint name reports epoch-0 SDR 10.86 on the author's validation set (not MUSDB; not comparable).",
- "speed": "Large model (913 MB checkpoint): slower than htdemucs.",
+ "speed": "Large model (228 M parameters, 913 MB checkpoint): several times slower than htdemucs on a CPU, and about 1 GB of memory for the weights plus working memory.",
  "files": [
   {
    "name": "MelBandRoformer.ckpt",
@@ -29,7 +29,6 @@
  },
  "upstream_url": "https://github.com/KimberleyJensen/Mel-Band-Roformer-Vocal-Model",
  "install": {
-  "supported": false,
-  "blocked_by": "No ONNX skeleton or C++ STFT/mel-band pipeline for this architecture yet (checkpoint reading is done)."
+  "supported": true
  }
 }

@@ -909,14 +909,16 @@ TEST(catalogue_files_are_valid) {
   std::vector<std::string> problems;
   auto v = list_catalogue(fs::path(DH_STEMS_TEST_DIR) / ".." / ".." / "resources" / "stem-models", &problems);
   for (auto& p : problems) std::fprintf(stderr, "catalogue problem: %s\n", p.c_str());
-  CHECK(problems.empty() && v.size() == 3);
+  CHECK(problems.empty() && v.size() == 4);
   for (auto& e : v) {
-    CHECK(!e.licence_summary.empty() && !e.licence_link.empty() && !e.files.empty());
+    CHECK(!e.licence_summary.empty() && !e.licence_link.empty() && (!e.files.empty() || e.kind == "recipe"));
     for (auto& f : e.files) CHECK(url_host_allowed(f.url) && f.sha256.size() == 64 && f.size > 1000000);
   }
   CHECK(v[0].id == "demucs-htdemucs" && v[1].id == "demucs-htdemucs-ft" && v[1].files.size() == 4);
   CHECK(v[0].restriction == "research-only" && v[2].restriction == "permissive-declared");
   CHECK(v[0].licence_summary.find("not covered by the MIT licence") != std::string::npos);
+  CHECK(v[3].id == "recipe-roformer-demucs" && v[3].kind == "recipe" && v[3].files.empty() && v[3].requires_ids.size() == 2 && v[3].install_supported);
+  CHECK(v[2].install_supported && v[1].install_supported);
 }
 
 TEST(catalogue_rejects_bad_entries) {

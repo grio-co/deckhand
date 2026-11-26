@@ -6,6 +6,10 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Stems: the Mel-Band RoFormer vocal model runs on the built-in engine (vocals within 1.5e-5 of
+  the reference implementation), and a combined recipe uses it for vocals with Demucs for drums,
+  bass and other; the four stems still sum to the input. About 0.7x real time on an Apple silicon
+  laptop under load. Faster portable matrix kernel for Windows and Linux.
 - Stem playback: a deck whose track has cached stems plays the four stems in sample lock; mute,
   solo, hold-to-isolate and level per stem with click-free ramps, acapella / instrumental /
   drums-only presets, and an effect chain per stem. With all stems at unity the output is

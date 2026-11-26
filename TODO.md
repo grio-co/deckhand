@@ -123,7 +123,8 @@ Gaps in the incumbent that DeckHand should close (owner's list, 2026-11-26)
       offline, verified numerically against a reference on synthetic audio (nobody has listened yet);
       cache, queue, installer and catalogue exist; no model ships (user installs from the authors'
       host). Stem playback on the decks with per-stem mute/solo/level/effects exists (unheard;
-      42 MB of memory per minute per deck). Still to do: the RoFormer vocal model, a stems pad
+      42 MB of memory per minute per deck). The RoFormer vocal model and the RoFormer + Demucs recipe run (slower than
+      real time; unheard). Still to do: a stems pad
       mode for controllers, stems on the USB stick
 - [~] Fluid beat grid: drifting tempo, live drummers and tempo jumps become as many sections as
       needed (within ~10 ms on synthetic tests); untested on real recordings

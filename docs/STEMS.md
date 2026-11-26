@@ -18,7 +18,9 @@ engine (`src/audio`) is untouched.
 | Catalogue + user-driven installer + checkpoint converter | done and tested offline; the real download path (system `curl`) is untested end to end |
 | Demucs v4 `htdemucs` | skeleton, converter, C++ STFT and executor verified against the reference; **runs end to end in C++** (synthetic 30 s test, see Runtime) |
 | Demucs v4 `htdemucs_ft` (bag of four) | bag runner (`pipeline: htdemucs-ft-core`) and installer written; each of the four models verified against the reference; runs end to end in C++ |
-| Mel-Band RoFormer vocals | checkpoint parsed; reference implementation identified (below); **no skeleton, no C++ pipeline yet** |
+| Mel-Band RoFormer vocals | skeleton (`skeletons/roformer.*`), converter, C++ STFT / band gather / mask averaging / inverse STFT, installer: **runs end to end, verified against the reference implementation** (below) |
+| Recipe: RoFormer vocals + Demucs on the remainder | catalogue entry `recipe-roformer-demucs` (needs both models installed), manifest pipeline `recipe-vocals-then-demucs`; stems sum to the input to 4e-8 |
+| Portable matrix kernel (Windows/Linux fallback) | register-tiled, checked against Accelerate at size; 2% of Accelerate's speed on this Mac (see Runtime) |
 | Engine playback of stems, UI, REST route | Phase 2 / other owners |
 
 ## Runtime: the built-in executor
@@ -34,10 +36,11 @@ link. DeckHand therefore runs its models on its own small interpreter, `src/stem
 - **Operators** (float32, int64, bool; numpy broadcasting; rank up to 8): Add Sub Mul Div Pow Mod Max Min, Equal Less Greater LessOrEqual
   GreaterOrEqual And Or Not Where, Erf Sigmoid Sqrt Sin Cos Tanh Relu Exp Log Reciprocal Floor Ceil Gelu LeakyRelu Clip Neg Abs, Cast
   Constant ConstantOfShape Shape Range Identity, Reshape Flatten Squeeze Unsqueeze Transpose Expand Tile Concat Split Slice Gather ScatterND
-  Pad (constant, reflect, edge), ReduceMean/Sum/Prod/Max/Min, Softmax, LayerNormalization, InstanceNormalization, MatMul (batched,
+  Pad (constant, reflect, edge), ReduceMean/Sum/Prod/Max/Min/L2, Einsum (only the outer product `...,f->...f`), Softmax, LayerNormalization, InstanceNormalization, MatMul (batched,
   broadcast), Gemm, Conv and ConvTranspose (1-D and 2-D, strides, pads, dilations, groups, bias). Anything else stops at load with
   `unsupported op X at node N (name)`; shape and type mismatches stop the run with the node named, never a guess. The committed
-  `htdemucs` skeleton uses 37 operator types (4,483 nodes, 533 external weights); all are implemented.
+  `htdemucs` skeleton uses 37 operator types (4,483 nodes, 533 external weights), the RoFormer skeleton 31 (11,339 nodes); all are implemented.
+  External weights may be float32, int64 or float16 (widened at load); double constants are narrowed to float.
 - **Speed design**: the first run executes the whole graph, folds everything that depends only on constants and shapes (3,000 of 4,483
   nodes for htdemucs: all the shape arithmetic), records each remaining value's size and last use, and lays all activations out in one
   arena by liveness (views such as Reshape/Unsqueeze share storage). Later runs touch no allocator. A changed input shape re-plans.
@@ -48,6 +51,12 @@ link. DeckHand therefore runs its models on its own small interpreter, `src/stem
   mask and inverse STFT around the network); `htdemucs-ft-core` runs the four fine-tuned models of the bag (one skeleton, files
   `htdemucs.drums.weights`, `.bass`, `.other`, `.vocals`, converted from the four checkpoints in upstream bag order) and takes stem k
   from model k only, as upstream's bag weights do. The four executors share one activation arena.
+
+**Portable kernel.** Without a system BLAS, `sgemm_portable` (4 x 16 register tiles over cache blocks, auto-vectorised, threaded by splitting
+rows) is used. On this Mac one thread does 56 GFLOP/s for a 768^3 product against 1,900-2,500 GFLOP/s for Accelerate (2-3%; Accelerate uses
+the AMX units, so the gap is larger than it would be against a CPU BLAS). `test_stems_graph` checks it against the system kernel at sizes up to
+1000 x 700 x 300 with every transpose combination, runs all operator fixtures and size-scaled 1-D/2-D convolutions (strides, dilations,
+groups, forced tiny tiles) on it, and prints the speed ratio without asserting on timing.
 
 **Verification** (all against the PyPI `onnxruntime` Python wheel used only as an oracle on a developer machine; `tools/make_stems_graph_fixtures.py`
 and `tools/stems_graph_compare.py` regenerate the fixtures):
@@ -163,21 +172,55 @@ are reimplemented in `demucs_dsp.cpp` (max abs error 4.5e-8 against `torch`, ful
 Numeric check of the whole chain (Python ORT, skeleton + C++-written weights vs torch, random noise input): spectral branch max abs
 error 2.2e-4 (peak 0.27), time branch 4.1e-6 (peak 0.17). One 7.8 s chunk took 2.5 s on this heavily loaded machine.
 
-## Combining RoFormer and Demucs (design)
+## Mel-Band RoFormer and the combination recipe
 
-1. Run the RoFormer vocal model on the mix: `v` (vocals), `i = mix - v` (instrumental).
-2. Run Demucs on **`i`**, take drums, bass and other from it (its vocals output is discarded or used as a residual check).
-3. Mixture consistency at the end on the original mix: the existing proportional step distributes `mix - (v + d + b + o)` and then closes
-   `other` exactly. The stems sum to the input, so "all on" is transparent.
-**Reference implementation found (not yet used for an export).** `bs-roformer` 0.3.10 on PyPI (MIT, Phil Wang / lucidrains,
-https://github.com/lucidrains/BS-RoFormer) loads `MelBandRoformer.ckpt` with `strict` matching and no missing or unexpected keys when built
-with dim 384, depth 6, stereo, 1 stem, time/freq transformer depth 1, 60 bands, 8 heads of 64, mask-estimator depth 2, STFT 2048/441
-(config inferred from the tensor shapes and key names; newer releases, 0.4 and later, use other module layouts and do not load it).
-Plan: export the part between the band-split input and the mask output (STFT, band gather, mask averaging and inverse STFT in C++, like
-Demucs), with the library's attention rewritten as MatMul/Softmax so no Einsum is needed; expected extra operators: ReduceL2 (RMS norm),
-Clip/Max. The model is 228 M parameters (about 0.9 GB of weights), so it is slow on CPU. None of this is implemented yet.
-Cost: two models per track (about 1.3x the time of Demucs alone with RoFormer's size, more on CPU). Not implemented: needs the RoFormer
-skeleton and its mel-band STFT pipeline.
+**Reference implementation.** `bs-roformer` 0.3.10 on PyPI (MIT, Phil Wang / lucidrains, https://github.com/lucidrains/BS-RoFormer) loads
+`MelBandRoformer.ckpt` with strict key matching (dim 384, depth 6, stereo, one stem, time/freq transformer depth 1, 60 mel bands, 8 heads
+of 64, mask-estimator depth 2, STFT 2048 / hop 441; inferred from the tensor shapes; releases 0.4 and later use other module layouts and
+do not load it). `tools/export_roformer_skeleton.py` exports the network between the band-split features and the masks. The library's
+attention is rewritten as MatMul/Softmax chunked over the batch (a 781 x 781 score matrix for 60 bands would otherwise be 1.2 GB) and
+`nn.Linear` as 2-D Gemm; both are checked equal to the library. The graph has 11,339 nodes and 673 weights; the skeleton is 6.6 MB (about
+0.38 MB gzip-compressed, which is what git stores) plus a 79 kB layout file that also lists the 60 mel bands as STFT-bin ranges, so no mel
+filter bank is needed at run time.
+
+**Pipeline** (`roformer_dsp.cpp`, `graph_model.cpp`): STFT with reflect padding and a periodic Hann window, gather of the band bins into the
+network's 7,916 features per frame (bin, channel, real/imag), network, overlap-averaged complex masks, inverse STFT. A chunk is 343,980
+samples (781 frames), the same length as Demucs'. The vocal model alone fills `vocals` and puts `mix - vocals` in `other`.
+
+**Installer.** Catalogue entry `melband-roformer-vocals` is installable: `demucs_converter()` (now a dispatcher on the entry's kind:
+`demucs`, `roformer`, `recipe`) copies the skeleton and layout and converts the 913 MB checkpoint into `roformer.weights` in skeleton order.
+The checkpoint's per-layer rotary tables are shared in the exported graph; the layout lists the unused copies under `"ignore"`.
+
+**Recipe.** `recipe-roformer-demucs` downloads nothing and refuses to install until `melband-roformer-vocals` and `demucs-htdemucs` are
+installed; it writes a manifest with `"pipeline": "recipe-vocals-then-demucs"` and `"parts"`. At run time:
+1. RoFormer on the mix gives `v`; `i = mix - v`.
+2. Demucs on `i` gives drums, bass, other (its vocals output is discarded).
+3. `separate()`'s existing mixture-consistency step closes the small residual `mix - (v + d + b + o)`, so the four stems sum to the input.
+The two networks share one activation arena. The `htdemucs_ft` bag can be the second part as well.
+
+| Check | Result |
+|---|---|
+| STFT + band gather (C++) vs the library | max abs error 1.5e-5 on peak 135 (1e-7 of peak) |
+| Masks, C++ executor vs the library's modules / vs onnxruntime | 8e-6 / 7.6e-6 of peak (max abs 1.1e-5 on peak 1.36) |
+| Final vocals, C++ pipeline (mask averaging + inverse STFT) vs the library's own `forward()` | max abs error 1.1e-7 on peak 7.1e-3 (1.5e-5 of peak) |
+| Vocal model through the manifest | vocals + other equals the input to 3e-8; drums and bass are exactly zero |
+| Recipe on 10 s of voice-like audio (two chunks, through `separate()`) | max abs sum of the four stems minus the input 3.7e-8 |
+
+Test signals matter: the network normalises every band, so a signal with digital silence in some bands makes the masks hypersensitive to
+float rounding in the STFT (1e-7 differences in the features gave 0.45 differences in the masks). The test signal therefore carries a
+-50 dB noise floor. Fixtures: `tools/stems_test_models/roformer_ref.bin` (16 kB of sampled values, regenerated with
+`tools/stems_roformer_compare.py`); all committed fixtures together are 222 kB.
+
+**Half-precision weights.** `export_roformer_skeleton.py --half` stores the weights as IEEE half (the converter writes `"dtype": "float16"`
+tensors, the executor widens them at load; compute stays float32), halving the install from 913 MB to 456 MB. Measured against float32:
+masks max abs error 8.6e-4 of peak, final vocals 0.6% of the vocal peak (about -44 dB). That is small but not identical, so the committed
+skeleton is the float32 one; `--half` is there for a later decision (the loader and converter are tested at small scale).
+
+Speed and memory (this Mac, load average 15-30, 4 threads, 7.8 s chunk): first run 15-17 s (it includes the planning run), steady state
+about 8 s per chunk, so roughly 1x real time per chunk and 0.7x with 25% overlap. Where the steady-state time goes (profile): Softmax
+about 2 s (1.8 G scores per chunk), Gemm 1.2 s, Erf (GELU) 1.1 s, MatMul 1.0 s, Concat 0.8 s. Memory: 913 MB of weights, 1,080 MB activation
+arena, about 2.2 GB peak resident. The recipe: 10 s of audio in 29-43 s depending on machine load (two chunks, one planning run each); the Demucs half adds about
+1.7 s per chunk, so a steady-state recipe chunk takes about 10 s.
 
 ## Disk cache
 

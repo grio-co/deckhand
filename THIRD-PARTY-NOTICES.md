@@ -17,5 +17,7 @@ This file lists third-party material that DeckHand builds on or may download. SQ
   `resources/stem-models/skeletons/htdemucs.onnx` contains the network graph generated from that code, and no weights.
   The Demucs weights are **not** part of DeckHand and are not under the MIT licence (research use only per the upstream author).
   Users download them from `dl.fbaipublicfiles.com` at their own initiative after accepting the statement.
+- **bs-roformer 0.3.10** (MIT, Phil Wang / lucidrains, PyPI) was used only on a developer machine, by `tools/export_roformer_skeleton.py`, to
+  generate `resources/stem-models/skeletons/roformer.onnx` (graph only, no weights) and as the reference for the test fixtures. It is not linked or shipped.
 - **Mel-Band RoFormer vocal model** by Kimberley Jensen (weights declared MIT on https://huggingface.co/KimberleyJSN/melbandroformer);
   architecture by lucidrains (MIT, https://github.com/lucidrains/BS-RoFormer). Downloaded by the user on request; not bundled.

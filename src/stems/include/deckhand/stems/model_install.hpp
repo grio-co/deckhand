@@ -20,6 +20,7 @@ struct CatalogueEntry {
   std::string id, name, kind, summary, quality, speed, upstream_url;
   std::vector<std::string> stems;
   std::vector<CatalogueFile> files;
+  std::vector<std::string> requires_ids;  // models that must be installed first (recipes combine two installed models; they download nothing)
   // licence statement shown to the user before installing (verbatim-short) and where it comes from
   std::string licence_summary, licence_source, licence_link, weights_licence, code_licence, training_data, restriction;
   bool install_supported = false;  // false until the conversion step for this model exists
@@ -66,7 +67,8 @@ struct InstallHooks {
 };
 InstallResult install_model(const std::filesystem::path& data_dir, const CatalogueEntry& entry, bool accept_licence,
                             const std::function<void(float)>& progress, const std::atomic<bool>* cancel, const InstallHooks& hooks = {});
-// Conversion hook for catalogue entries of kind "demucs" (single model): converts the verified checkpoint with the
+// Conversion hook for catalogue entries of kind "demucs" (one or four checkpoints), "roformer" (Mel-Band RoFormer vocals) and "recipe" (no files;
+// needs the models named in `requires_ids` installed, writes the combining manifest). Original description for "demucs" (single model): converts the verified checkpoint with the
 // committed skeleton (resources/stem-models/skeletons/htdemucs.*) into <models>/<id>/htdemucs.{onnx,weights} and writes the
 // manifest <models>/<id>.dhstems.json. The downloaded checkpoint is deleted afterwards. Pass as InstallHooks::convert.
 std::function<bool(const std::filesystem::path&, const CatalogueEntry&, std::string*)> demucs_converter(

@@ -171,6 +171,12 @@ add('convt2d_k81', [N('ConvTranspose', ['x', 'w', 'b'], ['y'], kernel_shape=[8, 
 add('convt2d_general', [N('ConvTranspose', ['x', 'w'], ['y'], kernel_shape=[3, 3], strides=[2, 3], pads=[1, 1, 0, 2])],
     {'x': rnd(1, 2, 4, 3)}, ['y'], inits={'w': rnd(2, 3, 3, 3)})
 
+# ---- added for the RoFormer skeleton ----
+add('reducel2', [N('ReduceL2', ['x'], ['a'], axes=[-1], keepdims=1), N('ReduceL2', ['x'], ['b'], axes=[0, 2], keepdims=0)], {'x': rnd(3, 4, 5)}, ['a', 'b'])
+add('rms_norm_pattern', [N('ReduceL2', ['x'], ['n'], axes=[-1], keepdims=1), N('Clip', ['n', 'eps'], ['nc']), N('Div', ['x', 'nc'], ['y'])],
+    {'x': rnd(2, 3, 8)}, ['y'], inits={'eps': np.array(1e-12, np.float32)})
+add('einsum_outer', [N('Einsum', ['t', 'f'], ['y'], equation='..., f -> ... f')], {'t': rnd(3, 5), 'f': rnd(4)}, ['y'])
+add('einsum_outer_1d', [N('Einsum', ['t', 'f'], ['y'], equation='..., f -> ... f')], {'t': rnd(6), 'f': rnd(2)}, ['y'])
 
 def pack_list(items):
     out = struct.pack('<I', len(items))

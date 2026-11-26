@@ -333,6 +333,7 @@ Tensor decode_tensor(const TensorProto& t, const std::uint8_t* ext, std::size_t 
     case 7: dt = DType::I64; src_size = 8; break;
     case 6: dt = DType::I64; src_size = 4; break;   // int32 held as int64
     case 9: dt = DType::Bool; src_size = 1; break;
+    case 11: dt = DType::F32; src_size = 8; break;  // double, narrowed to float (epsilons and scales)
     case 2: case 3: dt = DType::I64; src_size = 1; break;  // uint8 / int8
     default: throw GraphError("tensor '" + t.name + "': unsupported data type " + std::to_string(t.data_type));
   }
@@ -348,6 +349,7 @@ Tensor decode_tensor(const TensorProto& t, const std::uint8_t* ext, std::size_t 
     if (src_size == dtype_size(dt)) { if (src_len) std::memcpy(out.data, src, src_len); }
     else for (std::int64_t i = 0; i < n; ++i) {
       std::int64_t v = 0;
+      if (t.data_type == 11) { double d; std::memcpy(&d, src + 8 * i, 8); out.f()[i] = float(d); continue; }
       if (src_size == 4) { std::int32_t x; std::memcpy(&x, src + 4 * i, 4); v = x; }
       else if (t.data_type == 3) v = std::int8_t(src[i]);
       else v = src[i];
