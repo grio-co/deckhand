@@ -6,6 +6,7 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Continuous integration on GitHub for macOS, Linux and Windows (build and all test suites).
 - Microphone channel: input device chooser, level, EQ, noise gate, talkover ducking, optional
   headphone monitoring; included in recordings and the stream output; controls in the API,
   skin and controller mappings. The input is only opened after a device is chosen.
@@ -86,6 +87,7 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 - Tests for the library, analysis, API, export, effects, scheduling, languages, skins and streaming.
 
 ### Fixed
+- API server: a WebSocket close frame is no longer lost on Windows when the client is still sending.
 - Windows paths are no longer stored with a leading slash in the library and sync code.
 - The macOS build script no longer bundles a stale core library after a compile error.
 - iOS: the engine no longer overrides the audio session the shell configures.

@@ -59,7 +59,7 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [ ] Test against a real OBS
 - [ ] USB export: run `compare_exports` against a reference stick (docs/EXPORT.md says how to make one),
       then the CDJ-3000 test; 11 format details are still undocumented guesses
-- [ ] CI on all platforms (in progress); vendored dependencies for portable builds
+- [ ] Vendored dependencies for portable builds; CI does not yet run the shell screenshot checks
 - [ ] iOS app (pull request open; touch layout pending)
 
 ## Known limits of the current build

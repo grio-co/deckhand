@@ -269,6 +269,20 @@ void Stream::shutdown() {
   if (f != kBadFd) shutdown_both(f);
 }
 
+void Stream::linger_close(int timeout_ms) {
+  Fd f = fd_.load();
+  if (f == kBadFd) return;
+  shutdown_write(f);  // send the FIN after what is already written, then let the peer finish sending
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  char tmp[8192];
+  while (std::chrono::steady_clock::now() < deadline) {
+    int w = io_wait(kPollIn, 50);
+    if (w < 0) return;
+    if (w == 0) continue;
+    if (read(tmp, sizeof tmp) < 0) return;  // peer closed
+  }
+}
+
 int Stream::io_wait(short events, int timeout_ms) {
   PollItem p{fd_.load(), events, 0};
   int n = poll_items(&p, 1, timeout_ms);

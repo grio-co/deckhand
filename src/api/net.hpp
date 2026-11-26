@@ -63,6 +63,9 @@ class Stream {
   long read(void* buf, std::size_t n);
   bool write_all(const void* data, std::size_t n, int timeout_ms);
   void shutdown();  // thread-safe; the owner still closes via the destructor
+  // Orderly close after a final write: send FIN, then read and discard until the peer closes or the timeout passes.
+  // Closing with unread input makes Windows reset the connection, which can destroy a close frame in flight.
+  void linger_close(int timeout_ms);
 
  private:
   int io_wait(short events, int timeout_ms);  // events: sockport kPollIn / kPollOut

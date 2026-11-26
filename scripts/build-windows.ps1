@@ -21,7 +21,8 @@ param(
   [ValidateSet("Release", "RelWithDebInfo", "Debug")] [string]$Config = "Release",
   [switch]$Test,         # run ctest after building
   [switch]$Screenshot,   # run deckhand.exe --screenshot (needs a GPU or WARP) and write shell.png into the build folder
-  [switch]$SkipDeps      # do not run `vcpkg install` (already done)
+  [switch]$SkipDeps,     # do not run `vcpkg install` (already done)
+  [string]$Generator = ""  # CMake generator; default: the newest installed Visual Studio (2022 = 17, 2026 = 18)
 )
 $ErrorActionPreference = "Stop"
 $Triplet = "x64-windows-static"
@@ -51,8 +52,17 @@ if (-not $SkipDeps) {
 $Prefix = Join-Path $VcpkgRoot "installed\$Triplet"
 
 # SQLCipher's vcpkg port installs sqlite3.h under include\sqlcipher; CMakeLists.txt looks there (SQLCIPHER_ROOT / CMAKE_PREFIX_PATH).
+if (-not $Generator) {
+  $Generator = "Visual Studio 17 2022"
+  $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+  if (Test-Path $vswhere) {
+    $ver = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion
+    if ($ver -like "18.*") { $Generator = "Visual Studio 18 2026" }
+  }
+}
+Write-Host "CMake generator: $Generator"
 $Build = if ([IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $Root $BuildDir }
-& $CmakeExe -S $Root -B $Build -G "Visual Studio 17 2022" -A x64 `
+& $CmakeExe -S $Root -B $Build -G $Generator -A x64 `
   "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot\scripts\buildsystems\vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$Triplet" `
   "-DCMAKE_PREFIX_PATH=$Prefix" "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" "-DOPENSSL_USE_STATIC_LIBS=ON"
 if ($LASTEXITCODE -ne 0) { throw "configure failed" }

@@ -747,6 +747,7 @@ struct ApiServer::Impl {
   void ws_send_close(net::Stream& s, int code, const std::string& why) {
     std::string f = frame_control(8, close_payload(code, why));
     s.write_all(f.data(), f.size(), 1000);
+    s.linger_close(500);
   }
 
   static bool close_code_ok(int c) {
