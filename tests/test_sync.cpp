@@ -1110,9 +1110,65 @@ void test_big_library() {
   CHECK(rc.records_written == 1 && title_of(b, 7) == "Seven");
 }
 
+// Two real computers, one folder copied between them (docs/SYNC.md, "Checking two computers"):
+//   computer 1: test_sync --interop write DIR     computer 2: test_sync --interop reply DIR
+//   computer 1: test_sync --interop verify DIR    (each step takes the folder as the previous one left it)
+int interop(const std::string& step, const std::string& folder) {
+  if (!SyncEngine::encryption_available()) {
+    std::puts("interop: this build has no encryption");
+    return 1;
+  }
+  const std::string pass = "interop-test-passphrase";
+  Scenario s("interop_" + step);
+  s.folder = folder;
+  fs::create_directories(folder);
+  Dev& d = s.add(step);
+  restart(d, pass);
+  if (step == "write") {
+    add_track(d, 1, "Plainly Visible");
+    add_track(d, 2, "Two");
+    adv();
+    d.lib->set_grid_locked(tid(d, 1), true);
+    const auto list = d.lib->create_playlist(0, "Peak time", false);
+    d.lib->add_to_playlist(list, tid(d, 2));
+    SmartRule in;
+    in.field = SmartRule::Field::InPlaylist;
+    in.id = list;
+    d.lib->create_smart_playlist("From peak time", true, {in});
+    d.lib->set_setting("browser.columns", "title,key");
+    CHECK(sync(d).records_written > 0);
+    CHECK(!folder_contains(folder, "Plainly Visible"));
+  } else {
+    adv(step == "reply" ? 3'600'000 : 7'200'000);
+    d.lib->create_playlist(0, "Local only", false);  // row ids differ from the writer's
+    if (step == "reply") add_track(d, 2, "Two");
+    const SyncResult r = sync(d);
+    CHECK(r.files_skipped == 0 && r.files_corrupt == 0 && r.records_applied > 0);
+    CHECK(title_of(d, 1) == "Plainly Visible");
+    CHECK(title_of(d, 2) == (step == "reply" ? "Two" : "Edited on the second computer"));
+    CHECK(d.lib->grid_locked(tid(d, 1)));
+    CHECK(d.lib->setting("browser.columns") == "title,key");
+    const auto smart = d.lib->smart_playlists();
+    CHECK(smart.size() == 1);
+    CHECK(smart.size() == 1 && d.lib->smart_track_ids(smart[0].id) == std::vector<std::int64_t>{tid(d, 2)});
+    if (step == "reply") {
+      adv();
+      edit_title(d, tid(d, 2), "Edited on the second computer");
+      CHECK(sync(d).records_written > 0);
+    }
+    CHECK(!folder_contains(folder, "Plainly Visible"));
+    Dev& wrong = s.add("wrong");
+    restart(wrong, "not the passphrase");
+    CHECK(!wrong.eng->sync_once().ok);
+  }
+  std::printf("interop %s: all checks passed\n", step.c_str());
+  return 0;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc == 4 && std::string(argv[1]) == "--interop") return interop(argv[2], argv[3]);
   test_one_way_all_entities();
   test_path_hint_relink();
   test_concurrent_fields();

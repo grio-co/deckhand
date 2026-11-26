@@ -216,3 +216,13 @@ for a playlist and `pl` for an entry). A writer that brings an entity back there
 Local state: the sync module keeps its own tables in the library database (`sync_meta`, `sync_reg`, `sync_map`,
 `sync_track`, `sync_files`). `sync_reg` is the merged state and doubles as the "last exported state" the next capture
 pass diffs the live tables against.
+
+## Checking two computers
+
+`test_sync` can check encrypted sync between two real machines with throwaway data. Copy the folder between the
+steps however you like; it uses a fixed test passphrase and temporary libraries, not yours.
+
+    computer 1:  test_sync --interop write  FOLDER
+    computer 2:  test_sync --interop reply  FOLDER
+    computer 1:  test_sync --interop verify FOLDER
+
