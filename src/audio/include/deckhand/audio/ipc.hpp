@@ -25,10 +25,12 @@
 
 namespace deckhand::ipc {
 
+// 4: pre-listen player (Preview* ops, PreviewView snapshot, PreviewLoad through a track block).
+// 3: track preparation (HotCueSetAt ... ReplaceMeta ops, DeckView / MixerView fields, kReqSetTrackMeta).
 // 2: microphone channel (Mic* ops, MixerView fields, InputInfo snapshot, input requests, include-mic flags).
 // Bump whenever a wire layout or the meaning of a request changes: a UI that finds an engine with another version
 // asks it to quit and starts a fresh one (RemoteEngine::establish), and the segment's fingerprint covers the sizes.
-constexpr std::uint32_t kProtocolVersion = 2;
+constexpr std::uint32_t kProtocolVersion = 4;
 constexpr int kBlockSlots = 64;  // track / sample blocks in flight at once
 
 // What the OS hands out for a file or socket: a descriptor on POSIX, a HANDLE / SOCKET on Windows (-1 = none).
@@ -426,6 +428,7 @@ struct Shared {
   SeqSlot<DeviceInfo> device;
   SeqSlot<HubInfo> hub;
   SeqSlot<InputInfo> input;
+  SeqSlot<PreviewView> preview;
   CmdRing<kCmdRingSize> cmd;
   SpscShared<WireEvent, kEventRingSize> events;
   StreamShared<kStreamFrames> stream;
@@ -445,6 +448,7 @@ enum class BlockKind : std::uint32_t { Track = 1, Sample = 2 };
 constexpr std::uint64_t kMaxBlockBytes = 8ull << 30;
 constexpr std::uint64_t kMaxBlockFrames = 1ull << 31;
 constexpr std::uint32_t kMaxGridSections = 100000, kMaxMemoryCues = 100000, kMaxPath = 511;
+constexpr std::uint32_t kMaxMetaGrid = 4096, kMaxMetaCues = 4096;  // a set_track_meta request must fit one control frame
 
 struct WireGrid {
   double first_beat_frame = 0;
@@ -540,6 +544,7 @@ enum Req : std::uint8_t {
   kReqOpenInput,       // str hint, i32 channel, u8 stereo -> u8 ok, str error
   kReqCloseInput,
   kReqInputDevices,    // -> u32 n, str...
+  kReqSetTrackMeta,    // u8 deck, i64 track id, f64 bpm, u32 n grid, (f64 frame, f64 bpm, i32 bar_beat)..., u32 n cues, f64... -> u8 ok
 };
 
 class Wr {

@@ -6,6 +6,15 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Track preparation: beat-grid editing (shift, first beat and downbeat at the playhead, BPM
+  nudge, halve/double, tap tempo, tempo sections, lock, undo) with a headphone-only metronome;
+  memory cues, saved loops, named and coloured hot cues, draggable cue markers.
+- Waveform zoom and scrubbing; overview with cue and loop markers.
+- Pre-listen from the browser on the headphone bus only (never on master unless enabled).
+- Browser: configurable columns, ratings, colour tags, multi-select, drag onto playlists and
+  reorder, compatible-key filter, missing-file marker; smart playlists (exportable to USB).
+- Library schema 4 (copy made before upgrading); engine IPC protocol 4; new API routes and
+  controls; `tools/check_openapi.py` keeps the OpenAPI file in step with the routes.
 - Continuous integration on GitHub for macOS, Linux and Windows (build and all test suites).
 - Microphone channel: input device chooser, level, EQ, noise gate, talkover ducking, optional
   headphone monitoring; included in recordings and the stream output; controls in the API,

@@ -384,7 +384,15 @@ int RemoteEngine::next_slot() {
   return slot_cursor_++ % kBlockSlots;
 }
 
-void RemoteEngine::load(int deck, std::unique_ptr<LoadedTrack> track) {
+void RemoteEngine::load(int deck, std::unique_ptr<LoadedTrack> track) { share_track(Op::Load, deck, std::move(track)); }
+void RemoteEngine::preview_load(std::unique_ptr<LoadedTrack> track) { share_track(Op::PreviewLoad, 0, std::move(track)); }
+PreviewView RemoteEngine::preview() const {
+  const auto l = link();
+  return l ? l->sh->preview.read() : PreviewView{};
+}
+
+// Copies a decoded track into a shared-memory block and tells the engine to take it (as a deck's track or the preview).
+void RemoteEngine::share_track(Op op, int deck, std::unique_ptr<LoadedTrack> track) {
   const auto l = link();
   if (!l || !track || !track->audio || deck < 0 || deck >= kMaxDecks) return;
   std::string error;
@@ -403,7 +411,7 @@ void RemoteEngine::load(int deck, std::unique_ptr<LoadedTrack> track) {
     return;
   }
   WireCommand w;
-  w.op = static_cast<std::uint8_t>(Op::Load);
+  w.op = static_cast<std::uint8_t>(op);
   w.deck = static_cast<std::uint8_t>(deck);
   w.i = slot;
   w.aux = gen;
@@ -411,6 +419,24 @@ void RemoteEngine::load(int deck, std::unique_ptr<LoadedTrack> track) {
     Shm::remove(names_->block(slot));
     ++dropped_;
   }
+}
+
+void RemoteEngine::set_track_meta(int deck, std::int64_t track_id, const TrackMeta& meta) {
+  if (deck < 0 || deck >= kMaxDecks || meta.grid.size() > kMaxMetaGrid || meta.memory_cues.size() > kMaxMetaCues) return;
+  Wr w;
+  w.u8(static_cast<std::uint8_t>(deck));
+  w.i64(track_id);
+  w.f64(meta.bpm);
+  w.u32(static_cast<std::uint32_t>(meta.grid.size()));
+  for (const GridSection& g : meta.grid) {
+    w.f64(g.first_beat_frame);
+    w.f64(g.bpm);
+    w.i32(g.bar_beat);
+  }
+  w.u32(static_cast<std::uint32_t>(meta.memory_cues.size()));
+  for (double c : meta.memory_cues) w.f64(c);
+  std::vector<std::uint8_t> r;
+  if (!rpc(kReqSetTrackMeta, w.bytes(), r, 3000)) DH_LOG(Warn, "engine: could not send the beat grid to the engine");
 }
 
 void RemoteEngine::sampler_load(int slot, std::unique_ptr<LoadedSample> sample) {

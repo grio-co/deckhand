@@ -32,8 +32,17 @@ static bool rejects(const std::string& text, const char* needle) {
   return true;
 }
 
-static void check_layout(const Skin& sk, const char* name, float W, float H, float scale, size_t win = 0) {
-  Layout L = solve_layout(sk, win, W, H, scale);
+// The skin's grid edit tools (nodes shown while a deck is in edit mode) are hidden, as they are when no deck is edited, or all shown.
+static std::vector<char> grid_edit_mask(const Skin& sk, bool editing) {
+  std::vector<char> m(sk.nodes.size(), 0);
+  for (size_t i = 0; i < sk.nodes.size(); ++i)
+    if (!editing && sk.nodes[i].show.find("grid.edit") != std::string::npos) m[i] = 1;
+  return m;
+}
+
+static void check_layout(const Skin& sk, const char* name, float W, float H, float scale, size_t win = 0, bool editing = false) {
+  const std::vector<char> hidden = grid_edit_mask(sk, editing);
+  Layout L = solve_layout(sk, win, W, H, scale, &hidden);
   CHECK(!L.widgets.empty());
   CHECK(L.width == W && L.height == H);
   const float eps = 0.01f;
@@ -44,13 +53,16 @@ static void check_layout(const Skin& sk, const char* name, float W, float H, flo
       std::fprintf(stderr, "%s %gx%g: widget %zu (%s) outside window: %g %g %g %g\n", name, W, H, i, w.type.c_str(), w.rect.x, w.rect.y, w.rect.w, w.rect.h);
       CHECK(false);
     }
-    if (w.parent >= 0) {
+    if (w.parent >= 0 && !(w.rect.w == 0 && w.rect.h == 0)) {  // (widgets of a hidden subtree collapse to nothing)
       const auto& p = L.widgets[w.parent];
+      if (!(w.rect.x >= p.rect.x - eps && w.rect.y >= p.rect.y - eps && w.rect.right() <= p.rect.right() + eps && w.rect.bottom() <= p.rect.bottom() + eps))
+        std::fprintf(stderr, "%s %gx%g: %s '%s' (%g %g %g %g) leaves its parent %s (%g %g %g %g)\n", name, W, H, w.type.c_str(), w.bind.c_str(), w.rect.x, w.rect.y,
+                     w.rect.w, w.rect.h, p.type.c_str(), p.rect.x, p.rect.y, p.rect.w, p.rect.h);
       CHECK(w.rect.x >= p.rect.x - eps && w.rect.y >= p.rect.y - eps && w.rect.right() <= p.rect.right() + eps && w.rect.bottom() <= p.rect.bottom() + eps);
     }
     if (w.interactive) {
       ++interactive;
-      if (!(w.rect.w > 1 && w.rect.h > 1)) {
+      if (!(w.rect.w > 1 && w.rect.h > 1) && !(w.rect.w == 0 && w.rect.h == 0 && !editing)) {  // (tools of decks not being edited take no space)
         std::fprintf(stderr, "%s %gx%g: interactive %s '%s' collapsed\n", name, W, H, w.type.c_str(), w.bind.c_str());
         CHECK(false);
       }
@@ -199,6 +211,9 @@ int main() {
     const Skin& d = *skins["default"];
     CHECK(d.windows.size() == 2 && d.windows[0].id == "main" && d.windows[1].id == "four");
     for (auto& z : sizes) check_layout(d, "default/four", z.w, z.h, z.s, 1);
+    // with the grid edit tools of every deck shown, the windows still lay out (no overlaps, nothing outside) at their own size
+    check_layout(d, "default/main editing", 1280, 800, 1, 0, true);
+    check_layout(d, "default/four editing", 1440, 900, 1, 1, true);
     // the bindings the application maps (src/app/skin_view.cpp map_binding) are all present
     std::map<std::string, int> main_binds, four_binds;
     for (auto& w : solve_layout(d, 0, 1280, 800, 1).widgets) {
@@ -214,7 +229,10 @@ int main() {
                           "app.learn", "app.status", "app.controller", "app.audio", "app.has_import", "app.multi_language", "app.multi_skin",
                           "app.has_four", "browser.search", "browser.count", "browser.playlist.add_list", "browser.playlist.add_folder",
                           "browser.playlist.rename", "browser.playlist.delete", "browser.add_to", "browser.remove", "browser.can_remove",
-                          "browser.edit", "deck[2].load"})
+                          "browser.edit", "deck[2].load", "deck[1].grid.edit", "deck[2].grid.edit", "deck[1].metronome", "deck[2].grid.shift_m1",
+                          "deck[1].grid.first_beat", "deck[1].grid.downbeat", "deck[1].grid.bpm", "deck[2].grid.tap", "deck[2].grid.lock",
+                          "deck[1].grid.undo", "deck[2].cue.memory_set", "deck[1].cue.loop_save", "deck[2].cue.loop_recall",
+                          "mixer.metronome.level"})
       if (!main_binds.count(b)) { std::fprintf(stderr, "default main window lacks binding %s\n", b); CHECK(false); }
     for (const char* b : {"deck[3].play", "deck[4].pads", "mixer.ch[3].fader", "mixer.ch[4].eq.low", "deck[4].waveform", "mixer.ch[4].cue"})
       if (!four_binds.count(b)) { std::fprintf(stderr, "default four window lacks binding %s\n", b); CHECK(false); }

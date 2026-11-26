@@ -58,10 +58,18 @@ Skin names are the public API; the application translates them to its control ta
               fx[S].select (button: steps through the effects, shows the name)  fx[S].on  fx[S].wet (fader)
               jog  waveform (mode=zoomed|overview; overview seeks on click/drag)  pads (hot cues, cols= rows=)
               load (button: loads the selected library track)
+              metronome (button: click on every grid beat, headphones only)
+              grid.edit (button + `show=`: edit mode, the waveform draws the grid heavily)  grid.bpm (label)  grid.lock (button)
+              grid.shift_m10 .shift_m1 .shift_p1 .shift_p10 (ms)  grid.first_beat .downbeat .cycle  grid.bpm_m01 .bpm_m001 .bpm_p001 .bpm_p01
+              grid.half .double .tap .reanalyse .undo .add_section .remove_section (buttons; they edit the loaded track's grid)
+              cue.memory_set .memory_delete .memory_prev .memory_next .loop_save .loop_recall (buttons)
     mixer.    crossfader master.level (meter) master.volume headphone.volume headphone.mix sampler.level
               ch[N].  trim eq.high eq.mid eq.low filter fader (knobs, faders)  level (meter)  cue (headphone cue)
+              metronome.level (fader)
     browser.  tree tracks search (editable label) count add_to remove edit can_remove (show)
-              playlist.add_list .add_folder .rename .delete
+              columns (button: the column editor)  compatible (button: only tracks that mix with the loaded one)
+              playlist.add_list .add_folder .add_smart .rename .delete
+    preview.  play stop (buttons)  wave (waveform: click or drag seeks)  title time (labels)  level (fader)
     sampler.  pads (16 slots: click plays, shift-click or the corner square stops)  level  stop
     app.      controller audio status (labels)  import rec export language skin layout settings sampler learn (buttons)
               has_import multi_language multi_skin has_four (for `show=`)
@@ -71,8 +79,12 @@ is given back in rows, columns and grids; elsewhere it is just not drawn). `form
 `bind` formats the id with `value`/`count` = the bound value; `args="deck=A"` adds fixed arguments
 (`parse_text_args`). `button text_on=` is shown while on. A button or label with a `bind` but no `text` shows
 the application's own text for it (REC with its clock, the language tag, the skin name, an effect name).
-`browser columns="title,artist,..."` header ids are `browser.col.<name>`; known columns are title, artist,
-bpm, key, time.
+`browser columns="title,artist,..."` header ids are `browser.col.<name>`; known columns are title, artist, album,
+genre, bpm, key, time, rating, comment, added, plays, played, color, format, bitrate. The list in the skin is the default:
+the user's own choice, order and widths (the browser's `Columns...` panel and dragging a column edge) are saved in the
+library settings `browser.columns` and `browser.widths`. A skin whose layout has no `grid.edit` button still works; edit
+mode can be switched on through the API. The scrolling waveform zooms with the mouse wheel and its corner buttons (the
+application draws those); the zoom is remembered per deck (`ui.wave_zoom.N`).
 
 ## Windows
 A skin may declare up to four windows. The application uses `main` (the first) and, when present, `four`: the

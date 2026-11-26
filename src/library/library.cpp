@@ -2,11 +2,19 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <stdexcept>
 #include <utility>
 
+#include <sqlite3.h>
+
 #include "deckhand/library/backup.hpp"
+#include "deckhand/library/keys.hpp"
 #include "deckhand/log/log.hpp"
 
 namespace deckhand {
@@ -44,7 +52,9 @@ std::string extension_of(const std::string& path) {
 
 const char* const kTrackColumns =
     "t.id, r.last_seen_path, t.rel_path, t.title, t.artist, t.album, t.genre, t.key, t.format, t.bpm,"
-    " t.duration_ms, t.rating";
+    " t.duration_ms, t.rating, t.comment, t.color, t.date_added, t.bitrate, t.grid_locked,"
+    " (SELECT count(*) FROM history h WHERE h.track_id = t.id),"
+    " (SELECT coalesce(max(h.started_at), 0) FROM history h WHERE h.track_id = t.id)";
 
 TrackRow read_track(const Stmt& s) {
   TrackRow t;
@@ -59,26 +69,52 @@ TrackRow read_track(const Stmt& s) {
   t.bpm = s.f64(9);
   t.duration_ms = s.i64(10);
   t.rating = static_cast<int>(s.i64(11));
+  t.comment = s.text(12);
+  t.color = s.is_null(13) ? 0 : static_cast<int>(s.i64(13));
+  t.date_added = s.i64(14);
+  t.bitrate = static_cast<int>(s.i64(15));
+  t.grid_locked = s.i64(16) != 0;
+  t.play_count = static_cast<int>(s.i64(17));
+  t.last_played_ms = s.i64(18);
   return t;
 }
 
-// Whether migrate() would change this library. Version 3 needs FTS5: without it the library stays at 2, and that
-// must not count as an upgrade on every start.
+// Whether migrate() would change this library's schema. (The optional search index is derived data: it is built or
+// rebuilt without a copy.)
 bool upgrade_pending(Db& db) {
   std::int64_t version = 1;
   {
     Stmt s(db, "SELECT max(version) FROM schema_version");
     if (s.step()) version = s.i64(0);
   }
-  if (version >= kLibrarySchemaVersion) return false;
-  if (version < 2) return true;
-  try {
-    db.exec("CREATE VIRTUAL TABLE temp.dh_probe USING fts5(x, tokenize='trigram'); DROP TABLE temp.dh_probe;");
-    return true;
-  } catch (const std::exception&) {
-    return false;
-  }
+  return version < kLibrarySchemaVersion;
 }
+
+bool has_column(Db& db, const char* table, const char* column) {
+  Stmt s(db, (std::string("SELECT 1 FROM pragma_table_info('") + table + "') WHERE name = '" + column + "'").c_str());
+  return s.step();
+}
+
+// A transaction that joins one already open (callers such as the sync engine batch many edits in their own).
+struct OptionalTx {
+  explicit OptionalTx(Db& d) : db(d), own(sqlite3_get_autocommit(d.handle()) != 0) {
+    if (own) db.exec("BEGIN IMMEDIATE");
+  }
+  void commit() {
+    if (!own) return;
+    db.exec("COMMIT");
+    own = false;
+  }
+  ~OptionalTx() {
+    if (!own) return;
+    try {
+      db.exec("ROLLBACK");
+    } catch (...) {
+    }
+  }
+  Db& db;
+  bool own;
+};
 
 }  // namespace
 
@@ -125,30 +161,45 @@ void Library::migrate() {
     tx.commit();
     DH_LOG(Info, "library migrated to schema %d", 2);
   }
-  if (version < 3) {
+  if (version < 4) {
+    // Track preparation: grid lock, smart playlists, a history index for play counts.
+    Transaction tx(db_);
+    if (!has_column(db_, "tracks", "grid_locked")) db_.exec("ALTER TABLE tracks ADD COLUMN grid_locked INTEGER NOT NULL DEFAULT 0;");
+    db_.exec(
+        "CREATE TABLE IF NOT EXISTS smart_playlists ("
+        " id INTEGER PRIMARY KEY, name TEXT NOT NULL, match_all INTEGER NOT NULL DEFAULT 1,"
+        " rules TEXT NOT NULL DEFAULT '[]', position INTEGER NOT NULL DEFAULT 0);"
+        "CREATE INDEX IF NOT EXISTS idx_history_track ON history(track_id);"
+        "UPDATE schema_version SET version = 4;");
+    tx.commit();
+    DH_LOG(Info, "library migrated to schema %d (grid lock, smart playlists)", 4);
+  }
+  {
     // Substring search index (FTS5 trigram, case-insensitive) kept in step with `tracks` by triggers. Optional: an
-    // SQLite build without FTS5 keeps working with the LIKE scan.
-    try {
-      Transaction tx(db_);
-      db_.exec(
-          "CREATE VIRTUAL TABLE tracks_fts USING fts5(title, artist, album, rel_path, content='tracks', content_rowid='id',"
-          " tokenize='trigram');"
-          "CREATE TRIGGER tracks_fts_ai AFTER INSERT ON tracks BEGIN"
-          " INSERT INTO tracks_fts(rowid, title, artist, album, rel_path) VALUES (new.id, new.title, new.artist, new.album, new.rel_path);"
-          " END;"
-          "CREATE TRIGGER tracks_fts_ad AFTER DELETE ON tracks BEGIN"
-          " INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, rel_path) VALUES ('delete', old.id, old.title, old.artist, old.album, old.rel_path);"
-          " END;"
-          "CREATE TRIGGER tracks_fts_au AFTER UPDATE OF title, artist, album, rel_path ON tracks BEGIN"
-          " INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, rel_path) VALUES ('delete', old.id, old.title, old.artist, old.album, old.rel_path);"
-          " INSERT INTO tracks_fts(rowid, title, artist, album, rel_path) VALUES (new.id, new.title, new.artist, new.album, new.rel_path);"
-          " END;"
-          "INSERT INTO tracks_fts(tracks_fts) VALUES ('rebuild');"
-          "UPDATE schema_version SET version = 3;");
-      tx.commit();
-      DH_LOG(Info, "library migrated to schema %d (search index built)", 3);
-    } catch (const std::exception& e) {
-      DH_LOG(Warn, "search index unavailable (%s); searching without it", e.what());
+    // SQLite build without FTS5 keeps working with the LIKE scan. Tried on every start until it exists.
+    Stmt probe(db_, "SELECT 1 FROM sqlite_master WHERE name='tracks_fts'");
+    if (!probe.step()) {
+      try {
+        Transaction tx(db_);
+        db_.exec(
+            "CREATE VIRTUAL TABLE tracks_fts USING fts5(title, artist, album, rel_path, content='tracks', content_rowid='id',"
+            " tokenize='trigram');"
+            "CREATE TRIGGER tracks_fts_ai AFTER INSERT ON tracks BEGIN"
+            " INSERT INTO tracks_fts(rowid, title, artist, album, rel_path) VALUES (new.id, new.title, new.artist, new.album, new.rel_path);"
+            " END;"
+            "CREATE TRIGGER tracks_fts_ad AFTER DELETE ON tracks BEGIN"
+            " INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, rel_path) VALUES ('delete', old.id, old.title, old.artist, old.album, old.rel_path);"
+            " END;"
+            "CREATE TRIGGER tracks_fts_au AFTER UPDATE OF title, artist, album, rel_path ON tracks BEGIN"
+            " INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, album, rel_path) VALUES ('delete', old.id, old.title, old.artist, old.album, old.rel_path);"
+            " INSERT INTO tracks_fts(rowid, title, artist, album, rel_path) VALUES (new.id, new.title, new.artist, new.album, new.rel_path);"
+            " END;"
+            "INSERT INTO tracks_fts(tracks_fts) VALUES ('rebuild');");
+        tx.commit();
+        DH_LOG(Info, "library search index built");
+      } catch (const std::exception& e) {
+        DH_LOG(Warn, "search index unavailable (%s); searching without it", e.what());
+      }
     }
   }
   {
@@ -200,6 +251,12 @@ std::string track_query(const char* columns, bool join_roots, bool fts, std::int
     case SortKey::Duration: column = "t.duration_ms"; break;
     case SortKey::Rating: column = "t.rating"; break;
     case SortKey::DateAdded: column = "t.date_added"; break;
+    case SortKey::Comment: column = "t.comment COLLATE NOCASE"; break;
+    case SortKey::Color: column = "coalesce(t.color, 0)"; break;
+    case SortKey::Format: column = "t.format COLLATE NOCASE"; break;
+    case SortKey::Bitrate: column = "t.bitrate"; break;
+    case SortKey::PlayCount: column = "(SELECT count(*) FROM history h WHERE h.track_id = t.id)"; break;
+    case SortKey::LastPlayed: column = "(SELECT coalesce(max(h.started_at), 0) FROM history h WHERE h.track_id = t.id)"; break;
   }
   if (column) {
     sql += std::string(" ORDER BY ") + column + (descending ? " DESC" : " ASC") + ", t.title COLLATE NOCASE, t.id";
@@ -260,7 +317,7 @@ std::optional<TrackRow> Library::track(std::int64_t id) {
 
 std::vector<Cue> Library::cues(std::int64_t track_id) {
   std::vector<Cue> out;
-  Stmt s(db_, "SELECT kind, slot, start_ms, end_ms, label FROM cues WHERE track_id = ?1 ORDER BY start_ms");
+  Stmt s(db_, "SELECT kind, slot, start_ms, end_ms, label, color FROM cues WHERE track_id = ?1 ORDER BY start_ms, id");
   s.bind(1, track_id);
   while (s.step()) {
     Cue c;
@@ -270,6 +327,7 @@ std::vector<Cue> Library::cues(std::int64_t track_id) {
     c.start_ms = s.f64(2);
     c.end_ms = s.is_null(3) ? -1 : s.f64(3);
     c.label = s.text(4);
+    c.color = s.is_null(5) ? -1 : static_cast<int>(s.i64(5));
     out.push_back(std::move(c));
   }
   return out;
@@ -315,15 +373,88 @@ std::int64_t Library::upsert_track(const NewTrack& t) {
 }
 
 void Library::set_hot_cue(std::int64_t track_id, int slot, double start_ms, double end_ms) {
-  clear_hot_cue(track_id, slot);
-  Stmt i(db_, "INSERT INTO cues(track_id, kind, slot, start_ms, end_ms) VALUES (?1, ?2, ?3, ?4, ?5)");
-  i.bind(1, track_id).bind(2, end_ms >= 0 ? "loop" : "hot").bind(3, slot).bind(4, start_ms);
-  if (end_ms >= 0) {
-    i.bind(5, end_ms);
-  } else {
-    i.bind_null(5);
+  OptionalTx tx(db_);
+  std::string label;
+  bool has_label = false, has_color = false;
+  std::int64_t color = -1;
+  {
+    Stmt old(db_, "SELECT label, color FROM cues WHERE track_id = ?1 AND slot = ?2 AND kind IN ('hot', 'loop') LIMIT 1");
+    old.bind(1, track_id).bind(2, slot);
+    if (old.step()) {
+      has_label = !old.is_null(0);
+      label = old.text(0);
+      has_color = !old.is_null(1);
+      color = has_color ? old.i64(1) : -1;
+    }
   }
+  clear_hot_cue(track_id, slot);
+  Stmt i(db_, "INSERT INTO cues(track_id, kind, slot, start_ms, end_ms, label, color) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+  i.bind(1, track_id).bind(2, end_ms >= 0 ? "loop" : "hot").bind(3, slot).bind(4, start_ms);
+  if (end_ms >= 0) i.bind(5, end_ms);
+  else i.bind_null(5);
+  if (has_label) i.bind(6, label);
+  else i.bind_null(6);
+  if (has_color) i.bind(7, color);
+  else i.bind_null(7);
   i.run();
+  tx.commit();
+}
+
+void Library::set_hot_cue_style(std::int64_t track_id, int slot, const std::string& label, int color) {
+  Stmt u(db_, "UPDATE cues SET label = ?1, color = ?2 WHERE track_id = ?3 AND slot = ?4 AND kind IN ('hot', 'loop')");
+  if (label.empty()) u.bind_null(1);
+  else u.bind(1, label);
+  if (color < 0) u.bind_null(2);
+  else u.bind(2, color);
+  u.bind(3, track_id).bind(4, slot);
+  u.run();
+}
+
+std::vector<Cue> Library::memory_cues(std::int64_t track_id) {
+  std::vector<Cue> out;
+  for (Cue& c : cues(track_id))
+    if (c.slot < 0) out.push_back(std::move(c));
+  return out;
+}
+
+void Library::replace_memory_cues(std::int64_t track_id, const std::vector<Cue>& list) {
+  OptionalTx tx(db_);
+  Stmt d(db_, "DELETE FROM cues WHERE track_id = ?1 AND slot IS NULL");
+  d.bind(1, track_id);
+  d.run();
+  Stmt i(db_, "INSERT INTO cues(track_id, kind, slot, start_ms, end_ms, label, color) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6)");
+  for (const Cue& c : list) {
+    const bool loop = c.kind == CueKind::Loop && c.end_ms > c.start_ms;
+    i.bind(1, track_id).bind(2, loop ? "loop" : "memory").bind(3, c.start_ms);
+    if (loop) i.bind(4, c.end_ms);
+    else i.bind_null(4);
+    if (c.label.empty()) i.bind_null(5);
+    else i.bind(5, c.label);
+    if (c.color < 0) i.bind_null(6);
+    else i.bind(6, c.color);
+    i.run();
+  }
+  tx.commit();
+}
+
+bool Library::grid_locked(std::int64_t track_id) {
+  Stmt s(db_, "SELECT grid_locked FROM tracks WHERE id = ?1");
+  s.bind(1, track_id);
+  return s.step() && s.i64(0) != 0;
+}
+
+void Library::set_grid_locked(std::int64_t track_id, bool locked) {
+  Stmt u(db_, "UPDATE tracks SET grid_locked = ?1 WHERE id = ?2");
+  u.bind(1, locked ? 1 : 0).bind(2, track_id);
+  u.run();
+}
+
+void Library::set_track_color(std::int64_t track_id, int color) {
+  Stmt u(db_, "UPDATE tracks SET color = ?1 WHERE id = ?2");
+  if (color <= 0) u.bind_null(1);
+  else u.bind(1, color);
+  u.bind(2, track_id);
+  u.run();
 }
 
 void Library::clear_hot_cue(std::int64_t track_id, int slot) {
@@ -621,6 +752,376 @@ std::vector<HistoryEntry> Library::history(std::int64_t session_id) {
     out.push_back(std::move(e));
   }
   return out;
+}
+
+
+// ---- smart playlists ---------------------------------------------------------------------------------------------
+namespace {
+
+const char* const kFieldNames[] = {"text", "bpm", "key", "genre", "rating", "color", "added", "plays", "playlist", "missing", "bpmnear"};
+
+std::string json_escape(const std::string& s) {
+  std::string out;
+  for (const unsigned char c : s) {
+    if (c == '"' || c == '\\') {
+      out += '\\';
+      out += static_cast<char>(c);
+    } else if (c < 0x20) {
+      char b[8];
+      std::snprintf(b, sizeof b, "\\u%04x", c);
+      out += b;
+    } else {
+      out += static_cast<char>(c);
+    }
+  }
+  return out;
+}
+
+std::string num_text(double v) {
+  char b[40];
+  std::snprintf(b, sizeof b, "%.10g", v);
+  return b;
+}
+
+// Minimal reader for the one shape smart_rules_json writes: an array of flat objects of strings, numbers, booleans.
+struct JsonIn {
+  const std::string& s;
+  std::size_t i = 0;
+  void ws() {
+    while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
+  }
+  bool eat(char c) {
+    ws();
+    if (i < s.size() && s[i] == c) {
+      ++i;
+      return true;
+    }
+    return false;
+  }
+  bool str(std::string& out) {
+    out.clear();
+    if (!eat('"')) return false;
+    while (i < s.size() && s[i] != '"') {
+      if (s[i] == '\\') {
+        if (++i >= s.size()) return false;
+        if (s[i] == 'u') {
+          if (i + 4 >= s.size()) return false;
+          const unsigned long cp = std::strtoul(s.substr(i + 1, 4).c_str(), nullptr, 16);
+          if (cp < 0x80) out += static_cast<char>(cp);
+          else if (cp < 0x800) out += {static_cast<char>(0xC0 | (cp >> 6)), static_cast<char>(0x80 | (cp & 0x3F))};
+          else out += {static_cast<char>(0xE0 | (cp >> 12)), static_cast<char>(0x80 | ((cp >> 6) & 0x3F)), static_cast<char>(0x80 | (cp & 0x3F))};
+          i += 4;
+        } else {
+          out += s[i];
+        }
+      } else {
+        out += s[i];
+      }
+      ++i;
+    }
+    return i < s.size() && s[i++] == '"';
+  }
+  bool num(double& v) {
+    ws();
+    char* end = nullptr;
+    v = std::strtod(s.c_str() + i, &end);
+    if (end == s.c_str() + i || !std::isfinite(v)) return false;
+    i = static_cast<std::size_t>(end - s.c_str());
+    return true;
+  }
+};
+
+// Bound values of a generated query, numbered from ?4 (?1 playlist, ?2 / ?3 search).
+struct Bound {
+  std::string text;
+  double num = 0;
+  bool is_text = true;
+};
+
+std::string like_escape(const std::string& s) {
+  std::string out = "%";
+  for (const char c : s) {
+    if (c == '%' || c == '_' || c == '\\') out += '\\';
+    out += c;
+  }
+  return out + "%";
+}
+
+}  // namespace
+
+std::string smart_rules_json(const std::vector<SmartRule>& rules) {
+  std::string out = "[";
+  for (std::size_t k = 0; k < rules.size(); ++k) {
+    const SmartRule& r = rules[k];
+    out += (k ? "," : "");
+    out += std::string("{\"f\":\"") + kFieldNames[static_cast<int>(r.field)] + "\",\"n\":" + (r.negate ? "true" : "false") +
+           ",\"t\":\"" + json_escape(r.text) + "\",\"lo\":" + num_text(r.lo) + ",\"hi\":" + num_text(r.hi) +
+           ",\"id\":" + std::to_string(r.id) + "}";
+  }
+  return out + "]";
+}
+
+bool smart_rules_from_json(const std::string& json, std::vector<SmartRule>& rules) {
+  rules.clear();
+  JsonIn in{json};
+  const auto fail = [&] {
+    rules.clear();
+    return false;
+  };
+  if (!in.eat('[')) return fail();
+  if (in.eat(']')) return true;
+  for (;;) {
+    SmartRule r;
+    if (!in.eat('{')) return fail();
+    bool have_field = false;
+    for (;;) {
+      std::string key;
+      if (!in.str(key) || !in.eat(':')) return fail();
+      in.ws();
+      if (key == "f" || key == "t") {
+        std::string v;
+        if (!in.str(v)) return fail();
+        if (key == "t") {
+          r.text = v;
+        } else {
+          for (int f = 0; f < 11; ++f)
+            if (v == kFieldNames[f]) {
+              r.field = static_cast<SmartRule::Field>(f);
+              have_field = true;
+            }
+        }
+      } else if (key == "n") {
+        if (json.compare(in.i, 4, "true") == 0) {
+          r.negate = true;
+          in.i += 4;
+        } else if (json.compare(in.i, 5, "false") == 0) {
+          r.negate = false;
+          in.i += 5;
+        } else {
+          return fail();
+        }
+      } else if (key == "lo" || key == "hi" || key == "id") {
+        double v = 0;
+        if (!in.num(v)) return fail();
+        if (key == "lo") r.lo = v;
+        else if (key == "hi") r.hi = v;
+        else r.id = static_cast<std::int64_t>(v);
+      } else {
+        return fail();
+      }
+      if (in.eat(',')) continue;
+      if (in.eat('}')) break;
+      return fail();
+    }
+    if (!have_field) return fail();
+    rules.push_back(std::move(r));
+    if (in.eat(',')) continue;
+    if (in.eat(']')) break;
+    return fail();
+  }
+  in.ws();
+  return in.i == json.size() ? true : fail();
+}
+
+const std::set<std::int64_t>& Library::missing_ids() {
+  const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
+  if (missing_at_ == 0 || now - missing_at_ >= 5) {
+    missing_ids_.clear();
+    Stmt s(db_, "SELECT t.id, r.last_seen_path, t.rel_path FROM tracks t JOIN library_roots r ON r.id = t.root_id");
+    while (s.step()) {
+      std::error_code ec;
+      if (!std::filesystem::exists(join_path(s.text(1), s.text(2)), ec)) missing_ids_.insert(s.i64(0));
+    }
+    missing_at_ = now;
+  }
+  return missing_ids_;
+}
+
+std::vector<std::int64_t> Library::query_ids(const std::vector<SmartRule>& rules, bool match_all, const std::string& search,
+                                             SortKey sort, bool descending) {
+  std::vector<Bound> binds;
+  const auto param = [&](const std::string& t) {
+    binds.push_back({t, 0, true});
+    return "?" + std::to_string(binds.size() + 3);
+  };
+  const auto numparam = [&](double v) {
+    binds.push_back({"", v, false});
+    return "?" + std::to_string(binds.size() + 3);
+  };
+  std::vector<std::string> clauses;
+  std::vector<std::int64_t> missing_rows;  // Missing rules are answered from the file-system scan
+  std::string miss_sql;
+  for (const SmartRule& r : rules) {
+    std::string c;
+    switch (r.field) {
+      case SmartRule::Field::Text: {
+        if (r.text.empty()) continue;
+        const std::string p = param(like_escape(r.text));
+        c = "(coalesce(t.title,'') LIKE " + p + " ESCAPE '\\' OR coalesce(t.artist,'') LIKE " + p + " ESCAPE '\\' OR coalesce(t.album,'') LIKE " + p +
+            " ESCAPE '\\' OR coalesce(t.comment,'') LIKE " + p + " ESCAPE '\\' OR t.rel_path LIKE " + p + " ESCAPE '\\')";
+        break;
+      }
+      case SmartRule::Field::Genre: {
+        if (r.text.empty()) continue;
+        c = "coalesce(t.genre,'') LIKE " + param(like_escape(r.text)) + " ESCAPE '\\'";
+        break;
+      }
+      case SmartRule::Field::Bpm:
+        c = "(coalesce(t.bpm,0) >= " + numparam(r.lo) + (r.hi > 0 ? " AND coalesce(t.bpm,0) <= " + numparam(r.hi) : std::string()) + ")";
+        break;
+      case SmartRule::Field::Key: {
+        std::string list;
+        for (std::size_t a = 0; a <= r.text.size();) {
+          const std::size_t b = r.text.find(',', a);
+          std::string k = r.text.substr(a, b == std::string::npos ? std::string::npos : b - a);
+          while (!k.empty() && std::isspace(static_cast<unsigned char>(k.back()))) k.pop_back();
+          while (!k.empty() && std::isspace(static_cast<unsigned char>(k.front()))) k.erase(k.begin());
+          if (!k.empty()) {
+            const KeyInfo info = parse_key(k);
+            const std::string forms[] = {k, info ? key_wheel_text(info) : k, info ? key_musical_text(info) : k};
+            for (std::size_t f = 0; f < 3; ++f)
+              if (f == 0 || forms[f] != forms[0]) list += (list.empty() ? "" : ",") + param(forms[f]);
+          }
+          if (b == std::string::npos) break;
+          a = b + 1;
+        }
+        if (list.empty()) continue;
+        c = "coalesce(t.key,'') COLLATE NOCASE IN (" + list + ")";
+        break;
+      }
+      case SmartRule::Field::Rating: c = "coalesce(t.rating,0) >= " + numparam(r.lo); break;
+      case SmartRule::Field::Color:
+        c = r.lo <= 0 ? std::string("coalesce(t.color,0) = 0") : "t.color = " + numparam(r.lo);
+        break;
+      case SmartRule::Field::AddedDays:
+        c = "t.date_added >= " + numparam(static_cast<double>(std::time(nullptr)) - r.lo * 86400.0);
+        break;
+      case SmartRule::Field::Plays: {
+        const std::string count = "(SELECT count(*) FROM history h WHERE h.track_id = t.id)";
+        c = "(" + count + " >= " + numparam(r.lo) + (r.hi >= 0 ? " AND " + count + " <= " + numparam(r.hi) : std::string()) + ")";
+        break;
+      }
+      case SmartRule::Field::InPlaylist:
+        c = "t.id IN (SELECT track_id FROM playlist_tracks WHERE playlist_id = " + numparam(static_cast<double>(r.id)) + ")";
+        break;
+      case SmartRule::Field::BpmNear: {
+        if (r.lo <= 0) {
+          c = "0";
+          break;
+        }
+        const std::string ref = numparam(r.lo), tol = numparam(r.hi > 0 ? r.hi : 0.06);
+        c = "(coalesce(t.bpm,0) > 0 AND (abs(t.bpm / " + ref + " - 1) <= " + tol + " OR abs(t.bpm / (" + ref + " * 2) - 1) <= " + tol +
+            " OR abs(t.bpm / (" + ref + " / 2) - 1) <= " + tol + "))";
+        break;
+      }
+      case SmartRule::Field::Missing: {
+        // negate = the file is present. The scan is cached; ids are integers, so they go into the SQL as a list.
+        std::string ids;
+        const auto& gone = missing_ids();
+        if (r.negate) {
+          c = "1";
+          if (!gone.empty()) {
+            for (const auto id : gone) ids += (ids.empty() ? "" : ",") + std::to_string(id);
+            c = "t.id NOT IN (" + ids + ")";
+          }
+        } else {
+          for (const auto id : gone) ids += (ids.empty() ? "" : ",") + std::to_string(id);
+          c = ids.empty() ? std::string("0") : "t.id IN (" + ids + ")";
+        }
+        clauses.push_back("(" + c + ")");
+        continue;
+      }
+    }
+    if (r.negate) c = "NOT (" + c + ")";
+    clauses.push_back("(" + c + ")");
+  }
+  std::string sql = "SELECT t.id FROM tracks t WHERE ";
+  const bool fts = use_fts(search);
+  if (fts) sql += "(?2 = '' OR t.id IN (SELECT rowid FROM tracks_fts WHERE tracks_fts MATCH ?3))";
+  else sql += "(?2 = '' OR t.title LIKE ?3 OR t.artist LIKE ?3 OR t.album LIKE ?3 OR t.rel_path LIKE ?3)";
+  if (!clauses.empty()) {
+    sql += " AND (";
+    for (std::size_t k = 0; k < clauses.size(); ++k) sql += (k ? (match_all ? " AND " : " OR ") : "") + clauses[k];
+    sql += ")";
+  }
+  const char* column = nullptr;
+  switch (sort) {
+    case SortKey::Default: break;
+    case SortKey::Title: column = "t.title COLLATE NOCASE"; break;
+    case SortKey::Artist: column = "t.artist COLLATE NOCASE"; break;
+    case SortKey::Album: column = "t.album COLLATE NOCASE"; break;
+    case SortKey::Genre: column = "t.genre COLLATE NOCASE"; break;
+    case SortKey::Bpm: column = "t.bpm"; break;
+    case SortKey::Key: column = "t.key COLLATE NOCASE"; break;
+    case SortKey::Duration: column = "t.duration_ms"; break;
+    case SortKey::Rating: column = "t.rating"; break;
+    case SortKey::DateAdded: column = "t.date_added"; break;
+    case SortKey::Comment: column = "t.comment COLLATE NOCASE"; break;
+    case SortKey::Color: column = "coalesce(t.color, 0)"; break;
+    case SortKey::Format: column = "t.format COLLATE NOCASE"; break;
+    case SortKey::Bitrate: column = "t.bitrate"; break;
+    case SortKey::PlayCount: column = "(SELECT count(*) FROM history h WHERE h.track_id = t.id)"; break;
+    case SortKey::LastPlayed: column = "(SELECT coalesce(max(h.started_at), 0) FROM history h WHERE h.track_id = t.id)"; break;
+  }
+  if (column) sql += std::string(" ORDER BY ") + column + (descending ? " DESC" : " ASC") + ", t.title COLLATE NOCASE, t.id";
+  else sql += " ORDER BY t.artist COLLATE NOCASE, t.title COLLATE NOCASE, t.id";
+  Stmt st(db_, sql.c_str());
+  st.bind(1, static_cast<std::int64_t>(0));
+  st.bind(2, search);
+  st.bind(3, search_pattern(search));
+  for (std::size_t k = 0; k < binds.size(); ++k) {
+    const int at = static_cast<int>(k) + 4;
+    if (binds[k].is_text) st.bind(at, binds[k].text);
+    else st.bind(at, binds[k].num);
+  }
+  std::vector<std::int64_t> out;
+  while (st.step()) out.push_back(st.i64(0));
+  return out;
+}
+
+std::vector<SmartPlaylist> Library::smart_playlists() {
+  std::vector<SmartPlaylist> out;
+  Stmt s(db_, "SELECT id, name, match_all, rules FROM smart_playlists ORDER BY position, name COLLATE NOCASE, id");
+  while (s.step()) {
+    SmartPlaylist p;
+    p.id = s.i64(0);
+    p.name = s.text(1);
+    p.match_all = s.i64(2) != 0;
+    smart_rules_from_json(s.text(3), p.rules);
+    out.push_back(std::move(p));
+  }
+  return out;
+}
+
+std::optional<SmartPlaylist> Library::smart_playlist(std::int64_t id) {
+  for (SmartPlaylist& p : smart_playlists())
+    if (p.id == id) return std::move(p);
+  return std::nullopt;
+}
+
+std::int64_t Library::create_smart_playlist(const std::string& name, bool match_all, const std::vector<SmartRule>& rules) {
+  Stmt i(db_, "INSERT INTO smart_playlists(name, match_all, rules, position) VALUES (?1, ?2, ?3, (SELECT coalesce(max(position) + 1, 0) FROM smart_playlists))");
+  i.bind(1, name).bind(2, match_all ? 1 : 0).bind(3, smart_rules_json(rules));
+  i.run();
+  return db_.last_insert_id();
+}
+
+void Library::update_smart_playlist(const SmartPlaylist& p) {
+  Stmt u(db_, "UPDATE smart_playlists SET name = ?1, match_all = ?2, rules = ?3 WHERE id = ?4");
+  u.bind(1, p.name).bind(2, p.match_all ? 1 : 0).bind(3, smart_rules_json(p.rules)).bind(4, p.id);
+  u.run();
+}
+
+void Library::delete_smart_playlist(std::int64_t id) {
+  Stmt d(db_, "DELETE FROM smart_playlists WHERE id = ?1");
+  d.bind(1, id);
+  d.run();
+}
+
+std::vector<std::int64_t> Library::smart_track_ids(std::int64_t smart_id, const std::string& search, SortKey sort, bool descending) {
+  const auto p = smart_playlist(smart_id);
+  if (!p) return {};
+  return query_ids(p->rules, p->match_all, search, sort, descending);
 }
 
 std::string Library::setting(const std::string& key, const std::string& fallback) {

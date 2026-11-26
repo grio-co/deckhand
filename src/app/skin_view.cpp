@@ -153,6 +153,33 @@ Target map_binding(std::string_view n) {
       t.index = slot;
       return t;
     }
+    if (k == "metronome") return control(dn + ".metronome", d);
+    if (s[1].name == "grid" && s.size() == 3) {  // grid editing: one action per button, `step` carries its amount
+      static const struct { const char* name; const char* action; double step; } kGrid[] = {
+          {"edit", "grid_edit", 0},          {"shift_m10", "grid_shift", -10},   {"shift_m1", "grid_shift", -1},
+          {"shift_p1", "grid_shift", 1},     {"shift_p10", "grid_shift", 10},    {"first_beat", "grid_first_beat", 0},
+          {"downbeat", "grid_downbeat", 0},  {"cycle", "grid_rotate", 1},        {"bpm_m01", "grid_bpm", -0.1},
+          {"bpm_m001", "grid_bpm", -0.01},   {"bpm_p001", "grid_bpm", 0.01},     {"bpm_p01", "grid_bpm", 0.1},
+          {"half", "grid_scale", 0.5},       {"double", "grid_scale", 2},        {"tap", "grid_tap", 0},
+          {"reanalyse", "grid_reanalyse", 0}, {"lock", "grid_lock", 0},          {"undo", "grid_undo", 0},
+          {"add_section", "grid_add_section", 0}, {"remove_section", "grid_remove_section", 0}};
+      for (const auto& g : kGrid)
+        if (s[2].name == g.name) {
+          Target t = action(g.action, d);
+          t.step = g.step;
+          return t;
+        }
+      if (s[2].name == "bpm") return info("grid_bpm", d);
+      return {};
+    }
+    if (s[1].name == "cue" && s.size() == 3) {  // memory cues and saved loops of the deck
+      static const struct { const char* name; const char* action; } kCue[] = {
+          {"memory_set", "cue_memory_set"},   {"memory_delete", "cue_memory_delete"}, {"memory_prev", "cue_memory_prev"},
+          {"memory_next", "cue_memory_next"}, {"loop_save", "cue_loop_save"},         {"loop_recall", "cue_loop_recall"}};
+      for (const auto& c : kCue)
+        if (s[2].name == c.name) return action(c.action, d);
+      return {};
+    }
     if (k == "load") return action("load", d);
     if (k == "eject") return control(dn + ".eject", d);
     for (const char* i : {"waveform", "jog", "pads", "letter", "title", "artist", "bpm", "key", "time", "loop", "loaded", "elapsed", "remaining"})
@@ -191,6 +218,7 @@ Target map_binding(std::string_view n) {
     if (k == "mic.eq.high") return control("mixer.mic_eq_high", -1, 0, 1, 0.5);
     if (k == "mic.depth") return control("mixer.mic_talkover_depth", -1, -24, 0, -12);
     if (k == "mic.meter") return info("mic_level");
+    if (k == "metronome.level") return control("mixer.metronome_level", -1, 0, 1, 0.5);
     return {};
   }
 
@@ -198,7 +226,7 @@ Target map_binding(std::string_view n) {
     const std::string& k = s[1].name;
     for (const char* a : {"import", "rec", "export", "language", "skin", "layout", "settings", "sampler", "learn"})
       if (k == a) return action(a);
-    for (const char* i : {"controller", "audio", "status", "has_import", "multi_language", "multi_skin", "has_four", "rec_time", "tracks_loading"})
+    for (const char* i : {"any_grid_edit", "controller", "audio", "status", "has_import", "multi_language", "multi_skin", "has_four", "rec_time", "tracks_loading"})
       if (k == i) return info(i);
     return {};
   }
@@ -214,6 +242,20 @@ Target map_binding(std::string_view n) {
     if (k == "playlist.rename") return action("playlist_rename");
     if (k == "playlist.delete") return action("playlist_delete");
     if (k == "edit") return action("edit_track");
+    if (k == "columns") return action("columns");
+    if (k == "compatible") return action("compatible");
+    if (k == "playlist.add_smart") return action("playlist_add_smart");
+    return {};
+  }
+
+  if (g == "preview") {  // pre-listen in the headphones: a strip under the browser
+    const std::string k = rest(1);
+    if (k == "play") return action("preview_play");
+    if (k == "stop") return action("preview_stop");
+    if (k == "wave") return info("preview_wave");
+    if (k == "title") return info("preview_title");
+    if (k == "time") return info("preview_time");
+    if (k == "level") return control("preview.level", -1, 0, 1, 0.7);
     return {};
   }
 

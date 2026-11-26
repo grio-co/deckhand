@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -289,7 +290,7 @@ int Host::drain_commands() {
   WireCommand w;
   while (n < 512 && sh_->cmd.pop(w)) {
     ++n;
-    if (w.op == static_cast<std::uint8_t>(Op::Load)) {
+    if (w.op == static_cast<std::uint8_t>(Op::Load) || w.op == static_cast<std::uint8_t>(Op::PreviewLoad)) {
       apply_load(w);
       continue;
     }
@@ -318,6 +319,12 @@ void Host::apply_load(const WireCommand& w) {
   if (!t) {
     DH_LOG(Warn, "engine: refused a track for deck %d: %s", static_cast<int>(w.deck) + 1, error.c_str());
     ev.clock_frame = 1;
+    push_event(ev);
+    return;
+  }
+  if (w.op == static_cast<std::uint8_t>(Op::PreviewLoad)) {  // the pre-listen player: no deck, nothing to re-attach to
+    ev.track_id = t->track_id;
+    engine_.preview_load(std::move(t));
     push_event(ev);
     return;
   }
@@ -367,6 +374,7 @@ void Host::publish_views() {
     sh_->meta[i].write(m);
   }
   sh_->mixer.write(engine_.mixer());
+  sh_->preview.write(engine_.preview());
   publish_input();
   for (int i = 0; i < kSamplerSlots; ++i) sh_->sampler[i].write(engine_.sampler(i));
   RecInfo r;
@@ -671,6 +679,34 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
       else d = engine_.input_devices();
       out.u32(static_cast<std::uint32_t>(std::min<std::size_t>(d.size(), 256)));
       for (std::size_t i = 0; i < d.size() && i < 256; ++i) out.str(d[i]);
+      return;
+    }
+    case kReqSetTrackMeta: {  // grid and memory cues of a loaded track; the UI is untrusted input
+      const int deck = rd.u8();
+      const std::int64_t track_id = rd.i64();
+      TrackMeta m;
+      m.bpm = rd.f64();
+      const std::uint32_t ng = rd.u32();
+      bool ok = rd.ok() && deck < kMaxDecks && ng <= kMaxMetaGrid && std::isfinite(m.bpm) && m.bpm >= 0 && m.bpm < 1000;
+      for (std::uint32_t i = 0; ok && i < ng; ++i) {
+        GridSection g;
+        g.first_beat_frame = rd.f64();
+        g.bpm = rd.f64();
+        g.bar_beat = rd.i32();
+        ok = rd.ok() && std::isfinite(g.first_beat_frame) && g.first_beat_frame >= 0 && g.first_beat_frame < 1e13 &&
+             std::isfinite(g.bpm) && g.bpm > 0 && g.bpm < 1000 && g.bar_beat >= 1 && g.bar_beat <= 4 &&
+             (m.grid.empty() || g.first_beat_frame > m.grid.back().first_beat_frame);
+        if (ok) m.grid.push_back(g);
+      }
+      const std::uint32_t nc = ok ? rd.u32() : 0;
+      ok = ok && nc <= kMaxMetaCues;
+      for (std::uint32_t i = 0; ok && i < nc; ++i) {
+        const double c = rd.f64();
+        ok = rd.ok() && std::isfinite(c) && c >= 0 && c < 1e13 && (m.memory_cues.empty() || c >= m.memory_cues.back());
+        if (ok) m.memory_cues.push_back(c);
+      }
+      if (ok && rd.ok()) engine_.set_track_meta(deck, track_id, m);
+      out.u8(ok && rd.ok() ? 1 : 0);
       return;
     }
     case kReqRecStop: engine_.record_stop(); return;

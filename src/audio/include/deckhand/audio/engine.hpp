@@ -26,6 +26,13 @@ struct GridSection {
   int bar_beat = 1;
 };
 
+// Grid and memory cues of a loaded track, replaced as a whole while it plays (Engine::set_track_meta).
+struct TrackMeta {
+  double bpm = 0;                   // fallback tempo when `grid` is empty
+  std::vector<GridSection> grid;    // sorted by first_beat_frame
+  std::vector<double> memory_cues;  // frames, sorted
+};
+
 // Everything a deck needs for one track. Built off the audio thread, then handed over.
 struct LoadedTrack {
   std::shared_ptr<const TrackAudio> audio;
@@ -112,6 +119,22 @@ enum class Op : std::uint8_t {
   MicTalkoverDepth, // f = ducking in dB, 0 .. -24
   MicMonitor,       // i = 1 on, 0 off, -1 toggle (microphone also on the headphone cue bus)
   MicGate,          // f = noise gate threshold in dB, -80 .. -20; <= -80 = gate off
+  // ---- track preparation: cues, loops, metronome (protocol 3) ----
+  HotCueSetAt,      // i = slot, d = frame: set or move a hot cue (d < 0 deletes it); keeps a hot loop's length
+  HotCueEndAt,      // i = slot, d = end frame: makes the hot cue a loop (d <= its start = plain cue again)
+  CueSetAt,         // d = frame: move the main cue point
+  LoopSetIn,        // d = frame: loop start (no quantise); the loop is not activated
+  LoopSetOut,       // d = frame: loop end (no quantise); the loop becomes active
+  Metronome,        // i = 1 on, 0 off, -1 toggle: a click on every grid beat of this deck, on the headphone bus only
+  MetronomeLevel,   // f = 0..1 click level (global)
+  ReplaceMeta,      // internal pointer command (Engine::set_track_meta): new grid and memory cues, audio untouched
+  // ---- pre-listen player (protocol 4): one extra track on the headphone bus, never on a deck's channel ----
+  PreviewPlay,      // i = 1 play, 0 pause, -1 toggle (a finished preview restarts)
+  PreviewStop,      // unloads the preview track
+  PreviewSeek,      // d = frame
+  PreviewLevel,     // f = 0..1 (0.7 = default)
+  PreviewMaster,    // i = 1 also on the master bus (off by default: a DJ must never blast the room by accident), 0 = headphones only
+  PreviewLoad,      // internal pointer command (IEngine::preview_load)
   // ---- internal (scheduling); never pass these to send() / schedule() ----
   SchedInsert,     // i = payload slot handed over by Engine::schedule
   SchedCancel,     // d = schedule id
@@ -249,6 +272,18 @@ struct DeckView {
   int color_fx = 0;             // ColorFx
   double slip_position = -1;    // shadow playhead (frames) while slip_active
   FxSlotView fx[kFxSlots];
+  // appended (protocol 3)
+  double hot_cue_end[kHotCues] = {-1, -1, -1, -1, -1, -1, -1, -1};  // hot loop ends, -1 = plain cue
+  std::uint32_t meta_rev = 0;   // counts grid / memory-cue replacements of the loaded track
+  std::uint32_t metronome = 0;  // 1 = the deck's click is on
+};
+
+// The pre-listen player (IEngine::preview()).
+struct PreviewView {
+  std::uint32_t loaded = 0, playing = 0, on_master = 0, pad = 0;
+  double position = 0, length = 0, sample_rate = 44100;  // frames
+  std::int64_t track_id = 0;
+  float level = 0.7f, pad2 = 0;
 };
 
 struct MixerView {
@@ -270,6 +305,9 @@ struct MixerView {
   float mic_peak = 0;             // post-level peak, 0..1
   float mic_duck_db = 0;          // current gain applied to the music, <= 0
   float mic_pad = 0;
+  // appended (protocol 3)
+  float metro_level = 0.5f;       // click level on the headphone bus
+  float pad2 = 0;
 };
 
 // Microphone channel tuning that is not a command.
@@ -335,6 +373,14 @@ class IEngine {
 
   virtual void send(const Command& c) = 0;
   virtual void load(int deck, std::unique_ptr<LoadedTrack> track) = 0;
+  // Replaces the beat grid and memory cues of the track on `deck` without reloading its audio: the playhead, loops,
+  // hot cues and play state stay. Quantise, sync and loops use the new grid from the next audio block on. Ignored
+  // when the deck holds a different track than `track_id` (0 = whatever is loaded).
+  virtual void set_track_meta(int deck, std::int64_t track_id, const TrackMeta& meta) = 0;
+  // Pre-listen: hands a decoded track (audio only) to the preview player, which replaces its current track and starts
+  // paused at the beginning. It plays on the headphone bus only, never on a deck or the master (unless Op::PreviewMaster).
+  virtual void preview_load(std::unique_ptr<LoadedTrack> track) = 0;
+  virtual PreviewView preview() const = 0;
   virtual DeckView deck(int index) const = 0;
   virtual MixerView mixer() const = 0;
   virtual SamplerView sampler(int slot) const = 0;
@@ -391,6 +437,9 @@ class Engine final : public IEngine {
   // Thread-safe for any number of non-real-time callers.
   void send(const Command& c) override;
   void load(int deck, std::unique_ptr<LoadedTrack> track) override;
+  void set_track_meta(int deck, std::int64_t track_id, const TrackMeta& meta) override;
+  void preview_load(std::unique_ptr<LoadedTrack> track) override;
+  PreviewView preview() const override;
 
   DeckView deck(int index) const override;
   MixerView mixer() const override;

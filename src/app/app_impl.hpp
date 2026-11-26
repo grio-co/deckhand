@@ -14,6 +14,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <thread>
 
@@ -22,11 +23,14 @@
 #include "deckhand/app/controls.hpp"
 #include "deckhand/app/stream_bridge.hpp"
 #include "deckhand/audio/engine.hpp"
+#include "deckhand/audio/grid_edit.hpp"
 #include "deckhand/audio/remote_engine.hpp"
 #include "deckhand/gfx/draw.hpp"
 #include "deckhand/i18n/i18n.hpp"
 #include "deckhand/import/import.hpp"
+#include "deckhand/library/keys.hpp"
 #include "deckhand/library/library.hpp"
+#include "deckhand/library/palette.hpp"
 #include "deckhand/log/log.hpp"
 #include "deckhand/midi/controller.hpp"
 #include "deckhand/services/track_analysis.hpp"
@@ -78,6 +82,13 @@ inline double now_seconds() {
   return duration<double>(steady_clock::now().time_since_epoch()).count();
 }
 
+// A memory cue or a saved loop (end >= 0) of the loaded track, in frames. Persisted as library cues without a slot.
+struct MemCue {
+  double frame = 0, end = -1;
+  std::string label;
+  int color = -1;  // 0xRRGGBB, -1 = default colour
+};
+
 struct DeckInfo {
   TrackRow row;
   std::shared_ptr<const TrackAudio> audio;
@@ -86,19 +97,35 @@ struct DeckInfo {
   bool loading = false;
   std::string error;
   double gain_db = 0;
+  // track preparation: names and colours of the hot cues (positions live in the engine), memory cues, grid lock
+  std::string hot_label[kHotCues];
+  int hot_color[kHotCues];
+  std::vector<MemCue> mem;
+  bool grid_locked = false;
+  DeckInfo() {
+    for (int& c : hot_color) c = -1;
+  }
 };
 
 struct Job {
-  enum Kind { Load, Reattach, AddFile, Import, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample, Sync, SyncInfo, RestoreSamples } kind = Load;
+  enum Kind { Load, Reattach, AddFile, Import, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample, Sync, SyncInfo, RestoreSamples,
+              SaveGrid, SaveMemCues, SaveHotStyle, SaveTrackColor, Reanalyse, PreviewLoad } kind = Load;
   int deck = -1;
   std::int64_t track_id = 0;
   std::string path;
   int slot = 0;
   double ms = 0;
+  // track preparation payloads
+  double ms_end = -1;                 // SaveHotCue: loop end
+  std::vector<BeatSection> grid;      // SaveGrid
+  std::vector<Cue> cues;              // SaveMemCues
+  std::string text;                   // SaveHotStyle: the name
+  int color = -1;                     // SaveHotStyle / SaveTrackColor
+  bool flag = false;                  // SaveGrid: lock the grid; PreviewLoad: start playing
 };
 
 struct TreeItem {
-  enum Kind { Collection, Folder, Playlist, HistoryHeader, HistorySession } kind = Collection;
+  enum Kind { Collection, Folder, Playlist, HistoryHeader, HistorySession, Smart } kind = Collection;
   std::int64_t id = 0;
   int depth = 0;
   std::string name;
@@ -217,6 +244,15 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
     j.path = path;
     post(j);
   }
+  bool api_prep(int deck, const std::string& action, const PrepArgs& args, std::string& error) override {
+    return prep(deck, action, args, error);
+  }
+  std::string api_deck_prep_json(int deck) override;
+  bool api_preview_load(std::int64_t track_id, bool play, std::string& error) override { return preview_start(track_id, play, error); }
+  std::string api_preview_title() override {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return preview_.title;
+  }
   std::string api_status() override {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return status_;
@@ -294,6 +330,24 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
     return view_ == TreeItem::Playlist && sort_ == SortKey::Default && search_.empty();
   }
 
+  // ---- track preparation: grid editing, cues, loops, waveform zoom (app_prep.cpp) ---------------------------------
+  bool prep(int deck, const std::string& action, const PrepArgs& a, std::string& error);  // any thread
+  bool prep_grid(int deck, const std::string& action, const PrepArgs& a, std::string& error);
+  bool prep_cue(int deck, const std::string& action, const PrepArgs& a, std::string& error);
+  void commit_grid(int deck, std::int64_t track_id, const gridedit::Grid& next, bool push_undo);
+  void commit_mem(int deck, std::int64_t track_id, std::vector<MemCue> mem);
+  void send_meta(int deck, std::int64_t track_id, const std::vector<GridSection>& grid, const std::vector<MemCue>& mem, double bpm);
+  void reanalyse(Library& lib, int deck, std::int64_t track_id);
+  void open_cue_editor(int deck, int slot, int mem_index);
+  void apply_cue_editor(bool remove);
+  void set_wave_zoom(int deck, double seconds);
+  void load_prep_settings();
+  // Marker under the pointer on a zoomed waveform, for dragging and double-click editing: kind 1 hot cue, 2 memory cue, 3 main cue.
+  struct CueHit {
+    int kind = 0, index = -1;
+  };
+  CueHit cue_hit_test(int di, const Rect& r, const DeckView& v, const DeckInfo& info, double window, float x, float y) const;
+
   // ---- skins and layout (app_skin.cpp) ------------------------------------------------
   void scan_skins();
   bool use_skin(const std::string& name, bool persist);
@@ -311,12 +365,24 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void draw_tree(const Rect& r, const ui::Theme& th);
   void draw_tracks(const Rect& r, const ui::Theme& th, const std::string& columns, float row_h);
   void draw_search(const Rect& r, const skin::Style& st, const std::string& hint);
+  // ---- pre-listen (app_browser.cpp)
+  bool preview_start(std::int64_t track_id, bool play, std::string& error);  // any thread
+  void preview_toggle();                                                       // UI thread: the selected row
+  void load_preview(Library& lib, std::int64_t track_id, bool play);           // loader thread
+  void draw_preview_strip(const Rect& r, Color base);
+  // ---- browser columns, selection, drag and drop, compatible filter (app_browser.cpp)
+  void load_browser_settings(const std::string& skin_default);
+  void save_browser_settings();
+  std::vector<std::int64_t> selected_ids();                 // browse_mutex_ held
+  bool file_missing(const TrackRow& t);                     // cached per refresh
+  bool compat_reference(double& bpm, std::string& key);     // the track the compatible filter is about
+  void drop_rows_on_playlist(std::int64_t playlist_id);     // browse_mutex_ held
   void playlist_action(const std::string& which);
   Color deck_color(int di) const { return theme_.deck[std::clamp(di, 0, 3)]; }
   Rect inner_rect() const;
 
   // ---- overlays (app_panels.cpp) ----------------------------------------------------
-  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo };
+  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart };
   bool overlay_open() const { return panel_ != Panel::None; }
   void open_panel(Panel p);
   void close_panel();
@@ -330,6 +396,11 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void draw_relink(const Rect& m);
   void draw_export_menu(const Rect& m);
   void draw_add_menu(const Rect& m);
+  void draw_cue_edit(const Rect& m);
+  void draw_columns_panel(const Rect& m);
+  void draw_smart_editor(const Rect& m);
+  void open_smart_editor(std::int64_t id);  // 0 = a new smart playlist
+  void save_smart_editor();
   bool ui_button(const Rect& r, const std::string& label, bool lit = false, Color lit_color = 0);
   bool ui_toggle(const Rect& r, const std::string& label, bool on);
   void ui_field(const Rect& r, Field& f, const std::string& hint);
@@ -448,6 +519,55 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   bool follow_sel_ = false;
   std::string search_;
   bool search_focus_ = false;
+
+  // ---- track preparation state
+  std::atomic<bool> grid_edit_[kMaxDecks] = {};
+  double wave_zoom_[kMaxDecks] = {6.0, 6.0, 6.0, 6.0};       // seconds visible in the scrolling waveform
+  std::vector<gridedit::Grid> grid_undo_[kMaxDecks];         // state_mutex_
+  std::vector<double> tap_times_[kMaxDecks];                 // state_mutex_
+  struct CueDrag {
+    int deck = -1, kind = 0, index = -1;
+    double frame = 0;      // where the marker would land
+    bool moved = false;
+  } cue_drag_;
+  int scrub_deck_ = -1;
+  float scrub_x0_ = 0;
+  double scrub_pos0_ = 0;
+  int cue_edit_deck_ = -1, cue_edit_slot_ = -1, cue_edit_mem_ = -1, cue_edit_color_ = -1;
+  Field f_cue_name_;
+
+  // ---- browser (app_browser.cpp), UI thread
+  std::vector<std::string> bcols_;                   // shown columns, in order
+  std::map<std::string, float> bwidth_;              // user widths: px, or weight for the flexible columns
+  bool bcols_loaded_ = false, key_musical_ = false, compat_on_ = false;
+  std::int64_t compat_ref_id_ = 0;
+  unsigned frame_count_ = 0;
+  std::set<int> multi_;                              // selected row indices (browse_mutex_)
+  int anchor_ = 0;
+  std::map<std::int64_t, bool> exists_;              // file present, per track, cleared on refresh
+  struct RowDrag {
+    bool pending = false, active = false, collapse = false;
+    float x0 = 0, y0 = 0;
+    int row = -1;
+  } rdrag_;
+  int col_drag_ = -1;
+  float col_drag_x_ = 0, col_drag_w_ = 0;
+  struct PreviewInfo {
+    std::int64_t id = 0;
+    std::string title;
+    std::vector<WavePoint> overview;
+    bool loading = false;
+  } preview_;                                        // state_mutex_
+  std::atomic<bool> preview_master_{false};          // setting preview.master: also on the master output (default off)
+  std::vector<std::int64_t> add_ids_;                // tracks the "add to playlist" menu will add
+  struct RuleEdit {
+    SmartRule rule;
+    Field a, b;
+  };
+  std::deque<RuleEdit> sm_rules_;
+  std::int64_t sm_id_ = 0;
+  Field f_sm_name_;
+  bool sm_all_ = true, sm_confirm_ = false;
 
   // ---- UI state (UI thread only)
   ui::Input raw_, in_, ov_;  // raw_ = what the shell sent; in_ = what the main UI sees (blocked under overlays)

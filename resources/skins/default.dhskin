@@ -96,6 +96,49 @@ template statusbar dummy {
   }
 }
 
+// Grid and cue preparation tools of one deck, under its scrolling waveform while the deck is in edit mode.
+template gridtools n color {
+  column h=46 gap=2 show="deck[${n}].grid.edit" {
+    row h=22 gap=3 {
+      label bind="deck[${n}].letter" w=18 font=title color=${color}
+      use tog bind="deck[${n}].metronome" label="@grid.click" on=good
+      fader bind="mixer.metronome.level" orientation=horizontal color=good bg=panel2 radius=2 w=44
+      label text="ms" font=small color=dim w=18 text_align=center
+      use tog bind="deck[${n}].grid.shift_m10" label="-10" on=accent
+      use tog bind="deck[${n}].grid.shift_m1" label="-1" on=accent
+      use tog bind="deck[${n}].grid.shift_p1" label="+1" on=accent
+      use tog bind="deck[${n}].grid.shift_p10" label="+10" on=accent
+      use tog bind="deck[${n}].grid.first_beat" label="@grid.first_beat" on=accent
+      use tog bind="deck[${n}].grid.downbeat" label="@grid.downbeat" on=accent
+      use tog bind="deck[${n}].grid.cycle" label="@grid.cycle" on=accent
+      use tog bind="deck[${n}].grid.bpm_m01" label="-.1" on=accent
+      use tog bind="deck[${n}].grid.bpm_m001" label="-.01" on=accent
+      label bind="deck[${n}].grid.bpm" font=small color=text w=54 text_align=center
+      use tog bind="deck[${n}].grid.bpm_p001" label="+.01" on=accent
+      use tog bind="deck[${n}].grid.bpm_p01" label="+.1" on=accent
+      use tog bind="deck[${n}].grid.half" label="1/2" on=accent
+      use tog bind="deck[${n}].grid.double" label="x2" on=accent
+      use tog bind="deck[${n}].grid.tap" label="@grid.tap" on=accent
+    }
+    row h=22 gap=3 {
+      label text="" w=18
+      use tog bind="deck[${n}].cue.memory_set" label="@cue.mem_add" on=accent
+      use tog bind="deck[${n}].cue.memory_delete" label="@cue.mem_del" on=bad
+      use tog bind="deck[${n}].cue.memory_prev" label="@cue.mem_prev" on=accent
+      use tog bind="deck[${n}].cue.memory_next" label="@cue.mem_next" on=accent
+      use tog bind="deck[${n}].cue.loop_save" label="@cue.loop_save" on=accent
+      use tog bind="deck[${n}].cue.loop_recall" label="@cue.loop_recall" on=accent
+      spacer w=12
+      use tog bind="deck[${n}].grid.add_section" label="@grid.add_section" on=accent
+      use tog bind="deck[${n}].grid.remove_section" label="@grid.remove_section" on=bad
+      spacer w=12
+      use tog bind="deck[${n}].grid.undo" label="@grid.undo" on=accent
+      use tog bind="deck[${n}].grid.lock" label="@grid.lock" on=warn
+      use tog bind="deck[${n}].grid.reanalyse" label="@grid.reanalyse" on=accent
+    }
+  }
+}
+
 // One deck: header, overview, platter + tempo + transport + effects, pads.
 template deck n color {
   column bg=panel radius=r pad=6 gap=4 {
@@ -150,6 +193,7 @@ template deck n color {
           use tog bind="deck[${n}].quantize" label="@deck.quantize" on=accent
           use tog bind="deck[${n}].slip" label="@deck.slip" on=accent
           use tog bind="deck[${n}].reverse" label="@deck.reverse" on=accent
+          use tog bind="deck[${n}].grid.edit" label="@deck.grid_edit" on=warn
         }
         row h=22 gap=3 {
           use tog bind="deck[${n}].key_shift.minus" label="@deck.key_down" on=accent
@@ -228,6 +272,7 @@ template deck_small n color {
           use tog bind="deck[${n}].quantize" label="@deck.quantize" on=accent
           use tog bind="deck[${n}].slip" label="@deck.slip" on=accent
           use tog bind="deck[${n}].reverse" label="@deck.reverse" on=accent
+          use tog bind="deck[${n}].grid.edit" label="@deck.grid_edit" on=warn
         }
         label bind="deck[${n}].time" font=small color=text text_align=right
       }
@@ -282,6 +327,7 @@ template library dummy {
       row h=22 gap=3 {
         use tog bind="browser.playlist.add_list" label="@playlist.add_list" on=accent
         use tog bind="browser.playlist.add_folder" label="@playlist.add_folder" on=accent
+        use tog bind="browser.playlist.add_smart" label="@playlist.add_smart" on=accent
         use tog bind="browser.playlist.rename" label="@playlist.rename" on=accent
         use tog bind="browser.playlist.delete" label="@playlist.delete" on=bad
       }
@@ -291,6 +337,8 @@ template library dummy {
         label bind="browser.search" text="@browser.search" editable=true font=ui color=text bg=panel2 radius=r w=220 pad=6,0
         label bind="browser.count" text="@browser.tracks" font=small color=dim w=90
         spacer
+        use tog bind="browser.compatible" label="@browser.compatible" on=good
+        use tog bind="browser.columns" label="@browser.columns" on=accent
         use tog bind="browser.edit" label="@browser.edit" on=accent
         use tog bind="browser.add_to" label="@browser.add_to" on=accent
         button bind="browser.remove" show="browser.can_remove" text="@browser.remove" font=small bg=panel2 radius=r {
@@ -304,6 +352,14 @@ template library dummy {
         }
       }
       browser bind="browser.tracks" columns="title,artist,bpm,key,time" row_h=22 font=ui color=text
+      row h=30 gap=6 {
+        use tog bind="preview.play" label="@preview.play" on=good
+        use tog bind="preview.stop" label="@preview.stop" on=bad
+        label bind="preview.title" font=small color=text w=240
+        waveform bind="preview.wave" mode=overview color=accent bg=panel2 radius=2 flex=1
+        label bind="preview.time" font=small color=dim w=84 text_align=right
+        fader bind="preview.level" orientation=horizontal color=text bg=panel2 radius=2 w=70
+      }
     }
   }
 }
@@ -315,6 +371,8 @@ window main size=1280x800 min=960x600 title="@app.title" {
       waveform bind="deck[1].waveform" mode=zoomed color=deck1 bg=panel radius=r
       waveform bind="deck[2].waveform" mode=zoomed color=deck2 bg=panel radius=r
     }
+    use gridtools n=1 color=deck1
+    use gridtools n=2 color=deck2
     row flex=3 gap=gap {
       use deck n=1 color=deck1
       column w=300 bg=panel2 radius=r pad=8 gap=6 {
@@ -363,6 +421,10 @@ window four size=1440x900 min=1100x680 title="@app.title" {
       waveform bind="deck[3].waveform" mode=zoomed color=deck3 bg=panel radius=r
       waveform bind="deck[4].waveform" mode=zoomed color=deck4 bg=panel radius=r
     }
+    use gridtools n=1 color=deck1
+    use gridtools n=2 color=deck2
+    use gridtools n=3 color=deck3
+    use gridtools n=4 color=deck4
     row flex=4 gap=gap {
       column gap=gap {
         use deck_small n=1 color=deck1

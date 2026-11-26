@@ -403,6 +403,47 @@ void test_blocks() {
 void test_commands_and_wire() {
   Command c;
   WireCommand w;
+  // track preparation ops (protocol 3): pointer command refused, slots and ranges checked
+  w.op = static_cast<std::uint8_t>(Op::ReplaceMeta);
+  CHECK(!validate_command(w, c));
+  w = WireCommand{};
+  w.op = static_cast<std::uint8_t>(Op::HotCueSetAt);
+  w.i = 8;
+  w.d = 1000;
+  CHECK(!validate_command(w, c));
+  w.i = 7;
+  CHECK(validate_command(w, c) && c.op == Op::HotCueSetAt);
+  w.d = -1;
+  CHECK(validate_command(w, c));
+  w.d = std::nan("");
+  CHECK(!validate_command(w, c));
+  w = WireCommand{};
+  w.op = static_cast<std::uint8_t>(Op::PreviewLoad);
+  CHECK(!validate_command(w, c));
+  w.op = static_cast<std::uint8_t>(Op::PreviewMaster);
+  w.i = 2;
+  CHECK(!validate_command(w, c));
+  w.i = 1;
+  CHECK(validate_command(w, c));
+  w.op = static_cast<std::uint8_t>(Op::PreviewSeek);
+  w.d = -5;
+  CHECK(!validate_command(w, c));
+  w.d = 1000;
+  CHECK(validate_command(w, c));
+  w = WireCommand{};
+  w.op = static_cast<std::uint8_t>(Op::Metronome);
+  w.i = 2;
+  CHECK(!validate_command(w, c));
+  w.i = -1;
+  CHECK(validate_command(w, c));
+  w = WireCommand{};
+  w.op = static_cast<std::uint8_t>(Op::MetronomeLevel);
+  w.f = 2.0f;
+  CHECK(!validate_command(w, c));
+  w.f = 0.5f;
+  w.deck = 200;  // global scope ignores the deck
+  CHECK(validate_command(w, c));
+  w = WireCommand{};
   w.op = static_cast<std::uint8_t>(Op::PlayToggle);
   CHECK(validate_command(w, c) && c.op == Op::PlayToggle);
   w.op = static_cast<std::uint8_t>(Op::Load);
@@ -873,6 +914,68 @@ void test_second_instance(const std::string& base) {
 }
 
 
+// ---- grid and cue editing through the real helper ----------------------------------------------------------------
+void test_prep_ipc(const std::string& base) {
+  const std::string dir = base + "/data-prep";
+  fs::create_directories(dir);
+  std::string error;
+  RemoteEngine eng(options_for(dir));
+  CHECK(eng.connect(error));
+  OutputConfig oc;
+  CHECK(eng.start(oc, error));
+  eng.send(cmd(Op::MasterLevel, 0, 0.0f));
+  eng.send(cmd(Op::HeadLevel, 0, 0.0f));
+  eng.load(0, sine_track(30.0));
+  CHECK(wait_for([&] { return eng.deck(0).loaded; }, 10));
+  const std::uint32_t rev = eng.deck(0).meta_rev;
+  eng.send(cmd(Op::Seek, 0, 0, 0, 33333));
+  TrackMeta m;
+  m.bpm = 90;
+  m.grid.push_back({4410, 90, 3});
+  m.memory_cues = {1000, 2000, 3000};
+  eng.set_track_meta(0, 0, m);
+  CHECK(wait_for([&] { return eng.deck(0).meta_rev == rev + 1; }, 5));
+  CHECK(std::fabs(eng.deck(0).position - 33333) < 1 && eng.deck(0).loaded);
+  CHECK(std::fabs(eng.deck(0).bpm - 90) < 1e-6);
+  // hostile requests are refused and change nothing
+  TrackMeta bad;
+  bad.bpm = 90;
+  bad.grid.push_back({100, std::nan(""), 1});
+  eng.set_track_meta(0, 0, bad);
+  bad.grid = {{200, 90, 1}, {100, 90, 1}};  // not ascending
+  eng.set_track_meta(0, 0, bad);
+  bad.grid = {{100, 90, 9}};  // bar beat out of range
+  eng.set_track_meta(0, 0, bad);
+  bad.grid.clear();
+  bad.memory_cues = {5, 4};
+  eng.set_track_meta(0, 0, bad);
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  CHECK(eng.deck(0).meta_rev == rev + 1);
+  eng.send(cmd(Op::HotCueSetAt, 0, 0, 5, 20000));
+  eng.send(cmd(Op::HotCueEndAt, 0, 0, 5, 30000));
+  eng.send(cmd(Op::Metronome, 0, 0, 1));
+  eng.send(cmd(Op::MetronomeLevel, 0, 0.25f));
+  CHECK(wait_for([&] {
+    const DeckView v = eng.deck(0);
+    return v.hot_cue[5] == 20000 && v.hot_cue_end[5] == 30000 && v.metronome == 1 && eng.mixer().metro_level == 0.25f;
+  }, 5));
+  // the pre-listen player: a track block, then plain commands; its view comes back through the shared segment
+  CHECK(!eng.preview().loaded);
+  eng.preview_load(sine_track(30.0));
+  CHECK(wait_for([&] { return eng.preview().loaded; }, 10));
+  CHECK(eng.preview().length > 0 && !eng.preview().playing && !eng.preview().on_master);
+  eng.send(cmd(Op::PreviewPlay, 0, 0, 1));
+  CHECK(wait_for([&] { return eng.preview().playing && eng.preview().position > 4410; }, 5));
+  CHECK(!eng.deck(0).playing);  // not the deck's
+  eng.send(cmd(Op::PreviewSeek, 0, 0, 0, 500000));
+  eng.send(cmd(Op::PreviewLevel, 0, 0.25f));
+  CHECK(wait_for([&] { return eng.preview().position > 500000 && eng.preview().level == 0.25f; }, 5));
+  eng.send(cmd(Op::PreviewStop, 0));
+  CHECK(wait_for([&] { return !eng.preview().loaded; }, 5));
+  note("grid and cue editing and the pre-listen player cross the helper boundary; hostile grids are refused");
+  eng.shutdown_remote(0);
+}
+
 // ---- microphone channel through the real helper (null audio: no capture hardware is ever touched) ----------------
 void test_mic_ipc(const std::string& base) {
   const std::string dir = base + "/data-mic";
@@ -1048,6 +1151,7 @@ int main(int, char** argv) {
   test_sigterm_and_backoff(base);
   test_second_instance(base);
   test_mic_ipc(base);
+  test_prep_ipc(base);
   test_version_mismatch(base);
   fs::remove_all(base);
   std::printf("engine ipc ok\n");

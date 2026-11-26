@@ -13,6 +13,9 @@ full control API.
 - Library: DeckHand's own SQLite library; read-only import from another DJ library (tracks,
   playlists, hot cues, beat grids); drag and drop; search; sort by column; playlists and folders
   (create, rename, delete, reorder); play history per session.
+- Preparation: beat-grid editing with a headphone metronome, memory cues, saved loops, named
+  and coloured hot cues, waveform zoom, headphone pre-listen, smart playlists, configurable
+  browser columns.
 - Analysis: tempo with variable-tempo grids, downbeat, musical key and loudness (auto-gain), run
   once per track on first load.
 - Decks: MP3, AAC, FLAC, WAV, AIFF; scrolling three-band waveforms with beat grid; cue, hot cues,

@@ -53,6 +53,8 @@ App::App(const dh_platform& platform, const dh_config& config)
   input_stereo_ = lib_->setting("audio.input_stereo", "0") == "1";
   talk_depth_ = std::clamp(static_cast<float>(std::atof(lib_->setting("audio.mic_depth", "-12").c_str())), -24.0f, 0.0f);
   variant_ = lib_->setting("ui.layout", "main") == "four" ? "four" : "main";
+  load_prep_settings();
+  preview_master_ = lib_->setting("preview.master", "0") == "1";
 
   std::vector<std::string> folders;
   if (!resource_dir_.empty()) folders.push_back(resource_dir_ + "/controllers");
@@ -382,12 +384,21 @@ void App::control_main() {
       j.track_id = e.track_id;
       j.slot = e.slot;
       if (e.type == EventType::HotCueSet) {
+        const DeckView dv = engine_->deck(e.deck);
         j.kind = Job::SaveHotCue;
-        j.ms = e.frame / engine_->deck(e.deck).sample_rate * 1000.0;
+        j.ms = e.frame / dv.sample_rate * 1000.0;
+        // a hot loop that was moved keeps its length (the engine sets both ends before it reports)
+        if (e.slot >= 0 && e.slot < kHotCues && dv.hot_cue_end[e.slot] > dv.hot_cue[e.slot] && std::fabs(dv.hot_cue[e.slot] - e.frame) < 1.0)
+          j.ms_end = dv.hot_cue_end[e.slot] / dv.sample_rate * 1000.0;
         post(j);
       } else if (e.type == EventType::HotCueCleared) {
         j.kind = Job::ClearHotCue;
         post(j);
+        if (e.slot >= 0 && e.slot < kHotCues && e.deck < kMaxDecks) {  // its name and colour go with it
+          std::lock_guard<std::mutex> lock(state_mutex_);
+          decks_[e.deck].hot_label[e.slot].clear();
+          decks_[e.deck].hot_color[e.slot] = -1;
+        }
       }
     }
     DeckView views[kMaxDecks];
@@ -529,8 +540,27 @@ void App::run_job(Library& lib, const Job& j) {
       set_status(T("status.imported", {{"added", s.tracks_added}, {"updated", s.tracks_updated}, {"playlists", s.playlists}}));
       break;
     }
-    case Job::SaveHotCue: lib.set_hot_cue(j.track_id, j.slot, j.ms); break;
+    case Job::SaveHotCue: lib.set_hot_cue(j.track_id, j.slot, j.ms, j.ms_end); break;
     case Job::ClearHotCue: lib.clear_hot_cue(j.track_id, j.slot); break;
+    case Job::SaveGrid:
+      if (j.ms >= 0) {  // an edited grid: sections, the track's tempo, and the lock that keeps analysis away from it
+        lib.replace_beatgrid(j.track_id, j.grid);
+        lib.set_bpm(j.track_id, j.ms);
+      }
+      lib.set_grid_locked(j.track_id, j.flag);
+      break;
+    case Job::SaveMemCues: lib.replace_memory_cues(j.track_id, j.cues); break;
+    case Job::SaveHotStyle: {
+      bool exists = false;
+      for (const Cue& c : lib.cues(j.track_id))
+        if (c.slot == j.slot && c.kind != CueKind::Memory) exists = true;
+      if (!exists) lib.set_hot_cue(j.track_id, j.slot, j.ms, j.ms_end);  // the cue's own save has not run yet
+      lib.set_hot_cue_style(j.track_id, j.slot, j.text, j.color);
+      break;
+    }
+    case Job::SaveTrackColor: lib.set_track_color(j.track_id, j.color); rows_dirty_ = true; break;
+    case Job::Reanalyse: reanalyse(lib, j.deck, j.track_id); break;
+    case Job::PreviewLoad: load_preview(lib, j.track_id, j.flag); break;
     case Job::Export: {
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -538,7 +568,8 @@ void App::run_job(Library& lib, const Job& j) {
       }
       UsbExportRequest req;
       req.destination = j.path;
-      if (j.track_id) req.playlist_ids.push_back(j.track_id);
+      if (j.track_id > 0) req.playlist_ids.push_back(j.track_id);
+      else if (j.track_id < 0) req.smart_playlist_ids.push_back(-j.track_id);  // a smart playlist, sent negative
       UsbExportResult res;
       std::string error;
       const bool ok = export_library_to_usb(lib, req, res, error, [&](int done, int total, const std::string& title) {
@@ -713,11 +744,12 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
   loaded->path = row->path;
   loaded->bpm = row->bpm;
   std::vector<BeatSection> grid = lib.beatgrid(track_id);
+  const bool grid_locked = lib.grid_locked(track_id);
   std::string key_text = row->key;
   std::optional<double> gain = lib.gain_db(track_id);
   if (grid.empty() || !gain) {  // not analysed yet: do it once and keep the result
     const TrackAnalysis a = analyse_track(*audio);
-    if (grid.empty() && a.has_grid) {
+    if (grid.empty() && a.has_grid && !grid_locked) {  // a locked grid is never replaced by analysis
       grid = a.grid;
       lib.replace_beatgrid(track_id, grid);
       lib.set_bpm(track_id, a.bpm);
@@ -737,18 +769,28 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
   for (const BeatSection& b : grid) {
     loaded->grid.push_back({b.first_beat_ms / 1000.0 * sr, b.bpm, b.bar_beat});
   }
+  DeckInfo info;
   for (const Cue& c : lib.cues(track_id)) {
     const double frame = c.start_ms / 1000.0 * sr;
-    if (c.kind == CueKind::Memory) {
-      loaded->memory_cues.push_back(frame);
-    } else if (c.slot >= 0 && c.slot < kHotCues) {
+    if (c.slot < 0) {  // memory cues and saved loops
+      MemCue m;
+      m.frame = frame;
+      m.end = c.kind == CueKind::Loop && c.end_ms > c.start_ms ? c.end_ms / 1000.0 * sr : -1;
+      m.label = c.label;
+      m.color = c.color;
+      info.mem.push_back(std::move(m));
+      if (c.kind == CueKind::Memory) loaded->memory_cues.push_back(frame);
+    } else if (c.slot < kHotCues) {
       loaded->hot_cue[c.slot] = frame;
       loaded->hot_loop_end[c.slot] = c.kind == CueKind::Loop ? c.end_ms / 1000.0 * sr : -1;
+      info.hot_label[c.slot] = c.label;
+      info.hot_color[c.slot] = c.color;
     }
   }
   std::sort(loaded->memory_cues.begin(), loaded->memory_cues.end());
+  std::sort(info.mem.begin(), info.mem.end(), [](const MemCue& a, const MemCue& b) { return a.frame < b.frame; });
+  info.grid_locked = grid_locked;
 
-  DeckInfo info;
   info.row = *row;
   info.row.key = key_text;
   if (loaded->bpm > 0) info.row.bpm = loaded->bpm;
@@ -780,6 +822,8 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     decks_[deck] = std::move(info);
+    grid_undo_[deck].clear();
+    tap_times_[deck].clear();
   }
   DH_LOG(Info, "deck %d loaded: %s - %s (%.1f s, %u Hz)", deck + 1, row->artist.c_str(), row->title.c_str(),
          static_cast<double>(audio->frames) / sr, audio->sample_rate);
@@ -829,6 +873,9 @@ void App::request_load(int deck, std::int64_t track_id) {
     set_status(T("deck.playing_stop_first", {{"deck", deck_letter(deck)}}));
     return;
   }
+  Command stop;  // a track that goes to a deck is no longer pre-listened
+  stop.op = Op::PreviewStop;
+  engine_->send(stop);
   Job j;
   j.kind = Job::Load;
   j.deck = deck;
@@ -1048,6 +1095,8 @@ void App::refresh_rows() {
     }
   };
   add_children(add_children, 0, 0);
+  for (const SmartPlaylist& sp : lib_->smart_playlists())  // saved rule sets: live, counted when the tree is built
+    tree_.push_back({TreeItem::Smart, sp.id, 0, sp.name, static_cast<int>(lib_->query_ids(sp.rules, sp.match_all).size())});
   const auto sessions = lib_->history_sessions();
   if (!sessions.empty()) {
     tree_.push_back({TreeItem::HistoryHeader, 0, 0, T("browser.history"), 0});
@@ -1074,13 +1123,56 @@ void App::refresh_rows() {
     }
     rows_.set(lib_.get(), std::move(ids));
   } else {
-    rows_.set(lib_.get(), lib_->track_ids(view_ == TreeItem::Playlist ? playlist_id_ : 0, search_, sort_, sort_desc_));
+    std::vector<std::int64_t> ids = view_ == TreeItem::Smart ? lib_->smart_track_ids(playlist_id_, search_, sort_, sort_desc_)
+                                                           : lib_->track_ids(view_ == TreeItem::Playlist ? playlist_id_ : 0, search_, sort_, sort_desc_);
+    double ref_bpm = 0;
+    std::string ref_key;
+    if (compat_on_ && compat_reference(ref_bpm, ref_key)) {  // keep what mixes with the reference: same / adjacent wheel keys, tempo within 6 % (or half / double)
+      std::vector<SmartRule> rules;
+      const KeyInfo k = parse_key(ref_key);
+      if (k) {
+        SmartRule r;
+        r.field = SmartRule::Field::Key;
+        r.text = compatible_key_list(k);
+        rules.push_back(r);
+      }
+      if (ref_bpm > 0) {
+        SmartRule r;
+        r.field = SmartRule::Field::BpmNear;
+        r.lo = ref_bpm;
+        r.hi = 0.06;
+        rules.push_back(r);
+      }
+      const std::vector<std::int64_t> ok = lib_->query_ids(rules, true);
+      const std::set<std::int64_t> keep(ok.begin(), ok.end());
+      std::erase_if(ids, [&](std::int64_t id) { return keep.count(id) == 0; });
+    }
+    rows_.set(lib_.get(), std::move(ids));
   }
+  exists_.clear();
   sel_ = rows_.empty() ? 0 : std::clamp(sel_, 0, static_cast<int>(rows_.size()) - 1);
+  {
+    std::set<int> keep;  // the selection survives a refresh as far as it still fits
+    for (const int i : multi_)
+      if (i >= 0 && i < static_cast<int>(rows_.size())) keep.insert(i);
+    multi_ = std::move(keep);
+    if (!rows_.empty() && multi_.empty()) multi_.insert(sel_);
+  }
 }
 
 const dh_frame* App::frame() {
   now_ = now_seconds();
+  if (frame_count_ < 900 && ++frame_count_ > 90 && panel_ == Panel::None) {  // test aid: DECKHAND_OPEN_PANEL=columns|smart|smart-new|cue1|settings opens that overlay once, for screenshots
+    if (const char* want = std::getenv("DECKHAND_OPEN_PANEL")) {
+      const std::string w = want;
+      if (w == "columns") open_panel(Panel::Columns);
+      else if (w == "settings") open_panel(Panel::Settings);
+      else if (w == "smart-new") open_smart_editor(0);
+      else if (w == "smart" && !lib_->smart_playlists().empty()) open_smart_editor(lib_->smart_playlists().front().id);
+      else if (w == "cue1" && engine_->deck(0).hot_cue[0] >= 0) open_cue_editor(0, 0, -1);
+      if (panel_ != Panel::None) frame_count_ = 900;
+    }
+  }
   if (!status_note_.empty()) {
     set_status(status_note_);
     status_note_.clear();
@@ -1099,6 +1191,17 @@ const dh_frame* App::frame() {
     for (int i = 0; i < kMaxDecks; ++i) info_[i] = decks_[i];
   }
 
+  if (compat_on_) {  // the compatible filter follows the track it is about
+    std::int64_t ref = 0;
+    for (int i = 0; i < kMaxDecks && !ref; ++i)
+      if (views_[i].loaded && views_[i].playing) ref = views_[i].track_id;
+    for (int i = 0; i < kMaxDecks && !ref; ++i)
+      if (views_[i].loaded) ref = views_[i].track_id;
+    if (ref != compat_ref_id_) {
+      compat_ref_id_ = ref;
+      rows_dirty_ = true;
+    }
+  }
   raw_.shift = (mods_ & DH_MOD_SHIFT) != 0;
   in_ = raw_;
   if (overlay_open()) {  // the overlay owns the pointer: the main UI sees it far away and never pressed

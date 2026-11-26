@@ -173,6 +173,8 @@ security:
 tags:
   - {name: Status}
   - {name: Decks}
+  - {name: Preparation, description: Beat grid editing, cues, saved loops and hot cue names / colours of the loaded track.}
+  - {name: Preview, description: Pre-listen in the headphones without loading a deck.}
   - {name: Mixer}
   - {name: Controls}
   - {name: Schedule}
@@ -287,7 +289,7 @@ paths:
           description: Deck control name, with its slot suffix where it takes one.
           schema:
             type: string
-            pattern: '^(play|cue|sync|seek|beatjump|tempo|tempo_range|hotcue\.[1-8]|hotcue_clear\.[1-8]|loop_in|loop_out|loop|beatloop|reloop|loop_scale|cue_call|trim|eq_high|eq_mid|eq_low|filter|fader|pfl|eject|key_lock|key_shift|quantize|slip|reverse|loop_move|loop_exit|color_fx|auto_gain|fx[1-3]\.(select|on|wet|param|time))$'
+            pattern: '^(play|cue|sync|seek|beatjump|tempo|tempo_range|hotcue\.[1-8]|hotcue_clear\.[1-8]|loop_in|loop_out|loop|beatloop|reloop|loop_scale|cue_call|trim|eq_high|eq_mid|eq_low|filter|fader|pfl|eject|key_lock|key_shift|quantize|slip|reverse|loop_move|loop_exit|color_fx|auto_gain|metronome|grid_(edit|shift|align|first_beat|downbeat|rotate|bpm|set_bpm|scale|tap|add_section|remove_section|lock|reanalyse|undo)|memory_cue_(set|delete)|loop_(save|recall|delete)|cue_set|hotcue_(set|style|loop)\.[1-8]|wave_zoom(_in|_out)?|fx[1-3]\.(select|on|wet|param|time))$'
           examples:
             play: {value: play}
             hotcue: {value: hotcue.3}
@@ -305,6 +307,145 @@ paths:
         "202": {$ref: "#/components/responses/ControlScheduled"}
         "400": {$ref: "#/components/responses/BadRequest"}
         "429": {$ref: "#/components/responses/RateLimited"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/decks/{deck}/grid:
+    get:
+      tags: [Preparation]
+      operationId: getDeckGrid
+      summary: Beat grid, grid lock and metronome state of the track on a deck
+      description: "Required scope: `read`. 409 when no track is loaded."
+      x-scope: read
+      parameters:
+        - {$ref: "#/components/parameters/Deck"}
+      responses:
+        "200":
+          description: The deck's grid sections in seconds, whether it is locked, whether edit mode is on, how many edits can be undone.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeckGrid"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: No track is loaded on that deck.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/decks/{deck}/grid/{action}:
+    post:
+      tags: [Preparation]
+      operationId: editDeckGrid
+      summary: Edit the beat grid of the loaded track
+      description: |
+        Required scope: `control:deck:{deck}`. The loaded deck uses the new grid at once (quantise, sync and loops
+        follow; the playhead does not move) and the library is updated. A hand edit locks the grid so analysis never
+        replaces it; `lock` with value 0 unlocks it. Actions: `edit` (value 0/1: edit mode), `shift` (value =
+        milliseconds, signed), `align` (the beat nearest the playhead moves onto it), `set_first_beat`, `downbeat` (the
+        beat nearest the playhead becomes bar beat 1), `rotate` (value = steps, default 1), `bpm_delta` (value = BPM
+        change), `set_bpm` (value = BPM 30..300), `scale` (value 0.5 or 2), `tap` (call it in time; the tempo is set
+        from the third tap), `add_section` / `remove_section` (tempo section at the playhead, or at value seconds),
+        `lock` (value 0/1, none = toggle), `reanalyse` (refused while locked), `undo`.
+      x-scope: "control:deck:{deck}"
+      parameters:
+        - {$ref: "#/components/parameters/Deck"}
+        - name: action
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [edit, shift, align, set_first_beat, downbeat, rotate, bpm_delta, set_bpm, scale, tap, add_section, remove_section, lock, reanalyse, undo]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PrepRequest"}
+            examples:
+              shift: {value: {value: -12}}
+              bpm: {value: {value: 0.01}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PrepResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: Cannot be done (no track, grid locked, nothing to undo ...).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/decks/{deck}/cues:
+    get:
+      tags: [Preparation]
+      operationId: getDeckCues
+      summary: Memory cues, saved loops, hot cues (with names and colours) and the loop of the loaded track
+      description: "Required scope: `read`. 409 when no track is loaded."
+      x-scope: read
+      parameters:
+        - {$ref: "#/components/parameters/Deck"}
+      responses:
+        "200":
+          description: Cue lists in seconds. `color` is 0xRRGGBB as a number, -1 for the default colour.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeckCues"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: No track is loaded on that deck.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/decks/{deck}/cues/{action}:
+    post:
+      tags: [Preparation]
+      operationId: editDeckCues
+      summary: Edit cues, saved loops and hot cues of the loaded track
+      description: |
+        Required scope: `control:deck:{deck}`. Changes apply to the loaded deck at once and are stored in the library.
+        Actions: `memory_set` (value = seconds, none = at the playhead; body text and color name it), `memory_delete`
+        (body slot = the memory cue's number, none = nearest to the playhead), `memory_style` (slot, text, color),
+        `memory_move` (slot, value = seconds), `loop_save` (stores the current loop), `loop_recall` (body slot = the
+        saved loop's number, none = the next one), `loop_delete` (slot), `hot_set` (slot 1..8, value = seconds, none = at
+        the playhead; quantised when quantise is on), `hot_style` (slot, text, color; color null clears it), `hot_loop`
+        (slot; makes the hot cue a loop, again makes it plain), `hot_delete` (slot), `main_set` (value = seconds, none =
+        at the playhead). `wave_zoom` (value = seconds visible, 1.5..48), `wave_zoom_in`, `wave_zoom_out` zoom the
+        scrolling waveform of the deck.
+      x-scope: "control:deck:{deck}"
+      parameters:
+        - {$ref: "#/components/parameters/Deck"}
+        - name: action
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [memory_set, memory_delete, memory_style, memory_move, loop_save, loop_recall, loop_delete, hot_set, hot_style, hot_loop, hot_delete, main_set, wave_zoom, wave_zoom_in, wave_zoom_out]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PrepRequest"}
+            examples:
+              nameHotCue: {value: {slot: 1, text: Intro, color: 4079615}}
+              memoryCue: {value: {value: 92.5, text: Drop}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PrepResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: Cannot be done (no track, no such cue, no loop ...).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
         default: {$ref: "#/components/responses/Error"}
 
   /v1/mixer:
@@ -760,6 +901,197 @@ paths:
         "404": {$ref: "#/components/responses/NotFound"}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/library/smart-playlists:
+    get:
+      tags: [Library]
+      operationId: listSmartPlaylists
+      summary: Smart playlists (saved rule sets) with their current track counts
+      description: "Required scope: `library:read`."
+      x-scope: "library:read"
+      responses:
+        "200":
+          description: All smart playlists.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/SmartPlaylist"}
+        default: {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Library]
+      operationId: createSmartPlaylist
+      summary: Create a smart playlist
+      description: "Required scope: `library:write`. A smart playlist is a list of rules, all or any of which a track must meet; it always shows what matches now. Exported to a USB stick as an ordinary playlist."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SmartPlaylistWrite"}
+            example: {name: Warm-up house, match: all, rules: [{field: genre, text: house}, {field: bpm, min: 118, max: 124}, {field: rating, min: 3}]}
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SmartPlaylist"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/smart-playlists/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Smart playlist id.
+        schema: {type: integer, format: int64, minimum: 0}
+    get:
+      tags: [Library]
+      operationId: getSmartPlaylist
+      summary: One smart playlist
+      description: "Required scope: `library:read`."
+      x-scope: "library:read"
+      responses:
+        "200":
+          description: The smart playlist and how many tracks match now.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SmartPlaylist"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    patch:
+      tags: [Library]
+      operationId: updateSmartPlaylist
+      summary: Change a smart playlist's name, match mode or rules
+      description: "Required scope: `library:write`. Fields that are not given stay as they are; `rules`, when given, replaces the whole list."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SmartPlaylistWrite"}
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SmartPlaylist"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Library]
+      operationId: deleteSmartPlaylist
+      summary: Delete a smart playlist
+      description: "Required scope: `library:write`. The tracks stay in the library."
+      x-scope: "library:write"
+      responses:
+        "204": {description: Deleted. Empty body.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/smart-playlists/{id}/tracks:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Smart playlist id.
+        schema: {type: integer, format: int64, minimum: 0}
+    get:
+      tags: [Library]
+      operationId: getSmartPlaylistTracks
+      summary: The tracks that match a smart playlist now
+      description: "Required scope: `library:read`."
+      x-scope: "library:read"
+      responses:
+        "200":
+          description: Matching tracks.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, items]
+                properties:
+                  total: {type: integer}
+                  items:
+                    type: array
+                    items: {$ref: "#/components/schemas/Track"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/preview:
+    get:
+      tags: [Preview]
+      operationId: getPreview
+      summary: State of the pre-listen player
+      description: "Required scope: `read`."
+      x-scope: read
+      responses:
+        "200":
+          description: The pre-listen player. `headphone_output` is false on a stereo-only device, where pre-listen is refused unless the setting `preview.master` is 1.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Preview"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/preview/load:
+    post:
+      tags: [Preview]
+      operationId: loadPreview
+      summary: Pre-listen to a library track
+      description: |
+        Required scope: `control`. Decodes the track and hands it to the pre-listen player, which plays in the headphones only
+        (never on a deck, never on the master unless `preview.master` is on). A new preview replaces the old one. 409 with a
+        reason when the device has no headphone output and `preview.master` is off. Loading is asynchronous (202).
+      x-scope: control
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [track_id]
+              properties:
+                track_id: {type: integer, format: int64}
+                play: {type: boolean, default: false, description: Start playing as soon as it is loaded.}
+      responses:
+        "202": {description: Accepted; loading has started. Empty body.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409":
+          description: Refused (no headphone output, unknown track).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/preview/{control}:
+    post:
+      tags: [Preview, Controls]
+      operationId: controlPreview
+      summary: Run a pre-listen control
+      description: "Required scope: `control`. `play` (0 pause, 1 play, none = toggle), `stop`, `seek` (seconds), `level` (0..1), `master` (0 or 1: also on the master output; leave it off)."
+      x-scope: control
+      parameters:
+        - name: control
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [play, stop, seek, level, master]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ControlRequest"}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ControlResult"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/history:
     get:
       tags: [History]
@@ -1031,6 +1363,13 @@ components:
         rating: {type: integer, minimum: 0, maximum: 5}
         format: {type: string, description: File format.}
         path: {type: string, description: Absolute file path.}
+        comment: {type: string}
+        color: {type: integer, description: "Colour tag: 0 = none, else 0xRRGGBB as a number."}
+        date_added: {type: integer, format: int64, description: Unix seconds.}
+        bitrate: {type: integer}
+        play_count: {type: integer, description: Times the track was played (from the history).}
+        last_played_ms: {type: integer, format: int64, description: Unix milliseconds of the last play; 0 = never.}
+        grid_locked: {type: boolean, description: Analysis never replaces a locked beat grid; hand edits lock it.}
     Cue:
       type: object
       required: [kind, start_ms, label]
@@ -1080,6 +1419,8 @@ components:
         comment: {type: string}
         rating: {type: integer, minimum: 0, maximum: 5}
         year: {type: integer, minimum: 0, maximum: 9999}
+        color: {type: integer, minimum: 0, maximum: 16777215, description: "Colour tag: 0 = none, else 0xRRGGBB."}
+        grid_locked: {type: boolean, description: Lock or unlock the beat grid against analysis.}
     Playlist:
       type: object
       required: [id, parent, name, folder, tracks]
@@ -1130,7 +1471,8 @@ components:
       required: [destination]
       properties:
         destination: {type: string, description: Absolute destination folder, e.g. a mounted drive.}
-        playlist_id: {type: integer, format: int64, default: 0, description: Playlist to export; 0 = whole library.}
+        playlist_id: {type: integer, format: int64, default: 0, description: Playlist to export; 0 = whole library (including every smart playlist).}
+        smart_playlist_id: {type: integer, format: int64, default: 0, description: Smart playlist to export as an ordinary playlist of the tracks it matches now. Not together with playlist_id.}
     PathRequest:
       type: object
       required: [path]
@@ -1254,6 +1596,116 @@ components:
           properties:
             deck: {type: integer, minimum: 1, maximum: 4}
             seconds: {type: number}
+    PrepRequest:
+      type: object
+      description: Arguments of a grid or cue action. Which fields an action reads is in the operation's description.
+      properties:
+        value: {type: number, description: "The amount: milliseconds, BPM, seconds, a factor, 0/1 ... (see the action)."}
+        value2: {type: number}
+        slot: {type: integer, minimum: 0, description: "Hot cue slot 1..8, or the 1-based number of a memory cue / saved loop."}
+        text: {type: string, maxLength: 80, description: Name of a cue.}
+        color: {type: [integer, "null"], minimum: 0, maximum: 16777215, description: "0xRRGGBB as a number; null = the default colour."}
+    PrepResult:
+      type: object
+      required: [action]
+      properties:
+        action: {type: string}
+    DeckGrid:
+      type: object
+      required: [track_id, grid, grid_locked, grid_edit, undo_depth, metronome]
+      properties:
+        track_id: {type: integer, format: int64}
+        grid:
+          type: array
+          items:
+            type: object
+            required: [first_beat_s, bpm, bar_beat]
+            properties:
+              first_beat_s: {type: number}
+              bpm: {type: number}
+              bar_beat: {type: integer, minimum: 1, maximum: 4, description: Position of the section's first beat within its bar.}
+        grid_locked: {type: boolean}
+        grid_edit: {type: boolean}
+        undo_depth: {type: integer}
+        metronome: {type: boolean}
+    DeckCues:
+      type: object
+      required: [track_id, memory_cues, hot_cues, loop]
+      properties:
+        track_id: {type: integer, format: int64}
+        memory_cues:
+          type: array
+          description: Memory cues and saved loops (those have end_s), in order.
+          items:
+            type: object
+            required: [time_s, label, color]
+            properties:
+              time_s: {type: number}
+              end_s: {type: number}
+              label: {type: string}
+              color: {type: integer}
+        hot_cues:
+          type: array
+          items:
+            type: object
+            required: [slot, time_s, label, color]
+            properties:
+              slot: {type: integer, minimum: 1, maximum: 8}
+              time_s: {type: number}
+              end_s: {type: number, description: Present when the hot cue is a loop.}
+              label: {type: string}
+              color: {type: integer}
+        loop:
+          type: [object, "null"]
+          properties:
+            in_s: {type: number}
+            out_s: {type: number}
+            active: {type: boolean}
+    SmartRule:
+      type: object
+      required: [field]
+      properties:
+        field: {type: string, enum: [text, bpm, key, genre, rating, color, added_days, plays, playlist, missing]}
+        not: {type: boolean, default: false, description: "Negates the rule: text does not contain, not in the playlist, file present, key not in the set."}
+        text: {type: string, description: "text / genre: a substring; key: a list such as 8A,9A (musical names work too)."}
+        min: {type: number, description: "bpm, plays: lower limit; rating: at least this many stars."}
+        max: {type: number, description: "bpm, plays: upper limit (omit for none)."}
+        days: {type: number, description: "added_days: added within this many days."}
+        color: {type: integer, description: "color: 0xRRGGBB, 0 = no colour tag."}
+        playlist_id: {type: integer, format: int64}
+    SmartPlaylistWrite:
+      type: object
+      properties:
+        name: {type: string, maxLength: 120}
+        match: {type: string, enum: [all, any], description: All rules (AND) or any rule (OR).}
+        rules:
+          type: array
+          maxItems: 20
+          items: {$ref: "#/components/schemas/SmartRule"}
+    SmartPlaylist:
+      type: object
+      required: [id, name, match, rules]
+      properties:
+        id: {type: integer, format: int64}
+        name: {type: string}
+        match: {type: string, enum: [all, any]}
+        rules:
+          type: array
+          items: {$ref: "#/components/schemas/SmartRule"}
+        track_count: {type: integer, description: Tracks matching now (list and get only).}
+    Preview:
+      type: object
+      required: [loaded, playing, on_master, level, headphone_output]
+      properties:
+        loaded: {type: boolean}
+        playing: {type: boolean}
+        on_master: {type: boolean, description: Also routed to the master output (off by default).}
+        level: {type: number}
+        track_id: {type: [integer, "null"], format: int64}
+        title: {type: [string, "null"]}
+        position_seconds: {type: number}
+        length_seconds: {type: number}
+        headphone_output: {type: boolean, description: The device has a separate headphone pair.}
     ControlRequest:
       description: |
         Body of every control endpoint. `value` may be a number or a boolean. Omit it to flip a toggle, tap

@@ -30,7 +30,7 @@ void fingerprint(std::uint32_t (&fp)[12]) {
   fp[8] = static_cast<std::uint32_t>(sizeof(Shared));
   fp[9] = static_cast<std::uint32_t>(Op::Count) * 1000 + kMaxDecks * 100 + kSamplerSlots;
   fp[10] = sizeof(InputInfo);
-  fp[11] = 0;
+  fp[11] = sizeof(PreviewView);
 }
 }  // namespace
 
@@ -268,13 +268,14 @@ Scope scope_of(Op op) {
     case Op::Crossfader: case Op::HeadMix: case Op::HeadLevel: case Op::MasterLevel: case Op::MasterBpm:
     case Op::SamplerLevel: case Op::RecStart: case Op::RecStop: case Op::StreamEnable: case Op::SamplerStop:
     case Op::MicOn: case Op::MicLevel: case Op::MicEqLow: case Op::MicEqHigh: case Op::MicTalkover:
-    case Op::MicTalkoverDepth: case Op::MicMonitor: case Op::MicGate:
+    case Op::MicTalkoverDepth: case Op::MicMonitor: case Op::MicGate: case Op::MetronomeLevel:
+    case Op::PreviewPlay: case Op::PreviewStop: case Op::PreviewSeek: case Op::PreviewLevel: case Op::PreviewMaster:
       return Scope::Global;
     case Op::FxSelect: case Op::FxEnable: case Op::FxWet: case Op::FxTime: case Op::FxParam:
       return Scope::Fx;
     case Op::SamplerTrigger: case Op::SamplerSync: case Op::SamplerLoop: case Op::SamplerGain:
       return Scope::Slot;
-    case Op::Load: case Op::SamplerLoad: case Op::SchedInsert: case Op::SchedCancel: case Op::SchedCancelAll: case Op::Count:
+    case Op::Load: case Op::SamplerLoad: case Op::ReplaceMeta: case Op::PreviewLoad: case Op::SchedInsert: case Op::SchedCancel: case Op::SchedCancelAll: case Op::Count:
       return Scope::Reject;
     default:
       return Scope::Deck;
@@ -297,7 +298,7 @@ bool validate_command(const WireCommand& w, Command& out) {
     case Scope::Reject: return false;
   }
   switch (op) {
-    case Op::HotCueDown: case Op::HotCueUp: case Op::HotCueClear:
+    case Op::HotCueDown: case Op::HotCueUp: case Op::HotCueClear: case Op::HotCueSetAt: case Op::HotCueEndAt:
       if (w.i < 0 || w.i >= kHotCues) return false;
       break;
     case Op::FxSelect: case Op::FxEnable: case Op::FxWet: case Op::FxTime: case Op::FxParam:
@@ -315,6 +316,24 @@ bool validate_command(const WireCommand& w, Command& out) {
       break;
     case Op::StreamEnable:
       if (w.i < 0 || w.i > 3) return false;  // bit 0: on, bit 1: leave the microphone out
+      break;
+    case Op::PreviewPlay:
+      if (w.i < -1 || w.i > 1) return false;
+      break;
+    case Op::PreviewMaster:
+      if (w.i < 0 || w.i > 1) return false;
+      break;
+    case Op::PreviewLevel:
+      if (!finite_in(w.f, -0.001, 1.001)) return false;
+      break;
+    case Op::PreviewSeek:
+      if (!finite_in(w.d, 0, 1e13)) return false;
+      break;
+    case Op::Metronome:
+      if (w.i < -1 || w.i > 1) return false;
+      break;
+    case Op::MetronomeLevel:
+      if (!finite_in(w.f, -0.001, 1.001)) return false;
       break;
     case Op::MicOn: case Op::MicMonitor:
       if (w.i < -1 || w.i > 1) return false;

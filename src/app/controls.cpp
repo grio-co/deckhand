@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <cstring>
 
 namespace deckhand {
 namespace {
@@ -54,6 +55,7 @@ const Def kDeck[] = {
     {"loop_exit", Kind::Trigger, Op::LoopExit, 0, 1, "none", "Leave the active loop"},
     {"color_fx", Kind::Value, Op::ColorFx, 0, 5, "0 filter, 1 noise, 2 dub echo, 3 crush, 4 pitch, 5 space", "Effect driven by the filter knob"},
     {"auto_gain", Kind::Value, Op::AutoGain, -24, 12, "dB", "Loudness trim applied before the channel"},
+    {"metronome", Kind::Toggle, Op::Metronome, 0, 1, "0 off, 1 on, none = toggle", "Click on every grid beat, on the headphone bus only"},
 };
 
 const Def kMixer[] = {
@@ -71,6 +73,16 @@ const Def kMixer[] = {
     {"mic_talkover_depth", Kind::Value, Op::MicTalkoverDepth, -24, 0, "dB of ducking, -24..0", "How far talkover lowers the music"},
     {"mic_monitor", Kind::Toggle, Op::MicMonitor, 0, 1, "0 off, 1 on, none = toggle", "Also play the microphone in the headphones"},
     {"mic_gate", Kind::Value, Op::MicGate, -80, -20, "dB threshold, -80 = noise gate off", "Microphone noise gate"},
+    {"metronome_level", Kind::Value, Op::MetronomeLevel, 0, 1, "0..1", "Level of the metronome click (headphones only)"},
+};
+
+// Pre-listen player controls: preview.play ... (loading a track is POST /v1/preview/load or the browser's preview strip).
+const Def kPreview[] = {
+    {"play", Kind::Toggle, Op::PreviewPlay, 0, 1, "0 pause, 1 play, none = toggle", "Play or pause the pre-listen player (headphones only)"},
+    {"stop", Kind::Trigger, Op::PreviewStop, 0, 1, "none", "Stop pre-listening and unload the track"},
+    {"seek", Kind::Value, Op::PreviewSeek, 0, 1e9, "seconds from the start", "Move the pre-listen position"},
+    {"level", Kind::Value, Op::PreviewLevel, 0, 1, "0..1 (0.7 = default)", "Pre-listen level"},
+    {"master", Kind::Toggle, Op::PreviewMaster, 0, 1, "0 headphones only (default), 1 also on the master", "Route the pre-listen to the master output as well. The room hears it: leave this off"},
 };
 
 // Effect slot controls: deck1.fx2.wet, mixer.fx1.select ... (mixer = the master bus).
@@ -112,6 +124,7 @@ struct Parsed {
   bool mixer = false;
   int fx_slot = -1;  // >= 0: an effect slot control
   bool sampler = false;
+  bool preview = false;
 };
 
 bool parse(std::string_view name, Parsed& p, std::string& error) {
@@ -122,6 +135,17 @@ bool parse(std::string_view name, Parsed& p, std::string& error) {
   }
   const std::string_view group = name.substr(0, dot);
   std::string_view rest = name.substr(dot + 1);
+  if (group == "preview") {
+    p.preview = true;
+    for (const Def& d : kPreview) {
+      if (rest == d.name) {
+        p.def = &d;
+        return true;
+      }
+    }
+    error = "unknown preview control";
+    return false;
+  }
   if (group == "sampler") {  // sampler.<slot>.<control>
     const auto d2 = rest.find('.');
     int slot = 0;
@@ -205,7 +229,66 @@ bool parse(std::string_view name, Parsed& p, std::string& error) {
   return false;
 }
 
+// ---- controls the application carries out (grid editing, cues, loops) ---------------------------------------------------
+struct PrepDef {
+  const char* name;
+  const char* action;
+  const char* range;
+  const char* help;
+  bool slot = false;
+};
+const PrepDef kPrep[] = {
+    {"grid_edit", "grid.edit", "0 off, 1 on, none = toggle", "Grid edit mode: the scrolling waveform shows the beat grid prominently"},
+    {"grid_shift", "grid.shift", "milliseconds, signed", "Move every beat of the grid earlier or later"},
+    {"grid_align", "grid.align", "none", "Move the grid so the beat nearest the playhead lies on it"},
+    {"grid_first_beat", "grid.set_first_beat", "none", "The playhead becomes a beat and bar beat 1 (grid moved to it)"},
+    {"grid_downbeat", "grid.downbeat", "none", "The beat nearest the playhead becomes bar beat 1"},
+    {"grid_rotate", "grid.rotate", "steps, signed (default 1)", "Cycle which beat is bar beat 1"},
+    {"grid_bpm", "grid.bpm_delta", "BPM change, signed (0.01, 0.1 ...)", "Change the tempo of the grid section at the playhead"},
+    {"grid_set_bpm", "grid.set_bpm", "BPM 30..300", "Set the tempo of the grid section at the playhead"},
+    {"grid_scale", "grid.scale", "0.5 halve, 2 double", "Halve or double the grid's BPM"},
+    {"grid_tap", "grid.tap", "none", "Tap tempo: tap in time, the grid takes the tempo from the third tap"},
+    {"grid_add_section", "grid.add_section", "none, or seconds", "Start a new tempo section at the playhead"},
+    {"grid_remove_section", "grid.remove_section", "none, or seconds", "Remove the tempo section at the playhead"},
+    {"grid_lock", "grid.lock", "0 unlock, 1 lock, none = toggle", "A locked grid is never replaced by analysis"},
+    {"grid_reanalyse", "grid.reanalyse", "none", "Analyse the track again (refused while the grid is locked)"},
+    {"grid_undo", "grid.undo", "none", "Undo the last grid change"},
+    {"memory_cue_set", "cue.memory_set", "none = at the playhead, or seconds", "Add a memory cue (body: text = name, color = 0xRRGGBB as a number)"},
+    {"memory_cue_delete", "cue.memory_delete", "none; slot-less: nearest to the playhead, or the 1-based number in body slot", "Delete a memory cue"},
+    {"loop_save", "cue.loop_save", "none", "Store the current loop as a saved (memory) loop"},
+    {"loop_recall", "cue.loop_recall", "none = next saved loop, or body slot = its number", "Set the deck's loop to a saved loop"},
+    {"loop_delete", "cue.loop_delete", "body slot = its number", "Delete a saved loop"},
+    {"cue_set", "cue.main_set", "none = at the playhead, or seconds", "Move the main cue point"},
+    {"hotcue_set", "cue.hot_set", "none = at the playhead, or seconds", "Set or move a hot cue", true},
+    {"hotcue_style", "cue.hot_style", "body: text = name, color = 0xRRGGBB or null", "Name and colour a hot cue", true},
+    {"hotcue_loop", "cue.hot_loop", "none = current loop length, or beats", "Make a hot cue a loop (again: back to a plain cue)", true},
+    {"wave_zoom", "wave.zoom", "seconds of track visible in the scrolling waveform, 1.5..48", "Zoom the scrolling waveform"},
+    {"wave_zoom_in", "wave.zoom_in", "none", "Zoom the scrolling waveform in"},
+    {"wave_zoom_out", "wave.zoom_out", "none", "Zoom the scrolling waveform out"},
+};
+
 }  // namespace
+
+bool parse_prep_control(std::string_view name, int& deck, std::string& action, int& slot) {
+  const auto dot = name.find('.');
+  if (dot == std::string_view::npos || name.substr(0, 4) != "deck" || !parse_int(name.substr(4, dot - 4), deck) || deck < 1 || deck > kMaxDecks) return false;
+  --deck;
+  std::string_view rest = name.substr(dot + 1);
+  std::string_view slot_text;
+  if (const auto d2 = rest.find('.'); d2 != std::string_view::npos) {
+    slot_text = rest.substr(d2 + 1);
+    rest = rest.substr(0, d2);
+  }
+  for (const PrepDef& d : kPrep) {
+    if (rest != d.name) continue;
+    slot = 0;
+    if (d.slot != !slot_text.empty()) return false;
+    if (d.slot && (!parse_int(slot_text, slot) || slot < 1 || slot > kHotCues)) return false;
+    action = d.action;
+    return true;
+  }
+  return false;
+}
 
 std::vector<ControlInfo> list_controls() {
   std::vector<ControlInfo> out;
@@ -219,12 +302,24 @@ std::vector<ControlInfo> list_controls() {
       }
     }
   }
+  for (int deck = 1; deck <= kMaxDecks; ++deck) {
+    for (const PrepDef& d : kPrep) {
+      const std::string base = "deck" + std::to_string(deck) + "." + d.name;
+      const bool value = std::strcmp(d.range, "none") != 0;
+      if (!d.slot) {
+        out.push_back({base, value ? "value" : "trigger", d.range, d.help});
+      } else {
+        for (int s = 1; s <= kHotCues; ++s) out.push_back({base + "." + std::to_string(s), value ? "value" : "trigger", d.range, d.help});
+      }
+    }
+  }
   for (const Def& d : kMixer) out.push_back({std::string("mixer.") + d.name, kind_name(d.kind), d.range, d.help});
   for (int unit = 1; unit <= kMaxDecks + 1; ++unit) {
     const std::string group = unit <= kMaxDecks ? "deck" + std::to_string(unit) : std::string("mixer");
     for (int slot = 1; slot <= kFxSlots; ++slot)
       for (const Def& d : kFx) out.push_back({group + ".fx" + std::to_string(slot) + "." + d.name, kind_name(d.kind), d.range, d.help});
   }
+  for (const Def& d : kPreview) out.push_back({std::string("preview.") + d.name, kind_name(d.kind), d.range, d.help});
   for (int slot = 1; slot <= kSamplerSlots; ++slot)
     for (const Def& d : kSampler) out.push_back({"sampler." + std::to_string(slot) + "." + d.name, kind_name(d.kind), d.range, d.help});
   return out;
@@ -243,6 +338,30 @@ bool build_control(const IEngine& engine, std::string_view name, bool has_value,
   c.op = d.op;
   c.deck = static_cast<std::uint8_t>(p.deck);
   c.i = p.slot;
+  if (p.preview) {
+    c.deck = 0;
+    c.i = 0;
+    if (d.kind == Kind::Toggle) {
+      c.i = has_value ? (value != 0 ? 1 : 0) : -1;
+    } else if (d.kind == Kind::Value) {
+      if (!has_value || value < d.lo || value > d.hi) {
+        error = std::string("value needed: ") + d.range;
+        return false;
+      }
+      if (d.op == Op::PreviewSeek) {
+        const PreviewView pv = engine.preview();
+        if (!pv.loaded) {
+          error = "nothing is loaded in the pre-listen player";
+          return false;
+        }
+        c.d = std::min(value * pv.sample_rate, std::max(0.0, pv.length - 1));
+      } else {
+        c.f = static_cast<float>(value);
+      }
+    }
+    out.push_back(c);
+    return true;
+  }
   const DeckView view = p.mixer || p.sampler ? DeckView{} : engine.deck(p.deck);
   if (p.fx_slot >= 0) {  // effect slot: i = slot, f (or d for select) = value
     c.i = p.fx_slot;
@@ -337,6 +456,14 @@ bool build_control(const IEngine& engine, std::string_view name, bool has_value,
 }
 
 bool apply_control(IEngine& engine, std::string_view name, bool has_value, double value, std::string& error) {
+  {
+    int deck = 0, slot = 0;
+    std::string action;
+    if (parse_prep_control(name, deck, action, slot)) {
+      error = "this control edits the loaded track and is carried out by the application, not the engine";
+      return false;
+    }
+  }
   std::vector<Command> commands;
   if (!build_control(engine, name, has_value, value, commands, error)) return false;
   for (const Command& c : commands) engine.send(c);
@@ -348,6 +475,16 @@ bool read_control(const IEngine& engine, std::string_view name, double& value) {
   std::string error;
   if (!parse(name, p, error)) return false;
   if (p.sampler) return false;
+  if (p.preview) {
+    const PreviewView pv = engine.preview();
+    switch (p.def->op) {
+      case Op::PreviewPlay: value = pv.playing; return true;
+      case Op::PreviewSeek: value = pv.sample_rate > 0 ? pv.position / pv.sample_rate : 0; return true;
+      case Op::PreviewLevel: value = pv.level; return true;
+      case Op::PreviewMaster: value = pv.on_master; return true;
+      default: return false;
+    }
+  }
   if (p.fx_slot >= 0) {
     const FxSlotView f = p.mixer ? engine.mixer().fx[p.fx_slot] : engine.deck(p.deck).fx[p.fx_slot];
     switch (p.def->op) {
@@ -376,6 +513,7 @@ bool read_control(const IEngine& engine, std::string_view name, double& value) {
       case Op::MicTalkoverDepth: value = m.mic_depth_db; return true;
       case Op::MicMonitor: value = m.mic_monitor; return true;
       case Op::MicGate: value = m.mic_gate_db; return true;
+      case Op::MetronomeLevel: value = m.metro_level; return true;
       default: return false;
     }
   }
@@ -404,6 +542,7 @@ bool read_control(const IEngine& engine, std::string_view name, double& value) {
     case Op::Reverse: value = v.reverse; return true;
     case Op::ColorFx: value = static_cast<double>(v.color_fx); return true;
     case Op::AutoGain: value = v.auto_gain_db; return true;
+    case Op::Metronome: value = v.metronome; return true;
     default: return false;
   }
 }

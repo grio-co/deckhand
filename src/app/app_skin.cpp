@@ -154,6 +154,12 @@ bool App::read_text(const ui::Target& t, std::string& out) {
     } else if (n == "key_shift") {
       const long semis = std::lround(v.key_shift);
       out = semis == 0 ? "0" : fmt("%+ld", semis);
+    } else if (n == "grid_bpm") {
+      const GridSection* g = nullptr;
+      for (const GridSection& sec : in.grid)
+        if (sec.first_beat_frame <= v.position) g = &sec;
+      if (!g && !in.grid.empty()) g = &in.grid.front();
+      out = g ? fmt("%.2f", g->bpm) : "--.--";
     } else if (n == "fx_name" && t.index >= 0 && t.index < kFxSlots) {
       const EffectInfo* fi = effect_info(v.fx[t.index].kind);
       out = fi && v.fx[t.index].kind != EffectKind::None ? fi->name : "FX " + std::to_string(t.index + 1);
@@ -176,6 +182,16 @@ bool App::read_text(const ui::Target& t, std::string& out) {
       return true;
     }
     return false;
+  }
+  if (t.type == ui::Target::Type::Info && (n == "preview_title" || n == "preview_time")) {
+    const PreviewView pv = engine_->preview();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (n == "preview_title") {
+      out = preview_.loading ? T("deck.loading") : (pv.loaded && preview_.id == pv.track_id ? preview_.title : T("preview.idle"));
+    } else {
+      out = pv.loaded && pv.sample_rate > 0 ? clock_text(pv.position / pv.sample_rate) + " / " + clock_text(pv.length / pv.sample_rate) : std::string();
+    }
+    return true;
   }
   if (n == "controller" && t.type == ui::Target::Type::Info) {
     const auto c = hub_->connected();
@@ -224,6 +240,11 @@ bool App::read_flag(const ui::Target& t) {
     if (n == "multi_language") return i18n_.available().size() > 1;
     if (n == "multi_skin") return skins_.size() > 1;
     if (n == "has_four") return skin_ && skin_->has_window("four");
+    if (n == "any_grid_edit") {
+      for (int i = 0; i < kMaxDecks; ++i)
+        if (grid_edit_[i]) return true;
+      return false;
+    }
     if (n == "can_remove") {
       std::lock_guard<std::mutex> lock(browse_mutex_);
       return view_is_editable_playlist() && sel_ >= 0 && sel_ < static_cast<int>(rows_.size());
@@ -237,6 +258,11 @@ bool App::read_flag(const ui::Target& t) {
     if (n == "sampler") return panel_ == Panel::Sampler;
     if (n == "learn") return panel_ == Panel::Learn;
     if (n == "layout") return variant_ == "four";
+    if (n == "columns") return panel_ == Panel::Columns;
+    if (n == "compatible") return compat_on_;
+    if (n == "preview_play") return engine_->preview().playing != 0;
+    if (n == "grid_edit") return deck_ok && grid_edit_[d];
+    if (n == "grid_lock") return deck_ok && info_[d].grid_locked;
   }
   return false;
 }
@@ -248,6 +274,8 @@ void App::press(const ui::Target& t) {
     return;
   }
   if (t.type != ui::Target::Type::Control) return;
+  if (t.name.size() > 10 && t.name.compare(t.name.size() - 10, 10, ".metronome") == 0 && engine_->output_channels() < 4)
+    status_note_ = T("grid.no_cue_bus");  // the click goes to the headphone pair only; the switch still works
   double cur = 0;
   switch (t.special) {
     case ui::Special::TempoRange: {
@@ -349,10 +377,45 @@ void App::do_action(const ui::Target& t) {
       std::lock_guard<std::mutex> lock(browse_mutex_);
       have = sel_ >= 0 && sel_ < static_cast<int>(rows_.size());
       if (have) edit_track_ = rows_.id(static_cast<std::size_t>(sel_));
+      add_ids_ = selected_ids();
     }
     if (have) open_panel(n == "add_to" ? Panel::AddTo : Panel::Tags);
+  } else if (n == "columns") {
+    if (panel_ == Panel::Columns) close_panel();
+    else open_panel(Panel::Columns);
+  } else if (n == "compatible") {
+    compat_on_ = !compat_on_;
+    rows_dirty_ = true;
+  } else if (n == "preview_play") {
+    preview_toggle();
+  } else if (n == "preview_stop") {
+    Command c;
+    c.op = Op::PreviewStop;
+    engine_->send(c);
   } else if (n == "remove" || n.compare(0, 9, "playlist_") == 0) {
     playlist_action(n);
+  } else if (n == "cue_memory_prev" || n == "cue_memory_next") {
+    std::string error;
+    apply_control(*engine_, "deck" + std::to_string(t.deck + 1) + ".cue_call", true, n == "cue_memory_prev" ? -1 : 1, error);
+  } else if (n.compare(0, 5, "grid_") == 0 || n.compare(0, 4, "cue_") == 0) {
+    static const struct { const char* id; const char* action; bool value; } kMap[] = {
+        {"grid_edit", "grid.edit", false},           {"grid_shift", "grid.shift", true},       {"grid_first_beat", "grid.set_first_beat", false},
+        {"grid_downbeat", "grid.downbeat", false},   {"grid_rotate", "grid.rotate", true},     {"grid_bpm", "grid.bpm_delta", true},
+        {"grid_scale", "grid.scale", true},          {"grid_tap", "grid.tap", false},          {"grid_reanalyse", "grid.reanalyse", false},
+        {"grid_lock", "grid.lock", false},           {"grid_undo", "grid.undo", false},        {"grid_add_section", "grid.add_section", false},
+        {"grid_remove_section", "grid.remove_section", false}, {"cue_memory_set", "cue.memory_set", false},
+        {"cue_memory_delete", "cue.memory_delete", false}, {"cue_loop_save", "cue.loop_save", false}, {"cue_loop_recall", "cue.loop_recall", false}};
+    for (const auto& m : kMap) {
+      if (n != m.id) continue;
+      PrepArgs a;
+      if (m.value) {
+        a.has_value = true;
+        a.value = t.step;
+      }
+      std::string error;
+      if (!prep(t.deck, m.action, a, error) && !error.empty()) status_note_ = T("status.error", {{"message", error}});
+      break;
+    }
   } else if (n == "sampler_stop") {
     Command c;
     c.op = Op::SamplerStop;
@@ -378,6 +441,12 @@ void App::playlist_action(const std::string& which) {
     rename_buf_ = T("playlist.new_folder");
     rename_fresh_ = true;
     rows_dirty_ = true;
+  } else if (which == "playlist_add_smart") {
+    open_smart_editor(0);
+  } else if (which == "playlist_rename" && cur && cur->kind == TreeItem::Smart) {
+    open_smart_editor(cur->id);
+  } else if (which == "playlist_delete" && cur && cur->kind == TreeItem::Smart) {
+    open_smart_editor(cur->id);  // deleting a smart playlist asks inside its editor
   } else if (which == "playlist_rename" && editable) {
     rename_id_ = cur->id;
     rename_buf_ = cur->name;
@@ -424,6 +493,10 @@ void App::draw_custom(const skin::ResolvedWidget& w, const ui::Target& t, const 
   const Color base = st.fg == 0xE6E6EAFF ? deck_color(std::max(d, 0)) : ui::to_gfx(st.fg, st.opacity);
   switch (w.kind) {
     case skin::Kind::Waveform: {
+      if (t.name == "preview_wave") {
+        draw_preview_strip(r, base);
+        return;
+      }
       if (!deck_ok) return;
       const auto mode = w.props.find("mode");
       if (mode != w.props.end() && mode->second == "overview") draw_overview(d, r, views_[d], info_[d], base, theme_);
@@ -458,6 +531,10 @@ void App::draw_search(const Rect& r, const skin::Style& st, const std::string& h
   dl_.text(r.x + 6, r.y + (r.h - th) / 2, text, st.font_size, search_.empty() ? theme_.dim : ui::to_gfx(st.fg, st.opacity), Align::Left, r.w - 12, 0);
 }
 
+namespace {
+Color rgb_of(int c) { return rgba((c >> 16) & 255, (c >> 8) & 255, c & 255); }
+}  // namespace
+
 void App::draw_wave(int di, const Rect& r, const DeckView& v, const DeckInfo& info, Color base, const ui::Theme& th, bool) {
   dl_.rect(r.x, r.y, 3, r.h, base);
   if (!info.audio || !v.loaded) {
@@ -466,10 +543,23 @@ void App::draw_wave(int di, const Rect& r, const DeckView& v, const DeckInfo& in
     return;
   }
   const TrackAudio& a = *info.audio;
-  const double sr = a.sample_rate, window = 6.0;
+  const double sr = a.sample_rate, window = wave_zoom_[di];
+  const bool edit = grid_edit_[di];
   const double pos = v.position / sr, pt_per_sec = r.w / window;
   const float cx = r.x + r.w / 2, mid = r.y + r.h / 2, half = r.h / 2 - 5;
   const auto x_of = [&](double seconds) { return cx + static_cast<float>((seconds - pos) * pt_per_sec); };
+  const bool inside = r.contains(in_.x, in_.y);
+
+  // Zoom: the wheel over the waveform and the two small buttons in its corner (remembered per deck).
+  const Rect zout{r.x + r.w - 42, r.y + 2, 18, 16}, zin{r.x + r.w - 22, r.y + 2, 18, 16};
+  bool on_button = false;
+  if (inside && in_.scroll != 0) {
+    set_wave_zoom(di, window * (in_.scroll > 0 ? 1.0 / 1.25 : 1.25));
+    in_.scroll = 0;
+  }
+  if (clicked(zin)) { set_wave_zoom(di, window / 1.5); on_button = true; }
+  if (clicked(zout)) { set_wave_zoom(di, window * 1.5); on_button = true; }
+
   dl_.push_clip(r.x + 3, r.y, r.w - 3, r.h);
 
   // Loop region behind the waveform.
@@ -477,15 +567,31 @@ void App::draw_wave(int di, const Rect& r, const DeckView& v, const DeckInfo& in
     const float x0 = x_of(v.loop_in / sr), x1 = x_of(v.loop_out / sr);
     dl_.rect(x0, r.y, x1 - x0, r.h, with_alpha(th.accent, v.loop_active ? 70 : 30));
   }
+  // Saved loops and hot-cue loops, fainter.
+  for (const MemCue& m : info.mem) {
+    if (m.end <= m.frame) continue;
+    const float x0 = x_of(m.frame / sr), x1 = x_of(m.end / sr);
+    if (x1 < r.x || x0 > r.x + r.w) continue;
+    const Color c = m.color >= 0 ? rgb_of(m.color) : th.warn;
+    dl_.rect(x0, r.y + r.h - 6, x1 - x0, 6, with_alpha(c, 110));
+  }
   const double t0 = pos - window / 2, t1 = pos + window / 2;
-  // Waveform: one column per analysis point, three bands layered.
+  // Waveform: columns of at least 1.5 points wide (several analysis points are merged when zoomed out), three bands.
   const double per_point = 1.0 / a.wave_rate;
-  const float col = static_cast<float>(per_point * pt_per_sec) + 0.5f;
-  const long i0 = std::max(0L, static_cast<long>(t0 * a.wave_rate)),
-             i1 = std::min(static_cast<long>(a.wave.size()), static_cast<long>(t1 * a.wave_rate) + 2);
+  const float px_per_point = static_cast<float>(per_point * pt_per_sec);
+  const long step = std::max(1L, static_cast<long>(std::floor(1.5f / std::max(px_per_point, 1e-4f))));
+  const float col = std::max(px_per_point * static_cast<float>(step), 1.0f) + 0.5f;
+  long i0 = std::max(0L, static_cast<long>(t0 * a.wave_rate)), i1 = std::min(static_cast<long>(a.wave.size()), static_cast<long>(t1 * a.wave_rate) + 2);
+  i0 -= i0 % step;  // columns stay put while the track scrolls
   const Color c_low = mix(base, th.bg, 0.55f), c_high = mix(base, rgba(255, 255, 255), 0.7f);
-  for (long i = i0; i < i1; ++i) {
-    const WavePoint& p = a.wave[static_cast<std::size_t>(i)];
+  for (long i = i0; i < i1; i += step) {
+    WavePoint p = a.wave[static_cast<std::size_t>(i)];
+    for (long k = 1; k < step && i + k < static_cast<long>(a.wave.size()); ++k) {
+      const WavePoint& q = a.wave[static_cast<std::size_t>(i + k)];
+      p.low = std::max(p.low, q.low);
+      p.mid = std::max(p.mid, q.mid);
+      p.high = std::max(p.high, q.high);
+    }
     const float x = x_of(static_cast<double>(i) * per_point);
     const float hl = half * p.low / 255.0f, hm = half * 0.8f * p.mid / 255.0f, hh = half * 0.55f * p.high / 255.0f;
     const float tall = std::max(hl, std::max(hm, hh));
@@ -493,32 +599,143 @@ void App::draw_wave(int di, const Rect& r, const DeckView& v, const DeckInfo& in
     if (hm > 0.5f) dl_.rect(x, mid - hm, col, hm * 2, base);
     if (hh > 0.5f) dl_.rect(x, mid - hh, col, hh * 2, c_high);
   }
-  // Beat grid, over the waveform.
-  for (std::size_t s = 0; s < info.grid.size(); ++s) {
-    const GridSection& g = info.grid[s];
-    if (g.bpm <= 0) continue;
-    const double first = g.first_beat_frame / sr, interval = 60.0 / g.bpm;
-    const double end = s + 1 < info.grid.size() ? info.grid[s + 1].first_beat_frame / sr : a.frames / sr;
-    if (end < t0 || first > t1) continue;
-    long n = std::max(0L, static_cast<long>(std::ceil((t0 - first) / interval)));
-    for (double t = first + n * interval; t < std::min(t1, end - interval * 0.5); t = first + ++n * interval) {
-      const bool bar = (n + g.bar_beat - 1) % 4 == 0;
-      dl_.rect(x_of(t), r.y, 1, r.h, with_alpha(th.text, bar ? 120 : 45));
+  // Beat grid, over the waveform. In edit mode it is the point of the view: heavier lines, bar numbers, downbeats in colour.
+  {
+    std::vector<gridedit::BeatMark> marks;
+    gridedit::beats_in(info.grid, t0 * sr, t1 * sr, static_cast<double>(a.frames), sr, marks);
+    const float beat_px = info.grid.empty() ? 0.0f : static_cast<float>(60.0 / std::max(30.0, info.grid.front().bpm) * pt_per_sec);
+    const std::size_t stride = beat_px < 3.0f ? 4 : 1;  // zoomed far out: bars only
+    std::size_t n = 0;
+    for (const gridedit::BeatMark& m : marks) {
+      const bool bar = m.bar_pos == 1;
+      if (stride > 1 && !bar) continue;
+      ++n;
+      const float x = x_of(m.frame / sr);
+      if (edit) {
+        dl_.rect(x - (bar ? 1.25f : 0.75f), r.y, bar ? 2.5f : 1.5f, r.h, bar ? with_alpha(th.warn, 230) : with_alpha(th.text, 150));
+        dl_.triangle(x - 4, r.y, x + 4, r.y, x, r.y + 6, bar ? th.warn : th.text);
+        if (bar && beat_px * 4 > 28) dl_.text(x + 4, r.y + r.h - 14, "1", 10, th.warn, Align::Left, 0, 1);
+      } else {
+        dl_.rect(x, r.y, 1, r.h, with_alpha(th.text, bar ? 120 : 45));
+      }
     }
+    (void)n;
   }
-  // Cue point and hot cues.
-  const float xc = x_of(v.cue / sr);
+  // Cue point, hot cues (colour and name), memory cues.
+  const auto marker_frame = [&](int kind, int index, double frame) {
+    return cue_drag_.deck == di && cue_drag_.kind == kind && cue_drag_.index == index ? cue_drag_.frame : frame;
+  };
+  const float xc = x_of(marker_frame(3, 0, v.cue) / sr);
   dl_.triangle(xc - 5, r.y, xc + 5, r.y, xc, r.y + 8, th.text);
   const float tag_h = std::min(13.0f, r.h * 0.5f);
   for (int h = 0; h < kHotCues; ++h) {
     if (v.hot_cue[h] < 0) continue;
-    const float x = x_of(v.hot_cue[h] / sr);
-    dl_.rect(x, r.y, 1.5f, r.h, kHot[h]);
-    dl_.rect(x, r.y, 14, tag_h, kHot[h]);
+    const Color hc = info.hot_color[h] >= 0 ? rgb_of(info.hot_color[h]) : kHot[h];
+    const double frame = marker_frame(1, h, v.hot_cue[h]);
+    const float x = x_of(frame / sr);
+    if (v.hot_cue_end[h] > v.hot_cue[h]) {
+      const float xe = x_of((frame + (v.hot_cue_end[h] - v.hot_cue[h])) / sr);
+      dl_.rect(x, r.y, xe - x, r.h, with_alpha(hc, 38));
+      dl_.rect(xe, r.y, 1.5f, r.h, with_alpha(hc, 190));
+    }
+    dl_.rect(x, r.y, 1.5f, r.h, hc);
+    float tw = 14;
+    dl_.rect(x, r.y, tw, tag_h, hc);
     if (tag_h > 9) dl_.text(x + 7, r.y, std::string(1, static_cast<char>('1' + h)), 10, th.bg, Align::Center, 0, 1);
+    if (!info.hot_label[h].empty() && tag_h > 9) {
+      const std::string lab = skin_->fit(info.hot_label[h], 10, 1, 120);
+      const float lw = dl_.text_width(lab, 10, 1) + 8;
+      dl_.rect(x + tw, r.y, lw, tag_h, with_alpha(hc, 215));
+      dl_.text(x + tw + 4, r.y, lab, 10, th.bg, Align::Left, 0, 1);
+    }
+  }
+  for (std::size_t m = 0; m < info.mem.size(); ++m) {
+    const MemCue& c = info.mem[m];
+    const double frame = marker_frame(2, static_cast<int>(m), c.frame);
+    const Color mc = c.color >= 0 ? rgb_of(c.color) : th.warn;
+    const float x = x_of(frame / sr);
+    if (x < r.x - 100 || x > r.x + r.w + 4) continue;
+    dl_.rect(x, r.y, 1, r.h, with_alpha(mc, c.end > 0 ? 90 : 110));
+    dl_.triangle(x - 5, r.y + r.h, x + 5, r.y + r.h, x, r.y + r.h - 9, mc);
+    if (!c.label.empty() && r.h > 30) dl_.text(x + 6, r.y + r.h - 24, skin_->fit(c.label, 10, 1, 110), 10, mc, Align::Left, 0, 1);
   }
   dl_.pop_clip();
   dl_.rect(cx - 1, r.y, 2, r.h, rgba(255, 255, 255));  // playhead
+
+  // Zoom buttons and the visible span.
+  const auto small_button = [&](const Rect& b, const char* label) {
+    dl_.rrect(b.x, b.y, b.w, b.h, 3, with_alpha(th.panel2, b.contains(in_.x, in_.y) ? 255 : 200));
+    dl_.text(b.x + b.w / 2, b.y + 1, label, 12, th.text, Align::Center, 0, 1);
+  };
+  small_button(zout, "-");
+  small_button(zin, "+");
+  dl_.text(zout.x - 6, r.y + 3, fmt("%.1f s", window), 10, th.dim, Align::Right);
+  if (edit) dl_.text(r.x + 10, r.y + 3, T("grid.editing", {{"bpm", v.bpm}}), 10, th.warn, Align::Left, 0, 1);
+
+  // Pointer: drag a cue marker (double-click names it); a paused deck is scrubbed by dragging the waveform.
+  const auto pos_frame_at = [&](float x) {
+    double f = (pos + static_cast<double>(x - cx) / pt_per_sec) * sr;
+    f = std::clamp(f, 0.0, v.length);
+    return v.quantize && !info.grid.empty() ? gridedit::nearest_beat(info.grid, f, sr) : f;
+  };
+  if (in_.pressed && inside && !on_button) {
+    const CueHit hit = cue_hit_test(di, r, v, info, window, in_.x, in_.y);
+    if (hit.kind != 0) {
+      if (in_.clicks >= 2 && hit.kind == 1) open_cue_editor(di, hit.index, -1);
+      else if (in_.clicks >= 2 && hit.kind == 2) open_cue_editor(di, -1, hit.index);
+      else {
+        cue_drag_ = {di, hit.kind, hit.index, hit.kind == 1 ? v.hot_cue[hit.index] : hit.kind == 2 ? info.mem[static_cast<std::size_t>(hit.index)].frame : v.cue, false};
+        scrub_x0_ = in_.x;
+      }
+    } else if (!v.playing && !v.touching) {
+      scrub_deck_ = di;
+      scrub_x0_ = in_.x;
+      scrub_pos0_ = v.position;
+    }
+  }
+  if (cue_drag_.deck == di) {
+    if (in_.down) {
+      if (std::fabs(in_.x - scrub_x0_) > 3) cue_drag_.moved = true;
+      if (cue_drag_.moved) cue_drag_.frame = pos_frame_at(in_.x);
+    } else {
+      if (cue_drag_.moved) {
+        Command c;
+        c.deck = static_cast<std::uint8_t>(di);
+        if (cue_drag_.kind == 1) {
+          c.op = Op::HotCueSetAt;
+          c.i = cue_drag_.index;
+          c.d = cue_drag_.frame;
+          engine_->send(c);
+        } else if (cue_drag_.kind == 3) {
+          c.op = Op::CueSetAt;
+          c.d = cue_drag_.frame;
+          engine_->send(c);
+        } else {
+          int number = 0;  // the action counts memory cues, not loops
+          for (int i = 0; i <= cue_drag_.index && i < static_cast<int>(info.mem.size()); ++i)
+            if (info.mem[static_cast<std::size_t>(i)].end < 0) ++number;
+          PrepArgs pa;
+          pa.has_value = true;
+          pa.value = cue_drag_.frame / sr;
+          pa.slot = number;
+          std::string error;
+          prep(di, "cue.memory_move", pa, error);
+        }
+      }
+      cue_drag_ = {};
+    }
+  }
+  if (scrub_deck_ == di) {
+    if (in_.down && !v.playing && cue_drag_.deck != di) {
+      Command c;
+      c.op = Op::Seek;
+      c.deck = static_cast<std::uint8_t>(di);
+      c.d = std::clamp(scrub_pos0_ - static_cast<double>(in_.x - scrub_x0_) / pt_per_sec * sr, 0.0, v.length);
+      engine_->send(c);
+    } else {
+      scrub_deck_ = -1;
+    }
+  }
 }
 
 void App::draw_overview(int di, const Rect& ov, const DeckView& v, const DeckInfo& info, Color base, const ui::Theme& th) {
@@ -533,8 +750,19 @@ void App::draw_overview(int di, const Rect& ov, const DeckView& v, const DeckInf
     const float h = std::max(1.0f, ov.h * std::max(p.low, std::max(p.mid, p.high)) / 255.0f);
     dl_.rect(x, ov.y + (ov.h - h) / 2, cw + 0.5f, h, x - ov.x < played ? mix(base, th.bg, 0.6f) : base);
   }
+  const auto x_at = [&](double frame) { return ov.x + static_cast<float>(frame / v.length) * ov.w; };
+  if (v.loop_in >= 0 && v.loop_out > v.loop_in)
+    dl_.rect(x_at(v.loop_in), ov.y, std::max(1.0f, x_at(v.loop_out) - x_at(v.loop_in)), ov.h, with_alpha(th.accent, v.loop_active ? 80 : 40));
+  for (const MemCue& m : info.mem) {  // memory cues: a tick at the foot; saved loops: a band
+    const Color mc = m.color >= 0 ? rgb_of(m.color) : th.warn;
+    if (m.end > m.frame) dl_.rect(x_at(m.frame), ov.y + ov.h - 3, std::max(1.0f, x_at(m.end) - x_at(m.frame)), 3, with_alpha(mc, 170));
+    else dl_.rect(x_at(m.frame) - 0.5f, ov.y + ov.h * 0.55f, 1.5f, ov.h * 0.45f, mc);
+  }
   for (int h = 0; h < kHotCues; ++h) {
-    if (v.hot_cue[h] >= 0) dl_.rect(ov.x + static_cast<float>(v.hot_cue[h] / v.length) * ov.w, ov.y, 2, ov.h, kHot[h]);
+    if (v.hot_cue[h] < 0) continue;
+    const Color hc = info.hot_color[h] >= 0 ? rgb_of(info.hot_color[h]) : kHot[h];
+    if (v.hot_cue_end[h] > v.hot_cue[h]) dl_.rect(x_at(v.hot_cue[h]), ov.y, std::max(1.0f, x_at(v.hot_cue_end[h]) - x_at(v.hot_cue[h])), ov.h, with_alpha(hc, 60));
+    dl_.rect(x_at(v.hot_cue[h]), ov.y, 2, ov.h, hc);
   }
   dl_.rect(ov.x + played - 1, ov.y - 1, 2, ov.h + 2, rgba(255, 255, 255));
   if (clicked(ov)) drag_deck_ = di;  // click or drag to seek
@@ -611,6 +839,7 @@ void App::draw_pads(const ui::Target& t, const skin::ResolvedWidget& w, const Re
   const int di = t.deck;
   if (di < 0 || di >= kMaxDecks) return;
   const DeckView& v = views_[di];
+  const DeckInfo& pinfo = info_[di];
   const float gap = 3, cw = (r.w - gap * static_cast<float>(cols + 1)) / static_cast<float>(cols),
               ch = (r.h - gap * static_cast<float>(rows + 1)) / static_cast<float>(rows);
   const int id_base = (di + 1) * 100;
@@ -618,12 +847,16 @@ void App::draw_pads(const ui::Target& t, const skin::ResolvedWidget& w, const Re
     const Rect pr{r.x + gap + static_cast<float>(k % cols) * (cw + gap), r.y + gap + static_cast<float>(k / cols) * (ch + gap), cw, ch};
     const bool set = v.hot_cue[k] >= 0;
     const bool hover = pr.contains(in_.x, in_.y);
-    Color fill = set ? kHot[k] : mix(theme_.panel2, rgba(255, 255, 255), 0.07f);
+    const Color slot_color = pinfo.hot_color[k] >= 0 ? rgb_of(pinfo.hot_color[k]) : kHot[k];
+    Color fill = set ? slot_color : mix(theme_.panel2, rgba(255, 255, 255), 0.07f);
     if (hover) fill = mix(fill, rgba(255, 255, 255), 0.18f);
     dl_.rrect(pr.x, pr.y, pr.w, pr.h, std::min(st.radius, 5.0f), fill);
     const float fs = std::min(12.0f, std::max(8.0f, pr.h * 0.5f));
-    dl_.text(pr.x + pr.w / 2, pr.y + (pr.h - fs * 1.25f) / 2, std::to_string(k + 1), fs, set ? theme_.bg : theme_.dim, Align::Center, 0, 1);
-    if (clicked(pr)) {
+    const std::string pad_text = set && !pinfo.hot_label[k].empty() ? std::to_string(k + 1) + " " + pinfo.hot_label[k] : std::to_string(k + 1);
+    dl_.text(pr.x + pr.w / 2, pr.y + (pr.h - fs * 1.25f) / 2, skin_->fit(pad_text, fs, 1, pr.w - 4), fs, set ? theme_.bg : theme_.dim, Align::Center, pr.w - 4, 1);
+    if (clicked(pr) && set && raw_.shift) {  // shift-click on a set pad: name, colour, loop
+      open_cue_editor(di, k, -1);
+    } else if (clicked(pr)) {
       std::string error;
       apply_control(*engine_, "deck" + std::to_string(di + 1) + ".hotcue." + std::to_string(k + 1), true, 1, error);
       held_ = id_base + 10 + k;
@@ -651,6 +884,15 @@ void App::draw_tree(const Rect& r, const ui::Theme& th) {
     y += row_h;
     if (row.y + row.h < tree.y || row.y > tree.y + tree.h) continue;
     if (i == tree_sel_) dl_.rect(row.x, row.y, row.w, row.h, with_alpha(th.accent, focus_tree_ ? 150 : 70));
+    const bool drop_here = rdrag_.active && item.kind == TreeItem::Playlist && row.contains(in_.x, in_.y) && tree.contains(in_.x, in_.y);
+    if (drop_here) {  // tracks dragged from the browser: the playlist under the pointer takes them on release
+      dl_.rect(row.x, row.y, row.w, row.h, with_alpha(th.good, 80));
+      dl_.rrect_outline(row.x + 1, row.y + 1, row.w - 2, row.h - 2, 3, th.good, 1.5f);
+      if (!in_.down) {
+        drop_rows_on_playlist(item.id);
+        rdrag_ = {};
+      }
+    }
     const bool container = item.kind == TreeItem::Folder || item.kind == TreeItem::HistoryHeader;
     const float indent = 10 + 14.0f * static_cast<float>(item.depth) + (item.kind == TreeItem::Collection ? 0 : 6);
     const float ty = row.y + (row_h - 15) / 2;
@@ -659,6 +901,10 @@ void App::draw_tree(const Rect& r, const ui::Theme& th) {
       dl_.outline(row.x + indent - 4, row.y + 2, tree.w - indent - 4, row.h - 4, th.accent);
       dl_.text(row.x + indent, ty, rename_buf_ + "|", 12, th.text, Align::Left, tree.w - indent - 12);
     } else {
+      if (item.kind == TreeItem::Smart) {  // a funnel: this list is a saved filter
+        dl_.triangle(row.x + 6, ty + 3, row.x + 15, ty + 3, row.x + 10.5f, ty + 9, th.accent);
+        dl_.rect(row.x + 9.5f, ty + 9, 2, 4, th.accent);
+      }
       dl_.text(row.x + indent, ty, skin_->fit(item.name, 12, item.kind == TreeItem::Collection || container ? 1 : 0, tree.w - indent - 44), 12,
                container ? th.dim : th.text, Align::Left, tree.w - indent - 44, item.kind == TreeItem::Collection || container ? 1 : 0);
       if (!container) dl_.text(row.x + tree.w - 10, ty + 1, std::to_string(item.count), 10, th.dim, Align::Right);
@@ -668,7 +914,9 @@ void App::draw_tree(const Rect& r, const ui::Theme& th) {
       tree_sel_ = i;
       focus_tree_ = false;
       apply_tree_selection();
-      if (in_.clicks >= 2 && (item.kind == TreeItem::Playlist || item.kind == TreeItem::Folder)) {
+      if (in_.clicks >= 2 && item.kind == TreeItem::Smart) {
+        open_smart_editor(item.id);
+      } else if (in_.clicks >= 2 && (item.kind == TreeItem::Playlist || item.kind == TreeItem::Folder)) {
         rename_id_ = item.id;
         rename_buf_ = item.name;
         rename_fresh_ = true;
@@ -676,111 +924,6 @@ void App::draw_tree(const Rect& r, const ui::Theme& th) {
     }
   }
   dl_.pop_clip();
-}
-
-void App::draw_tracks(const Rect& table, const ui::Theme& th, const std::string& columns, float row_h) {
-  std::lock_guard<std::mutex> lock(browse_mutex_);
-  // Column set from the skin: title, artist, bpm, key, time. Fixed widths for the short ones.
-  struct Col {
-    std::string name;
-    float w;
-    SortKey key;
-    bool right, flex;
-  };
-  std::vector<Col> cols;
-  for (std::size_t a = 0; a <= columns.size();) {
-    const std::size_t c = columns.find(',', a);
-    const std::string n = columns.substr(a, c == std::string::npos ? std::string::npos : c - a);
-    if (n == "title") cols.push_back({n, 1.2f, SortKey::Title, false, true});
-    else if (n == "artist") cols.push_back({n, 1.0f, SortKey::Artist, false, true});
-    else if (n == "bpm") cols.push_back({n, 58, SortKey::Bpm, true, false});
-    else if (n == "key") cols.push_back({n, 52, SortKey::Key, false, false});
-    else if (n == "time") cols.push_back({n, 56, SortKey::Duration, true, false});
-    if (c == std::string::npos) break;
-    a = c + 1;
-  }
-  if (cols.empty()) return;
-  const float badge = 30;
-  float fixed = badge + 12, flex_sum = 0;
-  for (const Col& c : cols) (c.flex ? flex_sum : fixed) += c.flex ? c.w : c.w;
-  const float flex_w = std::max(40.0f, table.w - fixed);
-  std::vector<float> x0(cols.size()), x1(cols.size());
-  float x = table.x + badge;
-  for (std::size_t i = 0; i < cols.size(); ++i) {
-    x0[i] = x;
-    x += cols[i].flex ? flex_w * cols[i].w / flex_sum : cols[i].w;
-    x1[i] = x;
-  }
-  const float head_h = row_h + 2;
-  dl_.rect(table.x, table.y, table.w, head_h, th.panel2);
-  for (std::size_t i = 0; i < cols.size(); ++i) {  // click a column to sort: ascending, descending, natural
-    const Col& c = cols[i];
-    const bool active = sort_ == c.key;
-    const std::string label = skin_->fit(T("browser.col." + c.name) + (active ? (sort_desc_ ? " \xE2\x96\xBE" : " \xE2\x96\xB4") : ""), 10, 1, x1[i] - x0[i] - 10);
-    const float ty = table.y + (head_h - 13) / 2;
-    if (c.right) dl_.text(x1[i] - 8, ty, label, 10, active ? th.text : th.dim, Align::Right, 0, 1);
-    else dl_.text(x0[i] + 4, ty, label, 10, active ? th.text : th.dim, Align::Left, 0, 1);
-    if (clicked({x0[i], table.y, x1[i] - x0[i], head_h}) && view_ != TreeItem::HistorySession) {
-      if (!active) { sort_ = c.key; sort_desc_ = false; }
-      else if (!sort_desc_) sort_desc_ = true;
-      else sort_ = SortKey::Default;
-      rows_dirty_ = true;
-    }
-  }
-
-  const Rect body{table.x, table.y + head_h, table.w, table.h - head_h};
-  const float content = static_cast<float>(rows_.size()) * row_h;
-  if (body.contains(in_.x, in_.y)) scroll_ -= in_.scroll;
-  if (follow_sel_) {
-    const float top = static_cast<float>(sel_) * row_h;
-    if (top < scroll_) scroll_ = top;
-    if (top + row_h > scroll_ + body.h) scroll_ = top + row_h - body.h;
-    follow_sel_ = false;
-  }
-  scroll_ = std::clamp(scroll_, 0.0f, std::max(0.0f, content - body.h));
-
-  int load_deck = -1;
-  dl_.push_clip(body.x, body.y, body.w, body.h);
-  const int first = static_cast<int>(scroll_ / row_h);
-  const int last = std::min(static_cast<int>(rows_.size()), first + static_cast<int>(body.h / row_h) + 2);
-  for (int i = first; i < last; ++i) {
-    const TrackRow& t = rows_[static_cast<std::size_t>(i)];
-    const Rect row{body.x, body.y + static_cast<float>(i) * row_h - scroll_, body.w, row_h};
-    if (i == sel_) dl_.rect(row.x, row.y, row.w, row.h, with_alpha(th.accent, focus_tree_ ? 70 : 150));
-    else if (i % 2) dl_.rect(row.x, row.y, row.w, row.h, with_alpha(th.text, 8));
-    const float ty = row.y + (row_h - 15) / 2;
-    for (int di = 0; di < kMaxDecks; ++di) {
-      if (views_[di].loaded && views_[di].track_id == t.id)
-        dl_.text(row.x + 6 + 9.0f * static_cast<float>(di), ty + 1, deck_letter(di), 10, deck_color(di), Align::Left, 0, 1);
-    }
-    for (std::size_t c = 0; c < cols.size(); ++c) {
-      const std::string& n = cols[c].name;
-      const float cw = x1[c] - x0[c];
-      if (n == "title") dl_.text(x0[c], ty, skin_->fit(t.title, 12, 0, cw - 10), 12, th.text, Align::Left, cw - 10);
-      else if (n == "artist") dl_.text(x0[c], ty, skin_->fit(t.artist, 12, 0, cw - 10), 12, th.dim, Align::Left, cw - 10);
-      else if (n == "bpm" && t.bpm > 0) dl_.text(x1[c] - 8, ty, fmt("%.1f", t.bpm), 12, th.text, Align::Right);
-      else if (n == "key") dl_.text(x0[c] + 4, ty, t.key, 12, th.dim, Align::Left, cw - 6);
-      else if (n == "time" && t.duration_ms > 0) dl_.text(x1[c] - 6, ty, clock_text(t.duration_ms / 1000.0), 12, th.dim, Align::Right);
-    }
-    if (in_.pressed && row.contains(in_.x, in_.y) && body.contains(in_.x, in_.y)) {
-      sel_ = i;
-      focus_tree_ = false;
-      if (in_.clicks >= 2) load_deck = views_[0].playing ? 1 : 0;
-    }
-  }
-  if (rows_.empty()) {
-    const std::string msg = search_.empty() ? T("browser.empty") : T("browser.no_matches");
-    dl_.text(body.x + body.w / 2, body.y + 40, skin_->fit(msg, 13, 0, body.w - 20), 13, th.dim, Align::Center);
-  }
-  dl_.pop_clip();
-  if (content > body.h) {  // scroll bar
-    const float bar_h = std::max(24.0f, body.h * body.h / content);
-    const float bar_y = body.y + (body.h - bar_h) * scroll_ / (content - body.h);
-    dl_.rect(body.x + body.w - 5, bar_y, 4, bar_h, th.line);
-  }
-  if (load_deck >= 0 && sel_ >= 0 && sel_ < static_cast<int>(rows_.size())) {
-    request_load(load_deck, rows_.id(static_cast<std::size_t>(sel_)));  // does not touch browse state
-  }
 }
 
 }  // namespace deckhand

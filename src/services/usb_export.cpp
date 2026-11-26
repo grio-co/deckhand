@@ -7,6 +7,7 @@
 #include <set>
 
 #include "deckhand/audio/track.hpp"
+#include "deckhand/library/palette.hpp"
 #include "deckhand/export/export.hpp"
 #include "deckhand/log/log.hpp"
 
@@ -58,7 +59,23 @@ bool export_library_to_usb(Library& lib, const UsbExportRequest& request, UsbExp
       }
       playlists.push_back(std::move(p));
     }
-    if (playlists.empty() && request.playlist_ids.empty()) {  // no playlists at all: export the collection
+    // Smart playlists are written as ordinary playlists holding the tracks they match now.
+    {
+      const bool everything = request.playlist_ids.empty() && request.smart_playlist_ids.empty();
+      for (const SmartPlaylist& sp : lib.smart_playlists()) {
+        if (!everything && std::find(request.smart_playlist_ids.begin(), request.smart_playlist_ids.end(), sp.id) == request.smart_playlist_ids.end()) continue;
+        ExportPlaylist p;
+        p.id = static_cast<int>(kSmartExportIdBase + sp.id);
+        p.name = sp.name;
+        p.parent_id = 0;
+        for (const auto id : lib.query_ids(sp.rules, sp.match_all)) {
+          p.track_ids.push_back(static_cast<int>(id));
+          if (track_seen.insert(id).second) track_order.push_back(id);
+        }
+        playlists.push_back(std::move(p));
+      }
+    }
+    if (playlists.empty() && request.playlist_ids.empty() && request.smart_playlist_ids.empty()) {  // no playlists at all: export the collection
       for (const auto& row : lib.tracks(0, "")) track_order.push_back(row.id);
     }
 
@@ -95,6 +112,8 @@ bool export_library_to_usb(Library& lib, const UsbExportRequest& request, UsbExp
       t.key = row->key;
       t.bpm = row->bpm;
       t.rating = row->rating;
+      t.comment = row->comment;
+      if (row->color > 0) t.color_id = palette_nearest(row->color, 0, 8) + 1;
       t.sample_rate = static_cast<int>(audio->sample_rate);
       const double length_ms = static_cast<double>(audio->frames) / audio->sample_rate * 1000.0;
       t.duration_ms = static_cast<std::int64_t>(length_ms);
@@ -120,6 +139,16 @@ bool export_library_to_usb(Library& lib, const UsbExportRequest& request, UsbExp
         e.time_ms = static_cast<std::int64_t>(std::llround(c.start_ms));
         e.loop_end_ms = c.end_ms >= 0 ? static_cast<std::int64_t>(std::llround(c.end_ms)) : -1;
         e.label = c.label;
+        if (c.color >= 0) {
+          if (e.hot) {  // hot cues: the colour the player's pads light up in
+            e.has_rgb = true;
+            e.r = static_cast<std::uint8_t>((c.color >> 16) & 255);
+            e.g = static_cast<std::uint8_t>((c.color >> 8) & 255);
+            e.b = static_cast<std::uint8_t>(c.color & 255);
+          } else {  // memory cues and loops: the nearest of the player's eight colours (palette rows 1..8)
+            e.color_id = static_cast<std::uint8_t>(palette_nearest(c.color, 0, 8) + 1);
+          }
+        }
         t.cues.push_back(std::move(e));
       }
       t.waveform.reserve(audio->wave.size());

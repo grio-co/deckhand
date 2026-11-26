@@ -228,6 +228,12 @@ struct Deck {
   float key_shift = 0;
   double slip_pos = 0;
   int hold_slot = -1;         // hot cue held while playing (slip excursion)
+  // metronome: a click on each grid beat while the deck plays forward
+  bool metro = false, m_valid = false;
+  double m_next = 0, m_beat = 0, m_last = 0;  // frame / number of the next beat to click, playhead at the last step
+  int click_n = -1;           // samples of the running click, -1 = none
+  bool click_acc = false;     // the running click is a bar's first beat
+  std::uint32_t meta_rev = 0;
   float autogain_db = 0, s_auto = 1.0f;
   int color = 0;
   double pos_prev = 0;        // play position at the end of the previous block (jump detection)
@@ -291,6 +297,17 @@ struct Engine::Impl {
   Deck decks[kMaxDecks];
   float crossfader = 0.5f, head_mix = 0.5f, head_level = 0.8f, master_level = 0.8f;
   float g_master_prev = 1, g_head_prev = 1, s_head_mix = 0.5f;
+  float metro_level = 0.5f;
+  float click_bus[kChunk * 2];  // metronome clicks of this chunk (headphone bus only)
+  // pre-listen player
+  struct Preview {
+    LoadedTrack* trk = nullptr;
+    double pos = 0;
+    bool playing = false, master = false, drop = false;
+    float level = 0.7f, amp = 0;
+  } pv;
+  float prev_bus[kChunk * 2];  // the preview of this chunk, level applied
+  Snapshot<PreviewView> preview_view;
   float peak_l = 0, peak_r = 0;
 
   Snapshot<DeckView> deck_views[kMaxDecks];
@@ -433,6 +450,54 @@ struct Engine::Impl {
       if (n.first_beat_frame > s->first_beat_frame && q > n.first_beat_frame) { q = n.first_beat_frame; break; }
     return std::clamp(q, 0.0, static_cast<double>(d.trk->audio->frames));
   }
+
+  // ---- metronome (audio thread) ----
+  // Frame of grid beat number `beat` (beat 0 = first grid beat) and whether it opens a bar.
+  bool metro_beat_frame(const Deck& d, double beat, double& frame, bool& accent) const {
+    Grid g;
+    if (!d.trk || !make_grid(*d.trk, g)) return false;
+    frame = grid_beat_to_frame(g, beat);
+    accent = grid_bar_beat(g, beat) == 1;
+    return true;
+  }
+  void metro_sync(Deck& d) {  // next beat at or after the playhead
+    Grid g;
+    d.m_valid = false;
+    if (!d.trk || !make_grid(*d.trk, g)) return;
+    d.m_beat = std::ceil(grid_frame_to_beat(g, d.pos) - 1e-9);
+    bool acc;
+    d.m_valid = metro_beat_frame(d, d.m_beat, d.m_next, acc);
+    d.m_last = d.pos;
+  }
+  // Called before each output sample of a deck; starts the click on the first sample whose playhead is on or past a beat.
+  void metro_step(Deck& d, int i) {
+    if (!d.metro) return;
+    if (!(d.playing && !d.touching && d.speed > 0.01)) { d.m_valid = false; return; }
+    if (!d.m_valid || d.pos < d.m_last - 0.5) metro_sync(d);
+    d.m_last = d.pos;
+    if (d.m_valid && d.pos >= d.m_next) {
+      const bool fresh = d.pos - d.m_next < beat_frames(d) * 0.5;  // a jump past several beats is not a beat
+      bool acc = false;
+      double dummy;
+      metro_beat_frame(d, d.m_beat, dummy, acc);
+      if (fresh) {
+        d.click_n = 0;
+        d.click_acc = acc;
+      }
+      d.m_beat += 1;
+      if (!metro_beat_frame(d, d.m_beat, d.m_next, acc)) d.m_valid = false;
+      else if (d.pos >= d.m_next) metro_sync(d);
+    }
+    if (d.click_n >= 0) {
+      const double t = static_cast<double>(d.click_n) / sr;
+      const double f = d.click_acc ? 1600.0 : 1000.0;
+      const float v = static_cast<float>(std::sin(6.283185307179586 * f * t) * std::exp(-t * 180.0) * (d.click_acc ? 0.9 : 0.6));
+      click_bus[i * 2] += v;
+      click_bus[i * 2 + 1] += v;
+      if (++d.click_n > static_cast<int>(sr * 0.05)) d.click_n = -1;
+    }
+  }
+
   double own_tempo(const Deck& d) const { return 1.0 + static_cast<double>(d.tempo_fader) * d.tempo_range; }
 
   // The deck a synced deck follows, or -1.
@@ -835,6 +900,103 @@ struct Engine::Impl {
       case Op::MicTalkoverDepth: mic.depth_db = std::clamp(c.f, -24.0f, 0.0f); return true;
       case Op::MicMonitor: mic.monitor = flag(mic.monitor, c.i); return true;
       case Op::MicGate: mic.gate_db = std::clamp(c.f, -80.0f, -20.0f); return true;
+      case Op::PreviewPlay:
+        if (pv.trk) {
+          const bool want = flag(pv.playing, c.i);
+          if (want && pv.pos >= static_cast<double>(pv.trk->audio->frames) - 1) pv.pos = 0;
+          pv.playing = want;
+        }
+        return true;
+      case Op::PreviewStop:
+        pv.playing = false;
+        pv.drop = pv.trk != nullptr;  // released once the short fade-out has finished
+        return true;
+      case Op::PreviewSeek:
+        if (pv.trk) pv.pos = std::clamp(c.d, 0.0, static_cast<double>(pv.trk->audio->frames));
+        return true;
+      case Op::PreviewLevel: pv.level = std::clamp(c.f, 0.0f, 1.0f); return true;
+      case Op::PreviewMaster: pv.master = c.i != 0; return true;
+      case Op::PreviewLoad: {
+        LoadedTrack* nt = c.track;
+        if (!nt) return true;
+        if (pv.trk) garbage.push(pv.trk);
+        pv.drop = false;
+        pv.trk = nt;  // a new preview starts paused: the caller decides when it is heard
+        pv.pos = 0;
+        pv.playing = false;
+        pv.amp = 0;
+        return true;
+      }
+      case Op::HotCueSetAt:
+        if (dp && dp->trk && c.i >= 0 && c.i < kHotCues) {
+          Deck& d = *dp;
+          if (c.d < 0) {
+            if (d.hot[c.i] >= 0) {
+              d.hot[c.i] = d.hot_end[c.i] = -1;
+              emit(EventType::HotCueCleared, di, c.i, 0);
+            }
+          } else {
+            const double at = clamp_pos(d, c.d);
+            const double len = d.hot_end[c.i] > d.hot[c.i] && d.hot[c.i] >= 0 ? d.hot_end[c.i] - d.hot[c.i] : -1;
+            d.hot[c.i] = at;
+            d.hot_end[c.i] = len > 0 ? std::min(at + len, static_cast<double>(d.trk->audio->frames)) : -1;
+            emit(EventType::HotCueSet, di, c.i, at);
+          }
+        }
+        return true;
+      case Op::HotCueEndAt:
+        if (dp && dp->trk && c.i >= 0 && c.i < kHotCues && dp->hot[c.i] >= 0)
+          dp->hot_end[c.i] = c.d > dp->hot[c.i] ? clamp_pos(*dp, c.d) : -1;
+        return true;
+      case Op::CueSetAt:
+        if (dp && dp->trk) {
+          dp->cue = clamp_pos(*dp, c.d);
+          emit(EventType::CueSet, di, -1, dp->cue);
+        }
+        return true;
+      case Op::LoopSetIn:
+        if (dp && dp->trk) {
+          dp->loop_in = clamp_pos(*dp, c.d);
+          if (dp->loop_out <= dp->loop_in) dp->loop_out = -1;
+          dp->loop_active = false;
+        }
+        return true;
+      case Op::LoopSetOut:
+        if (dp && dp->trk && dp->loop_in >= 0 && c.d > dp->loop_in + 1) {
+          dp->loop_out = clamp_pos(*dp, c.d);
+          dp->loop_active = dp->loop_out > dp->loop_in;
+        }
+        return true;
+      case Op::Metronome:
+        if (dp) {
+          dp->metro = flag(dp->metro, c.i);
+          dp->m_valid = false;
+          dp->click_n = -1;
+        }
+        return true;
+      case Op::MetronomeLevel: metro_level = std::clamp(c.f, 0.0f, 1.0f); return true;
+      case Op::ReplaceMeta: {
+        LoadedTrack* nt = c.track;
+        if (!nt) return true;
+        if (!dp || !dp->trk || (nt->track_id != 0 && nt->track_id != dp->trk->track_id)) {
+          garbage.push(nt);
+          return true;
+        }
+        Deck& d = *dp;
+        nt->audio = d.trk->audio;  // shares the samples: one atomic increment, no allocation
+        nt->track_id = d.trk->track_id;
+        nt->path.swap(d.trk->path);  // no allocation; the old track is garbage now
+        nt->cue_point = d.trk->cue_point;
+        for (int i = 0; i < kHotCues; ++i) {
+          nt->hot_cue[i] = d.trk->hot_cue[i];
+          nt->hot_loop_end[i] = d.trk->hot_loop_end[i];
+        }
+        garbage.push(d.trk);
+        d.trk = nt;
+        d.m_valid = false;
+        ++d.meta_rev;
+        return true;
+      }
       case Op::SchedInsert: sched_accept(c.i); return true;
       case Op::SchedCancel: sched_cancel(static_cast<std::uint64_t>(c.d)); return true;
       case Op::SchedCancelAll: sched_cancel_all(); return true;
@@ -1217,6 +1379,7 @@ struct Engine::Impl {
       } else if (d.kl_w == 0) {
         d.st_live = false;
       }
+      metro_step(d, i);
       float l = 0, r = 0;
       if (d.kl_w < 1.0f) read_frame(a.data(), total, d.pos, l, r);
       if (d.xf_left > 0) {
@@ -1376,6 +1539,7 @@ struct Engine::Impl {
     float buf[kChunk * 2];
     std::memset(master, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
     std::memset(cue, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
+    std::memset(click_bus, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
     const float inv_n = 1.0f / static_cast<float>(n);
 
     for (int di = 0; di < kMaxDecks; ++di) {
@@ -1406,6 +1570,45 @@ struct Engine::Impl {
         master[i * 2 + 1] += buf[i * 2 + 1] * gm;
         cue[i * 2] += buf[i * 2] * gc;
         cue[i * 2 + 1] += buf[i * 2 + 1] * gc;
+      }
+    }
+
+    // pre-listen: headphones only (the master only when asked), linear interpolation like a deck, short fades at start / stop
+    {
+      std::memset(prev_bus, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
+      if (pv.trk && (pv.playing || pv.amp > 1e-4f)) {
+        const TrackAudio& a = *pv.trk->audio;
+        const double ratio = static_cast<double>(a.sample_rate) / sr;
+        const std::int64_t total = static_cast<std::int64_t>(a.frames);
+        const float slew = static_cast<float>(1.0 - std::exp(-1.0 / (0.005 * sr)));
+        for (int i = 0; i < n; ++i) {
+          pv.amp += ((pv.playing ? 1.0f : 0.0f) - pv.amp) * slew;
+          float l = 0, r = 0;
+          if (pv.pos < static_cast<double>(total)) read_frame(a.data(), total, pv.pos, l, r);
+          prev_bus[i * 2] = l * pv.amp * pv.level;
+          prev_bus[i * 2 + 1] = r * pv.amp * pv.level;
+          if (pv.playing) {
+            pv.pos += ratio;
+            if (pv.pos >= static_cast<double>(total)) {
+              pv.pos = static_cast<double>(total);
+              pv.playing = false;
+            }
+          }
+        }
+        if (pv.master)
+          for (int i = 0; i < n * 2; ++i) master[i] += prev_bus[i];
+        if (pv.drop && pv.amp <= 1e-3f) {
+          garbage.push(pv.trk);
+          pv.trk = nullptr;
+          pv.pos = 0;
+          pv.amp = 0;
+          pv.drop = false;
+        }
+      } else if (pv.trk && pv.drop) {
+        garbage.push(pv.trk);
+        pv.trk = nullptr;
+        pv.pos = 0;
+        pv.drop = false;
       }
     }
 
@@ -1470,8 +1673,8 @@ struct Engine::Impl {
       frame[master_ch] = ml;
       frame[master_ch + 1] = mr;
       if (phones_ch >= 0) {
-        frame[phones_ch] = soft_clip((cue[i * 2] * (1 - mix) + master[i * 2] * mix + micb[i * 2] * mn) * hg);
-        frame[phones_ch + 1] = soft_clip((cue[i * 2 + 1] * (1 - mix) + master[i * 2 + 1] * mix + micb[i * 2 + 1] * mn) * hg);
+        frame[phones_ch] = soft_clip((cue[i * 2] * (1 - mix) + master[i * 2] * mix + micb[i * 2] * mn + click_bus[i * 2] * metro_level + (pv.master ? 0.0f : prev_bus[i * 2])) * hg);
+        frame[phones_ch + 1] = soft_clip((cue[i * 2 + 1] * (1 - mix) + master[i * 2 + 1] * mix + micb[i * 2 + 1] * mn + click_bus[i * 2 + 1] * metro_level + (pv.master ? 0.0f : prev_bus[i * 2 + 1])) * hg);
       }
       pl = std::max(pl, std::fabs(ml));
       pr = std::max(pr, std::fabs(mr));
@@ -1540,10 +1743,27 @@ struct Engine::Impl {
         v.loop_in = d.loop_in;
         v.loop_out = d.loop_out;
         v.at_cue = !d.playing && std::fabs(d.pos - d.cue) <= v.sample_rate * 0.01;
-        for (int i = 0; i < kHotCues; ++i) v.hot_cue[i] = d.hot[i];
+        for (int i = 0; i < kHotCues; ++i) {
+          v.hot_cue[i] = d.hot[i];
+          v.hot_cue_end[i] = d.hot_end[i] > d.hot[i] ? d.hot_end[i] : -1;
+        }
+        v.meta_rev = d.meta_rev;
       }
+      v.metronome = d.metro ? 1 : 0;
       deck_views[di].write(v);
     }
+    PreviewView pw;
+    pw.loaded = pv.trk ? 1u : 0u;
+    pw.playing = pv.playing ? 1u : 0u;
+    pw.on_master = pv.master ? 1u : 0u;
+    pw.level = pv.level;
+    if (pv.trk) {
+      pw.track_id = pv.trk->track_id;
+      pw.position = pv.pos;
+      pw.length = static_cast<double>(pv.trk->audio->frames);
+      pw.sample_rate = pv.trk->audio->sample_rate;
+    }
+    preview_view.write(pw);
     MixerView m;
     m.crossfader = crossfader;
     m.head_mix = head_mix;
@@ -1553,6 +1773,7 @@ struct Engine::Impl {
     m.peak_right = peak_r;
     master_fx.view(m.fx);
     m.sampler_level = sampler_level;
+    m.metro_level = metro_level;
     m.master_bpm = master_bpm;
     m.stream_enabled = stream_on.load();
     m.mic_on = mic.on;
@@ -1910,6 +2131,30 @@ void Engine::load(int deck, std::unique_ptr<LoadedTrack> track) {
   c.op = Op::Load;
   c.deck = static_cast<std::uint8_t>(deck);
   c.track = track.release();
+  send(c);
+}
+
+void Engine::preview_load(std::unique_ptr<LoadedTrack> track) {
+  if (!track || !track->audio) return;
+  Command c;
+  c.op = Op::PreviewLoad;
+  c.track = track.release();
+  send(c);
+}
+
+PreviewView Engine::preview() const { return impl_->preview_view.read(); }
+
+void Engine::set_track_meta(int deck, std::int64_t track_id, const TrackMeta& meta) {
+  if (deck < 0 || deck >= kMaxDecks) return;
+  auto t = std::make_unique<LoadedTrack>();
+  t->track_id = track_id;
+  t->bpm = meta.bpm;
+  t->grid = meta.grid;
+  t->memory_cues = meta.memory_cues;
+  Command c;
+  c.op = Op::ReplaceMeta;
+  c.deck = static_cast<std::uint8_t>(deck);
+  c.track = t.release();
   send(c);
 }
 

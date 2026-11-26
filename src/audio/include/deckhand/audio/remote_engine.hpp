@@ -83,6 +83,9 @@ class RemoteEngine final : public IEngine {
   std::vector<std::string> devices() override;
   void send(const Command& c) override;
   void load(int deck, std::unique_ptr<LoadedTrack> track) override;
+  void set_track_meta(int deck, std::int64_t track_id, const TrackMeta& meta) override;
+  void preview_load(std::unique_ptr<LoadedTrack> track) override;
+  PreviewView preview() const override;
   DeckView deck(int index) const override;
   MixerView mixer() const override;
   SamplerView sampler(int slot) const override;
@@ -110,6 +113,7 @@ class RemoteEngine final : public IEngine {
   void collect_garbage() override {}  // the engine process frees its own garbage
 
  private:
+  void share_track(Op op, int deck, std::unique_ptr<LoadedTrack> track);
   struct Link;
   std::shared_ptr<Link> link() const;
   bool establish(std::string& error, bool allow_spawn, bool& spawned);

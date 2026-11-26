@@ -8,6 +8,17 @@
 
 namespace deckhand {
 
+// Arguments of a track-preparation action (grid editing, cues, loops). Which fields an action reads is in docs/API.md.
+struct PrepArgs {
+  bool has_value = false;
+  double value = 0, value2 = 0;
+  int slot = 0;       // 1-based hot cue slot or list index, 0 = not given
+  int color = -1;     // 0xRRGGBB, -1 = none (used when has_color)
+  bool has_color = false;
+  bool has_text = false;
+  std::string text;
+};
+
 // What the bridge needs from the application. Methods are called from API threads.
 class ApiHost {
  public:
@@ -20,6 +31,15 @@ class ApiHost {
   // start = true begins recording the master output; path receives the file in both cases.
   virtual bool api_record(bool start, std::string& path, std::string& error) = 0;
   virtual void api_load_sample(int slot, const std::string& path) = 0;
+  // Grid and cue editing of the track loaded on `deck` (0-based). action: "grid.shift", "cue.memory_set" ... Same code as
+  // the buttons. Returns false and an error text when it cannot be done.
+  virtual bool api_prep(int deck, const std::string& action, const PrepArgs& args, std::string& error) = 0;
+  // The deck's grid, grid lock, memory cues and hot cue names/colours as JSON text ("" when nothing is loaded).
+  virtual std::string api_deck_prep_json(int deck) = 0;
+  // Pre-listen: decode `track_id` and hand it to the headphone-only preview player (play = start at once). False with an
+  // error when there is no headphone output and "preview on master" is off.
+  virtual bool api_preview_load(std::int64_t track_id, bool play, std::string& error) = 0;
+  virtual std::string api_preview_title() = 0;
   virtual std::string api_status() = 0;
   virtual std::string api_audio_device() = 0;
 };

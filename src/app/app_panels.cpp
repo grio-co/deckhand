@@ -151,7 +151,7 @@ void App::open_panel(Panel p) {
       output_devices_ = engine_->devices();
       input_devices_ = engine_->input_devices();
       for (const auto& kv : std::vector<std::pair<const char*, const char*>>{{"api.enabled", "1"}, {"api.port", "7373"}, {"stream.files", "0"},
-                                                                          {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"obs.host", "127.0.0.1"},
+                                                                          {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"preview.master", "0"}, {"browser.key_musical", "0"}, {"obs.host", "127.0.0.1"},
                                                                           {"obs.port", "4455"}, {"obs.text_source", ""}, {"sync.folder", ""}})
         sv_[kv.first] = lib_->setting(kv.first, kv.second);
       sv_["sync.device_name"] = lib_->setting("sync.device_name", host_name());
@@ -272,6 +272,12 @@ void App::draw_overlays() {
     case Panel::Learn: m = {0, 0, std::min(680.0f, w - 24), std::min(540.0f, h - 24)}; title = T("learn.title"); break;
     case Panel::Tags: m = {0, 0, std::min(520.0f, w - 24), std::min(400.0f, h - 24)}; title = T("tags.title"); break;
     case Panel::Relink: m = {0, 0, std::min(560.0f, w - 24), std::min(250.0f, h - 24)}; title = T("relink.title"); break;
+    case Panel::Columns: m = {0, 0, std::min(400.0f, w - 24), std::min(496.0f, h - 24)}; title = T("browser.columns_title"); break;
+    case Panel::Smart: m = {0, 0, std::min(720.0f, w - 24), std::min(470.0f, h - 24)}; title = T("smart.title"); break;
+    case Panel::CueEdit:
+      m = {0, 0, std::min(430.0f, w - 24), std::min(250.0f, h - 24)};
+      title = cue_edit_slot_ >= 0 ? T("cue.edit_hot", {{"slot", cue_edit_slot_ + 1}}) : T("cue.edit_memory");
+      break;
     case Panel::Export: m = {0, 0, std::min(440.0f, w - 16), 38 + 26 * static_cast<float>(export_targets_.size() + (export_other_ ? 1 : 0))}; title = T("export.title", {{"what", export_what_()}}); break;
     default: break;
   }
@@ -312,12 +318,15 @@ void App::draw_overlays() {
   else if (panel_ == Panel::Sampler) draw_sampler(m);
   else if (panel_ == Panel::Learn) draw_learn(m);
   else if (panel_ == Panel::Tags) draw_tags(m);
+  else if (panel_ == Panel::CueEdit) draw_cue_edit(m);
+  else if (panel_ == Panel::Columns) draw_columns_panel(m);
+  else if (panel_ == Panel::Smart) draw_smart_editor(m);
   else if (panel_ == Panel::Relink) draw_relink(m);
 }
 
 std::string App::export_what_() {
   std::lock_guard<std::mutex> lock(browse_mutex_);
-  if (view_ == TreeItem::Playlist && tree_sel_ >= 0 && tree_sel_ < static_cast<int>(tree_.size())) return "\"" + tree_[static_cast<std::size_t>(tree_sel_)].name + "\"";
+  if ((view_ == TreeItem::Playlist || view_ == TreeItem::Smart) && tree_sel_ >= 0 && tree_sel_ < static_cast<int>(tree_.size())) return "\"" + tree_[static_cast<std::size_t>(tree_sel_)].name + "\"";
   return T("export.all_playlists");
 }
 
@@ -327,6 +336,7 @@ void App::draw_export_menu(const Rect& m) {
   {
     std::lock_guard<std::mutex> lock(browse_mutex_);
     if (view_ == TreeItem::Playlist) list = playlist_id_;
+    if (view_ == TreeItem::Smart) list = -playlist_id_;  // a smart playlist goes out as an ordinary one
   }
   for (std::size_t i = 0; i < export_targets_.size(); ++i) {
     const Rect row{m.x + 6, m.y + 38 + 26 * static_cast<float>(i), m.w - 12, 24};
@@ -374,7 +384,8 @@ void App::draw_add_menu(const Rect& m) {
     if (row.contains(ov_.x, ov_.y)) dl_.rrect(row.x, row.y, row.w, row.h, 4, with_alpha(theme_.accent, 90));
     dl_.text(row.x + 8, row.y + 5, skin_->fit(lists[i].second, 12, 0, row.w - 16), 12, theme_.text, Align::Left, row.w - 16);
     if (ov_.pressed && row.contains(ov_.x, ov_.y)) {
-      lib_->add_to_playlist(lists[i].first, edit_track_);
+      if (add_ids_.empty()) add_ids_.push_back(edit_track_);
+      for (const std::int64_t id : add_ids_) lib_->add_to_playlist(lists[i].first, id);
       rows_dirty_ = true;
       status_note_ = T("status.added_to", {{"name", lists[i].second}});
       dl_.pop_clip();
@@ -498,6 +509,31 @@ void App::draw_settings(const Rect& m) {
   draw_microphone_section(x, y, rw);
   draw_controller_section(x, y, rw);
   draw_sync_section(x, y, rw);
+
+  ui_heading(x, y, T("settings.library"));
+  y += 18;
+  {
+    const bool on = sv_["preview.master"] == "1";
+    if (ui_toggle({x, y, rw, 24}, T("settings.preview_master"), on)) {  // pre-listen on the master output too: the room hears it
+      sv_["preview.master"] = on ? "0" : "1";
+      save_setting("preview.master", sv_["preview.master"]);
+      preview_master_ = !on;
+      Command c;
+      c.op = Op::PreviewMaster;
+      c.i = on ? 0 : 1;
+      engine_->send(c);
+    }
+    y += line;
+    dl_.text(x, y, skin_->fit(T("settings.preview_master_hint"), 11, 0, rw), 11, th.dim, Align::Left, rw);
+    y += 22;
+    const bool musical = sv_["browser.key_musical"] == "1";
+    if (ui_toggle({x, y, rw, 24}, T("settings.key_musical"), musical)) {
+      sv_["browser.key_musical"] = musical ? "0" : "1";
+      save_setting("browser.key_musical", sv_["browser.key_musical"]);
+      key_musical_ = !musical;
+    }
+    y += line;
+  }
 
   ui_heading(x, y, T("settings.api"));
   y += 18;

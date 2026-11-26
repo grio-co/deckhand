@@ -70,9 +70,19 @@ Send `Authorization: Bearer <token>`. Bodies and replies are JSON.
 | `GET`/`PATCH /v1/library/tracks/{id}`, `POST /v1/library/tracks` | `library:read` / `library:write` | Track with cues and grid; edit tags; add a file |
 | `GET`/`POST /v1/library/playlists`, `PATCH`/`DELETE /v1/library/playlists/{id}` | `library:*` | Playlists and folders |
 | `POST /v1/library/playlists/{id}/tracks`, `DELETE .../tracks/{position}` | `library:write` | Playlist contents |
+| `GET /v1/decks/{n}/grid`, `POST /v1/decks/{n}/grid/{action}` | `read`, `control:deck:{n}` | Beat grid of the loaded track and its edits: `shift` (ms), `align`, `set_first_beat`, `downbeat`, `rotate`, `bpm_delta`, `set_bpm`, `scale`, `tap`, `add_section`, `remove_section`, `lock`, `reanalyse`, `undo`, `edit` |
+| `GET /v1/decks/{n}/cues`, `POST /v1/decks/{n}/cues/{action}` | `read`, `control:deck:{n}` | Memory cues, saved loops, hot cue names and colours: `memory_set`, `memory_delete`, `memory_style`, `memory_move`, `loop_save`, `loop_recall`, `loop_delete`, `hot_set`, `hot_style`, `hot_loop`, `hot_delete`, `main_set`, `wave_zoom` |
+| `GET`/`POST /v1/library/smart-playlists`, `GET`/`PATCH`/`DELETE .../{id}`, `GET .../{id}/tracks` | `library:*` | Smart playlists: saved rule sets (text, BPM range, key set, genre, rating, colour, added within N days, play count, in / not in a playlist, missing file; all or any) |
+| `GET /v1/preview`, `POST /v1/preview/load`, `POST /v1/preview/{control}` | `read`, `control` | Pre-listen in the headphones (`play`, `stop`, `seek`, `level`, `master`); refused without a headphone output unless `preview.master` is on |
 | `GET /v1/history`, `GET /v1/history/{session}` | `library:read` | Play history |
 | `POST /v1/export` | `export` | `{"destination": "/Volumes/STICK", "playlist_id": 3}` |
 | `GET`/`POST /v1/tokens`, `DELETE /v1/tokens/{id}` | `admin` | Token management |
+
+Track preparation controls are also named controls (`GET /v1/controls`): `deck1.metronome`, `deck1.grid_shift`
+(`{"value": -3}` moves the grid 3 ms earlier), `deck1.grid_bpm`, `deck2.memory_cue_set`, `deck1.hotcue_style.3`
+(`{"text": "Drop", "color": 16734300}`), `deck1.wave_zoom`, `mixer.metronome_level`, `preview.play`, ... They work in
+`POST /v1/commands` and over the WebSocket too, but cannot be scheduled (they are carried out by the application, not the
+engine). The metronome click and the pre-listen player play on the headphone pair only. Colours are numbers `0xRRGGBB`.
 
 Control bodies: `{"value": 0.5}`. Without a value a toggle flips, a button is tapped and a trigger
 fires. Any control may be scheduled by adding one trigger; the engine then executes it on the exact

@@ -48,6 +48,13 @@ Json track_json(const TrackRow& t) {
   j.set("rating", t.rating);
   j.set("format", t.format);
   j.set("path", t.path);
+  j.set("comment", t.comment);
+  j.set("color", t.color);
+  j.set("date_added", t.date_added);
+  j.set("bitrate", t.bitrate);
+  j.set("play_count", t.play_count);
+  j.set("last_played_ms", t.last_played_ms);
+  j.set("grid_locked", t.grid_locked);
   return j;
 }
 
@@ -75,7 +82,88 @@ SortKey sort_key(const std::string& s) {
   if (s == "duration") return SortKey::Duration;
   if (s == "rating") return SortKey::Rating;
   if (s == "added") return SortKey::DateAdded;
+  if (s == "comment") return SortKey::Comment;
+  if (s == "color") return SortKey::Color;
+  if (s == "format") return SortKey::Format;
+  if (s == "bitrate") return SortKey::Bitrate;
+  if (s == "plays") return SortKey::PlayCount;
+  if (s == "played") return SortKey::LastPlayed;
   return SortKey::Default;
+}
+
+const char* const kRuleFields[] = {"text", "bpm", "key", "genre", "rating", "color", "added_days", "plays", "playlist", "missing"};
+
+Json smart_json(const SmartPlaylist& p) {
+  Json j = Json::object();
+  j.set("id", p.id);
+  j.set("name", p.name);
+  j.set("match", p.match_all ? "all" : "any");
+  Json rules = Json::array();
+  for (const SmartRule& r : p.rules) {
+    if (static_cast<int>(r.field) > 9) continue;
+    Json e = Json::object();
+    e.set("field", kRuleFields[static_cast<int>(r.field)]);
+    e.set("not", r.negate);
+    switch (r.field) {
+      case SmartRule::Field::Text: case SmartRule::Field::Genre: case SmartRule::Field::Key: e.set("text", r.text); break;
+      case SmartRule::Field::Bpm: e.set("min", r.lo); if (r.hi > 0) e.set("max", r.hi); break;
+      case SmartRule::Field::Rating: e.set("min", r.lo); break;
+      case SmartRule::Field::Color: e.set("color", static_cast<std::int64_t>(r.lo)); break;
+      case SmartRule::Field::AddedDays: e.set("days", r.lo); break;
+      case SmartRule::Field::Plays: e.set("min", r.lo); if (r.hi >= 0) e.set("max", r.hi); break;
+      case SmartRule::Field::InPlaylist: e.set("playlist_id", r.id); break;
+      default: break;
+    }
+    rules.push_back(std::move(e));
+  }
+  j.set("rules", std::move(rules));
+  return j;
+}
+
+// Fills p from a request body: any of name, match ("all" | "any"), rules [ {field, not, text, min, max, days, color, playlist_id} ].
+bool smart_from_json(const Json& body, SmartPlaylist& p, std::string& error) {
+  if (body["name"].is_string()) p.name = body["name"].as_string().substr(0, 120);
+  if (body["match"].is_string()) {
+    const std::string m = body["match"].as_string();
+    if (m != "all" && m != "any") {
+      error = "match must be \"all\" or \"any\"";
+      return false;
+    }
+    p.match_all = m == "all";
+  }
+  if (body.contains("rules")) {
+    if (!body["rules"].is_array() || body["rules"].size() > 20) {
+      error = "rules must be an array of at most 20 rules";
+      return false;
+    }
+    std::vector<SmartRule> rules;
+    for (std::size_t i = 0; i < body["rules"].size(); ++i) {
+      const Json& e = body["rules"].at(i);
+      SmartRule r;
+      int field = -1;
+      for (int f = 0; f < 10; ++f)
+        if (e["field"].is_string() && e["field"].as_string() == kRuleFields[f]) field = f;
+      if (field < 0) {
+        error = "rule field must be one of text, bpm, key, genre, rating, color, added_days, plays, playlist, missing";
+        return false;
+      }
+      r.field = static_cast<SmartRule::Field>(field);
+      r.negate = e["not"].as_bool(false);
+      if (e["text"].is_string()) r.text = e["text"].as_string().substr(0, 200);
+      switch (r.field) {
+        case SmartRule::Field::Bpm: r.lo = e["min"].as_double(0); r.hi = e["max"].as_double(0); break;
+        case SmartRule::Field::Rating: r.lo = std::clamp(e["min"].as_double(1), 0.0, 5.0); break;
+        case SmartRule::Field::Color: r.lo = std::clamp(e["color"].as_double(0), 0.0, 16777215.0); break;
+        case SmartRule::Field::AddedDays: r.lo = std::clamp(e["days"].as_double(30), 0.0, 36500.0); break;
+        case SmartRule::Field::Plays: r.lo = e["min"].as_double(0); r.hi = e.contains("max") ? e["max"].as_double(-1) : -1; break;
+        case SmartRule::Field::InPlaylist: r.id = e["playlist_id"].as_int(0); break;
+        default: break;
+      }
+      rules.push_back(std::move(r));
+    }
+    p.rules = std::move(rules);
+  }
+  return true;
 }
 
 // A scheduled control change, kept for listing; the engine holds the real entry.
@@ -182,6 +270,48 @@ struct ApiBridge::Impl {
     return j;
   }
 
+  // ---- track preparation: grid and cue editing ---------------------------------------------------------
+  // body: {"value": n, "value2": n, "slot": n, "text": "...", "color": 0xRRGGBB number or null}
+  Response prep_response(int deck, const std::string& action, int slot_from_name, const Json& body) {
+    PrepArgs a;
+    const Json& value = body["value"];
+    if (!value.is_null() && !value.is_number() && !value.is_bool()) return Response::error(400, "value must be a number");
+    a.has_value = !value.is_null();
+    a.value = value.is_bool() ? (value.as_bool() ? 1.0 : 0.0) : value.as_double();
+    a.value2 = body["value2"].as_double();
+    a.slot = slot_from_name > 0 ? slot_from_name : static_cast<int>(std::clamp<std::int64_t>(body["slot"].as_int(0), 0, 100000));
+    if (body.contains("color")) {
+      const Json& c = body["color"];
+      if (!c.is_null() && !(c.is_number() && c.as_double() >= 0 && c.as_double() <= 16777215)) return Response::error(400, "color must be a number 0..16777215 or null");
+      a.has_color = true;
+      a.color = c.is_null() ? -1 : static_cast<int>(c.as_int());
+    }
+    if (body["text"].is_string()) {
+      a.has_text = true;
+      a.text = body["text"].as_string().substr(0, 80);
+    }
+    std::string error;
+    if (!host.api_prep(deck, action, a, error)) return Response::error(409, error);
+    Json j = Json::object();
+    j.set("action", action);
+    return Response::ok(std::move(j));
+  }
+
+  Response prep_state(int deck, const char* part) {
+    const std::string text = host.api_deck_prep_json(deck);
+    if (text.empty()) return Response::error(409, "no track loaded on that deck");
+    Json all = Json::parse(text);
+    if (!part) return Response::ok(std::move(all));
+    Json j = Json::object();
+    j.set("track_id", all["track_id"]);
+    if (std::string(part) == "grid") {
+      for (const char* k : {"grid", "grid_locked", "grid_edit", "undo_depth", "metronome"}) j.set(k, all[k]);
+    } else {
+      for (const char* k : {"memory_cues", "hot_cues", "loop"}) j.set(k, all[k]);
+    }
+    return Response::ok(std::move(j));
+  }
+
   // ---- controls and scheduling ----------------------------------------------------------
   // body: {"value": n, "in_ms": n | "at_unix_ms": n | "when": {"deck": 1, "seconds": 200.0}}
   Response control(const std::string& name, const Json& body) {
@@ -190,6 +320,11 @@ struct ApiBridge::Impl {
     const bool has_value = !value.is_null();
     const double v = value.is_bool() ? (value.as_bool() ? 1.0 : 0.0) : value.as_double();
 
+    {  // controls that edit the loaded track are the application's, not the engine's
+      int pdeck = 0, pslot = 0;
+      std::string paction;
+      if (parse_prep_control(name, pdeck, paction, pslot)) return prep_response(pdeck, paction, pslot, body);
+    }
     std::vector<Command> commands;
     std::string error;
     if (!build_control(host.api_engine(), name, has_value, v, commands, error)) return Response::error(400, error);
@@ -364,6 +499,27 @@ struct ApiBridge::Impl {
     s.add_route("POST", "/v1/decks/{deck}/{control}", "control:deck:{deck}", [this](const Request& r) {
       return control("deck" + r.params.at("deck") + "." + r.params.at("control"), r.body);
     });
+    s.add_route("GET", "/v1/decks/{deck}/grid", "read", [this](const Request& r) {
+      std::int64_t deck = 0;
+      if (!int_param(r, "deck", deck) || deck < 1 || deck > kMaxDecks) return Response::error(404, "no such deck");
+      return prep_state(static_cast<int>(deck - 1), "grid");
+    });
+    s.add_route("GET", "/v1/decks/{deck}/cues", "read", [this](const Request& r) {
+      std::int64_t deck = 0;
+      if (!int_param(r, "deck", deck) || deck < 1 || deck > kMaxDecks) return Response::error(404, "no such deck");
+      return prep_state(static_cast<int>(deck - 1), "cues");
+    });
+    s.add_route("POST", "/v1/decks/{deck}/grid/{action}", "control:deck:{deck}", [this](const Request& r) {
+      std::int64_t deck = 0;
+      if (!int_param(r, "deck", deck) || deck < 1 || deck > kMaxDecks) return Response::error(404, "no such deck");
+      return prep_response(static_cast<int>(deck - 1), "grid." + r.params.at("action"), 0, r.body);
+    });
+    s.add_route("POST", "/v1/decks/{deck}/cues/{action}", "control:deck:{deck}", [this](const Request& r) {
+      std::int64_t deck = 0;
+      if (!int_param(r, "deck", deck) || deck < 1 || deck > kMaxDecks) return Response::error(404, "no such deck");
+      const std::string action = r.params.at("action");
+      return prep_response(static_cast<int>(deck - 1), (action.compare(0, 5, "wave_") == 0 ? "wave." + action.substr(5) : "cue." + action), 0, r.body);
+    });
     s.add_route("GET", "/v1/mixer", "read", [this](const Request&) { return Response::ok(mixer_json()); });
     s.add_route("POST", "/v1/mixer/{control}", "control:mixer", [this](const Request& r) {
       return control("mixer." + r.params.at("control"), r.body);
@@ -514,6 +670,7 @@ struct ApiBridge::Impl {
         cj.set("start_ms", c.start_ms);
         if (c.end_ms >= 0) cj.set("end_ms", c.end_ms);
         cj.set("label", c.label);
+        if (c.color >= 0) cj.set("color", c.color);
         cues.push_back(std::move(cj));
       }
       j.set("cues", std::move(cues));
@@ -542,11 +699,14 @@ struct ApiBridge::Impl {
       text("comment", e.comment);
       if (r.body["rating"].is_number()) e.rating = static_cast<int>(std::clamp<std::int64_t>(r.body["rating"].as_int(), 0, 5));
       if (r.body["year"].is_number()) e.year = static_cast<int>(std::clamp<std::int64_t>(r.body["year"].as_int(), 0, 9999));
+      if (r.body["color"].is_number() && (r.body["color"].as_double() < 0 || r.body["color"].as_double() > 16777215)) return Response::error(400, "color must be 0 (none) or 0xRRGGBB as a number");
       Json out;
       {
         std::lock_guard<std::mutex> lock(lib_mutex);
         if (!int_param(r, "id", id) || !lib.track(id)) return Response::error(404, "no such track");
         lib.edit_track(id, e);
+        if (r.body["color"].is_number()) lib.set_track_color(id, static_cast<int>(r.body["color"].as_int()));
+        if (r.body["grid_locked"].is_bool()) lib.set_grid_locked(id, r.body["grid_locked"].as_bool());
         out = track_json(*lib.track(id));
       }
       host.api_library_changed();
@@ -641,6 +801,114 @@ struct ApiBridge::Impl {
       ok.status = 204;
       return ok;
     });
+    // ---- smart playlists: saved rule sets, evaluated when read ----
+    s.add_route("GET", "/v1/library/smart-playlists", "library:read", [this](const Request&) {
+      Json a = Json::array();
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      for (const SmartPlaylist& p : lib.smart_playlists()) {
+        Json j = smart_json(p);
+        j.set("track_count", static_cast<std::int64_t>(lib.query_ids(p.rules, p.match_all).size()));
+        a.push_back(std::move(j));
+      }
+      return Response::ok(std::move(a));
+    });
+    s.add_route("POST", "/v1/library/smart-playlists", "library:write", [this](const Request& r) {
+      SmartPlaylist p;
+      std::string error;
+      if (!smart_from_json(r.body, p, error)) return Response::error(400, error);
+      if (p.name.empty()) return Response::error(400, "name is required");
+      Json out;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        p.id = lib.create_smart_playlist(p.name, p.match_all, p.rules);
+        out = smart_json(*lib.smart_playlist(p.id));
+      }
+      host.api_library_changed();
+      Response ok = Response::ok(std::move(out));
+      ok.status = 201;
+      return ok;
+    });
+    s.add_route("GET", "/v1/library/smart-playlists/{id}", "library:read", [this](const Request& r) {
+      std::int64_t id = 0;
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      const auto p = int_param(r, "id", id) ? lib.smart_playlist(id) : std::nullopt;
+      if (!p) return Response::error(404, "no such smart playlist");
+      Json j = smart_json(*p);
+      j.set("track_count", static_cast<std::int64_t>(lib.query_ids(p->rules, p->match_all).size()));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("PATCH", "/v1/library/smart-playlists/{id}", "library:write", [this](const Request& r) {
+      std::int64_t id = 0;
+      Json out;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        auto cur = int_param(r, "id", id) ? lib.smart_playlist(id) : std::nullopt;
+        if (!cur) return Response::error(404, "no such smart playlist");
+        std::string error;
+        if (!smart_from_json(r.body, *cur, error)) return Response::error(400, error);
+        if (cur->name.empty()) return Response::error(400, "name must not be empty");
+        lib.update_smart_playlist(*cur);
+        out = smart_json(*lib.smart_playlist(id));
+      }
+      host.api_library_changed();
+      return Response::ok(std::move(out));
+    });
+    s.add_route("DELETE", "/v1/library/smart-playlists/{id}", "library:write", [this](const Request& r) {
+      std::int64_t id = 0;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (!int_param(r, "id", id) || !lib.smart_playlist(id)) return Response::error(404, "no such smart playlist");
+        lib.delete_smart_playlist(id);
+      }
+      host.api_library_changed();
+      Response ok;
+      ok.status = 204;
+      return ok;
+    });
+    s.add_route("GET", "/v1/library/smart-playlists/{id}/tracks", "library:read", [this](const Request& r) {
+      std::int64_t id = 0;
+      std::vector<TrackRow> rows;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (!int_param(r, "id", id) || !lib.smart_playlist(id)) return Response::error(404, "no such smart playlist");
+        for (const std::int64_t tid : lib.smart_track_ids(id))
+          if (const auto row = lib.track(tid)) rows.push_back(*row);
+      }
+      Json items = Json::array();
+      for (const TrackRow& t : rows) items.push_back(track_json(t));
+      Json j = Json::object();
+      j.set("total", static_cast<std::int64_t>(rows.size()));
+      j.set("items", std::move(items));
+      return Response::ok(std::move(j));
+    });
+
+    // ---- pre-listen: the headphone-only preview player ----
+    s.add_route("GET", "/v1/preview", "read", [this](const Request&) {
+      const PreviewView v = host.api_engine().preview();
+      Json j = Json::object();
+      j.set("loaded", v.loaded != 0);
+      j.set("playing", v.playing != 0);
+      j.set("on_master", v.on_master != 0);
+      j.set("level", static_cast<double>(v.level));
+      j.set("track_id", v.loaded ? Json(v.track_id) : Json());
+      j.set("title", v.loaded ? Json(host.api_preview_title()) : Json());
+      j.set("position_seconds", v.sample_rate > 0 ? v.position / v.sample_rate : 0.0);
+      j.set("length_seconds", v.sample_rate > 0 ? v.length / v.sample_rate : 0.0);
+      j.set("headphone_output", host.api_engine().output_channels() >= 4);
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/preview/load", "control", [this](const Request& r) {
+      if (!r.body["track_id"].is_number()) return Response::error(400, "give track_id");
+      std::string error;
+      if (!host.api_preview_load(r.body["track_id"].as_int(), r.body["play"].as_bool(false), error)) return Response::error(409, error);
+      Response ok = Response::ok();
+      ok.status = 202;
+      return ok;
+    });
+    s.add_route("POST", "/v1/preview/{control}", "control", [this](const Request& r) {
+      return control("preview." + r.params.at("control"), r.body);
+    });
+
     s.add_route("GET", "/v1/history", "library:read", [this](const Request&) {
       Json a = Json::array();
       std::lock_guard<std::mutex> lock(lib_mutex);
@@ -674,7 +942,10 @@ struct ApiBridge::Impl {
       const std::string dest = r.body["destination"].as_string();
       if (dest.empty() || dest[0] != '/') return Response::error(400, "destination must be an absolute folder");
       std::string error;
-      if (!host.api_export(dest, r.body["playlist_id"].as_int(0), error)) return Response::error(409, error);
+      const std::int64_t smart = r.body["smart_playlist_id"].as_int(0);  // exported as an ordinary playlist (passed on negative)
+      const std::int64_t plain = r.body["playlist_id"].as_int(0);
+      if (smart != 0 && plain != 0) return Response::error(400, "give playlist_id or smart_playlist_id, not both");
+      if (!host.api_export(dest, smart != 0 ? -smart : plain, error)) return Response::error(409, error);
       Response ok = Response::ok();
       ok.status = 202;
       return ok;
