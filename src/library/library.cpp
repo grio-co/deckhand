@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <stdexcept>
 #include <utility>
 
+#include "deckhand/library/backup.hpp"
 #include "deckhand/log/log.hpp"
 
 namespace deckhand {
@@ -60,16 +62,43 @@ TrackRow read_track(const Stmt& s) {
   return t;
 }
 
+// Whether migrate() would change this library. Version 3 needs FTS5: without it the library stays at 2, and that
+// must not count as an upgrade on every start.
+bool upgrade_pending(Db& db) {
+  std::int64_t version = 1;
+  {
+    Stmt s(db, "SELECT max(version) FROM schema_version");
+    if (s.step()) version = s.i64(0);
+  }
+  if (version >= kLibrarySchemaVersion) return false;
+  if (version < 2) return true;
+  try {
+    db.exec("CREATE VIRTUAL TABLE temp.dh_probe USING fts5(x, tokenize='trigram'); DROP TABLE temp.dh_probe;");
+    return true;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
 }  // namespace
 
 Library::Library(const std::string& db_path) {
   db_.open(db_path);
-  db_.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;");
   bool has_schema = false;
   {
     Stmt s(db_, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'");
     has_schema = s.step();
   }
+  // Copy an existing library before anything changes it. No copy, no upgrade.
+  if (has_schema && upgrade_pending(db_)) {
+    try {
+      const std::string copy = backup_library(db_path, "upgrade");
+      DH_LOG(Info, "library saved to %s before upgrading", copy.c_str());
+    } catch (const std::exception& e) {
+      throw std::runtime_error(std::string("not upgrading the library, it could not be backed up first: ") + e.what());
+    }
+  }
+  db_.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;");
   if (!has_schema) {
     Transaction tx(db_);
     db_.exec(kSchema);

@@ -1,12 +1,124 @@
 // Library editing: playlists, sorting, tags, relinking, history, settings, migration.
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "check.hpp"
+#include "deckhand/library/backup.hpp"
 #include "deckhand/library/library.hpp"
 
 using namespace deckhand;
+
+// Copies before upgrades, by hand, and restoring them.
+static void test_backups() {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "deckhand_test_backups";
+  fs::remove_all(dir);
+  fs::create_directories(dir);
+  const std::string db = (dir / "library.db").string();
+  const auto add = [](Library& lib, const char* path, const char* title) {
+    NewTrack t;
+    t.path = path;
+    t.title = title;
+    return lib.upsert_track(t);
+  };
+  {
+    Library lib(db);
+    CHECK(lib.db().handle() != nullptr);
+    Stmt s(lib.db(), "SELECT max(version) FROM schema_version");
+    CHECK(s.step() && s.i64(0) == kLibrarySchemaVersion);  // bump the constant with migrate()
+  }
+  CHECK(library_backups(db).empty());  // a new library needs no copy
+
+  // An open library is copied with what is still in its write-ahead log.
+  std::string one;
+  {
+    Library lib(db);
+    add(lib, "/m/a.mp3", "Alpha");
+    one = backup_library(db);
+    add(lib, "/m/b.mp3", "Bravo");
+    bool refused = false;
+    try {
+      restore_library(db, one);
+    } catch (const std::exception&) {
+      refused = true;
+    }
+    CHECK(refused);  // in use
+    CHECK(lib.track_count() == 2);
+  }
+  auto all = library_backups(db);
+  CHECK(all.size() == 1 && all[0].reason == "manual" && all[0].tracks == 1);
+
+  const std::string saved = restore_library(db, one);
+  CHECK(!saved.empty());
+  {
+    Library lib(db);
+    CHECK(lib.track_count() == 1 && lib.track_ids(0, "Alpha").size() == 1 && lib.track_ids(0, "Bravo").empty());
+  }
+  restore_library(db, saved);  // and back again
+  {
+    Library lib(db);
+    CHECK(lib.track_count() == 2);
+    // Turn it into a version 2 library, as an older DeckHand left it.
+    lib.db().exec(
+        "DROP TRIGGER tracks_fts_ai; DROP TRIGGER tracks_fts_ad; DROP TRIGGER tracks_fts_au; DROP TABLE tracks_fts;"
+        "UPDATE schema_version SET version = 2;");
+  }
+  {
+    Library lib(db);  // upgrades, after copying
+  }
+  all = library_backups(db);
+  CHECK(all[0].reason == "upgrade" && all[0].schema_version == 2 && all[0].tracks == 2);
+  const std::size_t count = all.size();
+  {
+    Library lib(db);  // nothing to upgrade, no new copy
+  }
+  CHECK(library_backups(db).size() == count);
+
+  for (int i = 0; i < kUpgradeBackupsKept + 2; ++i) backup_library(db, "upgrade");
+  int upgrades = 0, others = 0;
+  for (const auto& b : library_backups(db)) (b.reason == "upgrade" ? upgrades : others)++;
+  CHECK(upgrades == kUpgradeBackupsKept && others == static_cast<int>(count) - 1);
+
+  // The sync passphrase set since the copy was made survives a restore, and only the owner can read the copies.
+  {
+    Library lib(db);
+    lib.set_setting("sync.password", "secret words");
+  }
+  const std::string before = restore_library(db, one);
+  {
+    Library lib(db);
+    CHECK(lib.track_count() == 1 && lib.setting("sync.password") == "secret words");
+  }
+  CHECK(library_backups(db).front().path == before);
+#ifndef _WIN32
+  CHECK((fs::status(before).permissions() & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+#endif
+
+  // A file that is no library is refused and changes nothing.
+  const std::string junk = (dir / "junk.db").string();
+  std::ofstream(junk) << "not a database, but long enough to be read as a header ........................................";
+  bool refused = false;
+  try {
+    restore_library(db, junk);
+  } catch (const std::exception&) {
+    refused = true;
+  }
+  CHECK(refused);
+
+  // A damaged library is moved aside and replaced.
+  fs::remove(db + "-wal");
+  fs::remove(db + "-shm");
+  std::ofstream(db, std::ios::trunc) << std::string(4096, 'x');
+  const std::string aside = restore_library(db, one);
+  CHECK(fs::exists(aside));
+  {
+    Library lib(db);
+    CHECK(lib.track_count() == 1);
+  }
+  fs::remove_all(dir);
+}
 
 int main() {
   const std::string path = (std::filesystem::temp_directory_path() / "deckhand_test_library_edit.db").string();
@@ -134,6 +246,7 @@ int main() {
     Library again(path);  // reopening must not migrate twice or lose data
     CHECK(again.track_count() == 2 && again.setting("ui.language") == "fr");
   }
+  test_backups();
   std::puts("test_library ok");
   return 0;
 }

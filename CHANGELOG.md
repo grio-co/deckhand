@@ -20,6 +20,7 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
   import no longer starts by itself without its key file
 - Library sync: optional passphrase encryption of the sync folder (AES-256-GCM, scrypt; Settings, Library sync);
   logs compact by themselves past 64 files, dropping the details of items deleted over 180 days ago
+- Library backups: an automatic copy before any schema upgrade, and `deckhandctl backup | backups | restore` (docs/BACKUP.md)
 - Windows: first fixes for the Visual Studio (MSVC) build found on a real PC (atomic store, 64-bit seek, duplicate manifest); not yet rebuilt there
 - Library search uses an FTS5 trigram index (schema 3); falls back to the LIKE scan for 1-2 character terms or an SQLite without FTS5
 - `Library::track_ids()`; the track table holds ids and loads only visible rows (large libraries refresh in tens of ms)

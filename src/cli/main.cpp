@@ -14,6 +14,7 @@
 #include "deckhand/api/auth.hpp"
 #include "deckhand/audio/engine.hpp"
 #include "deckhand/import/import.hpp"
+#include "deckhand/library/backup.hpp"
 #include "deckhand/library/library.hpp"
 #include "deckhand/midi/controller.hpp"
 #include "deckhand/log/log.hpp"
@@ -62,6 +63,9 @@ int usage() {
                "  playlists  [--data DIR]\n"
                "  list       [--playlist ID] [--search TEXT] [--data DIR]\n"
                "  export DIR [--playlist ID] [--no-copy 1] [--data DIR]   write a club-player USB export\n"
+               "  backup                       copy the library into backups/   [--data DIR]\n"
+               "  backups                      list the copies, newest first    [--data DIR]\n"
+               "  restore FILE                 replace the library with a copy (quit DeckHand first)   [--data DIR]\n"
                "  token list | create NAME SCOPE[,SCOPE...] | revoke ID   [--data DIR]   API access tokens\n"
                "  devices                      list audio outputs\n"
                "  midi                         list connected MIDI input devices\n"
@@ -125,6 +129,23 @@ int main(int argc, char** argv) {
   const std::string data = arg_value(argc, argv, "--data", default_data_dir().c_str());
   try {
     std::filesystem::create_directories(data);
+    // These work on the file, before (or instead of) opening the library, so that nothing upgrades it first.
+    if (cmd == "backup") {
+      std::printf("%s\n", backup_library(data + "/library.db").c_str());
+      return 0;
+    }
+    if (cmd == "backups") {
+      for (const auto& b : library_backups(data + "/library.db"))
+        std::printf("%s\t%s\tschema %d\t%lld tracks\n", b.path.c_str(), b.reason.c_str(), b.schema_version,
+                    static_cast<long long>(b.tracks));
+      return 0;
+    }
+    if (cmd == "restore" && argc >= 3) {
+      const std::string saved = restore_library(data + "/library.db", argv[2]);
+      if (!saved.empty()) std::printf("the replaced library is at %s\n", saved.c_str());
+      std::printf("restored\n");
+      return 0;
+    }
     Library lib(data + "/library.db");
     if (cmd == "import") {
       ImportOptions o;
