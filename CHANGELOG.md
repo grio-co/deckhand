@@ -6,6 +6,11 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Free-form skins on macOS: transparent, shaped windows whose empty areas let clicks through
+  to the desktop; modules (library, sampler, panels) as separate floating windows with
+  remembered positions, snapping and group dragging, uniform scaling; sliders along a path
+  and arc meters; the `orbit` example skin; optional pop-out library in the default skin.
+  Shells that do not support this keep the single-window layout ([docs/SHELL-WINDOWS.md](docs/SHELL-WINDOWS.md)).
 - Application icon: a ship's helm whose rim is a record. macOS .icns, Windows .ico, Linux
   desktop icons and window icon, an iOS icon set, overlay favicon; `tools/make_icons.sh`
   regenerates everything ([docs/BRAND.md](docs/BRAND.md)).

@@ -106,6 +106,100 @@ void    dh_app_audio_route(dh_app* app);
 /* Build the next frame. The returned pointers stay valid until the next call. */
 const dh_frame* dh_app_frame(dh_app* app, double dt_seconds);
 
+
+/* ======================================================================================================================
+   Free-form and multi-window skins (optional, additive; see docs/SHELL-WINDOWS.md).
+
+   A shell that can show several native windows, transparent and shaped, announces it once after dh_app_create():
+       dh_app_set_capabilities(app, DH_CAP_MULTI_WINDOW | DH_CAP_TRANSPARENT | DH_CAP_CLICK_THROUGH);
+   Without that call (or with the bits clear) nothing below is used: dh_app_frame() draws everything into the one
+   rectangular window as before, modules docked in a default arrangement over a solid backdrop.
+
+   Then, once per display tick (60 Hz):
+       dh_app_begin_frame(app, dt);                        // engine snapshot, window set, arrangement
+       n = dh_app_windows(app, infos, cap);               // windows the core wants (also hidden modules, for the menu)
+       for each visible, non-occluded window w:
+           dh_app_window_display(app, w.id, px_w, px_h, backing_scale);   // when its pixel size or scale changed
+           f = dh_app_window_frame(app, w.id);            // draw list of that window (no uploads)
+       u = dh_app_end_frame(app);                         // textures: apply u->uploads / u->releases BEFORE drawing any f
+       render every f with its clear colour (alpha 0 for transparent windows)
+
+   Textures share ONE namespace (glyph atlas id 1, skin images from 2): upload each once, draw from any window. Vertices
+   are straight-alpha RGBA as always; the shell's blend (src.a, 1-src.a for colour, 1, 1-src.a for alpha) leaves the
+   framebuffer premultiplied, which is what a non-opaque CAMetalLayer / DirectComposition surface expects. The core
+   bleeds colour into transparent texels of skin images, so bilinear sampling leaves no dark fringes.
+
+   Coordinates: window pixels for pointer events and hit tests (origin top-left of the window's content), desktop points
+   for window positions (origin top-left of the primary display, y down; the shell converts from its native space).
+   ====================================================================================================================== */
+enum { DH_CAP_MULTI_WINDOW = 1, DH_CAP_TRANSPARENT = 2, DH_CAP_CLICK_THROUGH = 4 };
+void dh_app_set_capabilities(dh_app* app, uint32_t caps);
+
+enum {
+  DH_WIN_VISIBLE = 1,       /* shown (a hidden module is listed so the shell can offer it in its Window menu) */
+  DH_WIN_MAIN = 2,          /* the main window: in the Dock / window list, closing it quits */
+  DH_WIN_BORDERLESS = 4,    /* no system title bar or frame: the skin draws everything (chrome=none) */
+  DH_WIN_TRANSPARENT = 8,   /* non-opaque, clear background: draw with clear alpha 0 and no backdrop */
+  DH_WIN_SHAPED = 16,       /* clicks on transparent parts must fall through: use dh_app_hit_test */
+  DH_WIN_FLOATING = 32,     /* stays above other windows (always on top) */
+  DH_WIN_RESIZABLE = 64,
+  DH_WIN_NO_SHADOW = 128,   /* no window shadow (shadow=none); otherwise the system shadow may follow the alpha shape */
+  DH_WIN_ASPECT_LOCK = 256, /* keep width:height while resizing */
+  DH_WIN_POPUP = 512,       /* a pop-up anchored to the control that opened it: closes when it loses focus */
+  DH_WIN_POS_VALID = 1024,  /* x, y are meaningful (restored or computed); otherwise the shell picks a position */
+  DH_WIN_PANEL = 2048       /* an application panel (settings ...), not a skin window */
+};
+typedef struct {
+  uint32_t id;              /* stable for the lifetime of the window */
+  char name[32];            /* skin window id ("main", "browser") or "panel" */
+  char role[24];            /* main, browser, sampler, effects, mixer, settings, deck3_4, a free name, or the panel kind */
+  char title[128];          /* UTF-8, already translated */
+  uint32_t flags;          /* DH_WIN_* */
+  float width, height;     /* content size in points */
+  float x, y;              /* desktop points of the content's top-left (valid with DH_WIN_POS_VALID) */
+  uint32_t move_seq;       /* changes whenever the core moved or resized the window: apply x, y, width, height again */
+  float min_w, min_h, max_w, max_h; /* points; 0 = none */
+  float user_scale;        /* scale=fit windows: width = base * user_scale */
+  uint32_t z;              /* stacking order hint: higher is in front of lower */
+} dh_window_info;
+
+/* Fills up to `cap` entries and returns how many windows the core has (which may exceed `cap`). */
+uint32_t dh_app_windows(dh_app* app, dh_window_info* out, uint32_t cap);
+void     dh_app_begin_frame(dh_app* app, double dt_seconds);
+void     dh_app_window_display(dh_app* app, uint32_t window, float w_px, float h_px, float backing_scale);
+const dh_frame* dh_app_window_frame(dh_app* app, uint32_t window);  /* NULL when unknown / hidden; no uploads in it */
+const dh_frame* dh_app_end_frame(dh_app* app);                       /* only uploads / releases are set */
+
+void dh_app_window_pointer(dh_app* app, uint32_t window, dh_ptr_kind kind, uint32_t id, float x_px, float y_px, int clicks);
+void dh_app_window_scroll(dh_app* app, uint32_t window, float x_px, float y_px, float dx_px, float dy_px);
+void dh_app_window_open_file(dh_app* app, uint32_t window, const char* path, float x_px, float y_px);
+
+typedef enum { DH_HIT_NONE = 0, DH_HIT_DRAG = 1, DH_HIT_CONTROL = 2, DH_HIT_RESIZE = 3, DH_HIT_SOLID = 4 } dh_hit;
+/* What a click at (x_px, y_px) of the window would do: NONE = transparent, let it fall through to what is behind;
+   DRAG = move the window (dh_app_window_drag); CONTROL = deliver it as a pointer event; RESIZE = a resize grip
+   (dh_app_window_drag with kind RESIZE); SOLID = opaque but inert: swallow it. */
+dh_hit dh_app_hit_test(dh_app* app, uint32_t window, float x_px, float y_px);
+
+typedef enum { DH_DRAG_MOVE = 0, DH_DRAG_RESIZE = 1 } dh_drag_kind;
+typedef enum { DH_DRAG_BEGIN = 0, DH_DRAG_UPDATE = 1, DH_DRAG_END = 2 } dh_drag_phase;
+/* Core-driven window dragging (so snapping and group moves work): on a DRAG / RESIZE hit send BEGIN with the pointer's
+   desktop position in points, UPDATE on every mouse move, END on release; apply the windows' new frames from the next
+   dh_app_windows(). mods = DH_MOD_* (shift = move this window alone, no snapping). */
+void dh_app_window_drag(dh_app* app, uint32_t window, dh_drag_kind kind, dh_drag_phase phase, float desk_x, float desk_y, uint32_t mods);
+
+typedef enum {
+  DH_WE_MOVED = 1,     /* a = x, b = y (desktop points of the content's top-left) */
+  DH_WE_RESIZED = 2,   /* a = width, b = height (points) */
+  DH_WE_FOCUS = 3,     /* a = 1 key window gained focus, 0 lost it */
+  DH_WE_CLOSE = 4,     /* the user closed the window (a module is hidden; a panel is dismissed; main quits via the shell) */
+  DH_WE_MINIMIZED = 5  /* a = 1 minimised, 0 restored */
+} dh_window_event;
+void dh_app_window_event(dh_app* app, uint32_t window, dh_window_event kind, float a, float b);
+/* Show or hide a module from the shell's Window menu. */
+void dh_app_window_set_visible(dh_app* app, uint32_t window, bool visible);
+/* "Reset window arrangement" menu item. */
+void dh_app_windows_reset(dh_app* app);
+
 #ifdef __cplusplus
 }
 #endif

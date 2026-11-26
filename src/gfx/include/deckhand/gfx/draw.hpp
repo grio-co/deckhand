@@ -83,6 +83,9 @@ class DrawList {
   };
   std::vector<ImageUpload> take_image_uploads();            // images added since the last call
   std::vector<std::uint32_t> take_image_releases();         // images removed since the last call
+  // Alpha (0..255) of an image at normalised coordinates, or 0 when the image is unknown or (u, v) is outside it. Used for
+  // per-pixel hit shapes of image buttons.
+  int image_alpha(std::uint32_t id, float u, float v) const;
   // Draws part of an image (u/v in 0..1) into a rectangle (points), tinted by `tint` (white = unchanged),
   // optionally rotated about the rectangle's centre by `radians` (clockwise on screen).
   void image(std::uint32_t id, float x, float y, float w, float h, float u0, float v0, float u1, float v1,

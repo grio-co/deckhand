@@ -54,7 +54,9 @@ them in [CHANGELOG.md](CHANGELOG.md).
       columns by dragging headers; fade when a preview replaces another; persist the main cue point;
       tests for the USB export glue; pinch zoom
 - [ ] Bluetooth MIDI pairing: try with a real device
-- [ ] Skins: non-rectangular window shapes (needs drag regions in the skin format)
+- [ ] Skins: port shaped and multi-window skins to the Windows and Linux shells (docs/SHELL-WINDOWS.md);
+      drag tracks between windows; Window menu and shortcuts are untested; build a skull skin from
+      the chosen concept in design/skull-skins
 - [ ] Microphone: try a real input device (macOS permission prompt from the helper process is untested)
 - [ ] HID: try a real HID controller; Windows HID code is compile-checked only; no HID mappings shipped yet
 - [ ] Listening test of key lock on real mixes; transient handling if needed

@@ -140,6 +140,14 @@ void App::begin_export_menu() {
 
 void App::open_panel(Panel p) {
   if (panel_ == Panel::Settings && p != Panel::Settings) commit_settings();
+  panel_anchor_valid_ = false;
+  if (cur_win_ && cur_win_->view && cur_win_->st.have_pos) {  // a pop-up hangs from the control that opened it
+    const skin::Rect r = cur_win_->view->last_press_rect();
+    const float k = win_eff_scale(*cur_win_) / std::max(0.1f, cur_win_->backing);
+    panel_anchor_x_ = cur_win_->st.x + r.x * k;
+    panel_anchor_y_ = cur_win_->st.y + r.bottom() * k + 2;
+    panel_anchor_valid_ = true;
+  }
   panel_ = p;
   panel_fresh_ = true;
   panel_scroll_ = 0;
@@ -251,21 +259,9 @@ void App::commit_settings() {
   if (sv_["sync.folder"] != old_folder) post_kind(Job::SyncInfo);
 }
 
-void App::draw_overlays() {
-  ov_ = raw_;
-  if (panel_fresh_) {  // the click that opened the panel must not reach it
-    ov_.pressed = false;
-    ov_.clicks = 0;
-    panel_fresh_ = false;
-  }
-  if (panel_ == Panel::None) return;
-  const ui::Theme& th = theme_;
-  const float w = width_px_ / scale_, h = height_px_ / scale_;
-  const bool popup = panel_ == Panel::Export || panel_ == Panel::AddTo;
-  if (!popup) dl_.rect(0, 0, w, h, rgba(0, 0, 0, 120));
-
+// Natural size and title of the open panel inside a w x h window (the panels shrink to fit small windows).
+Rect App::panel_size(float w, float h, std::string& title) {
   Rect m;
-  std::string title;
   switch (panel_) {
     case Panel::Settings: m = {0, 0, std::min(640.0f, w - 24), std::min(600.0f, h - 24)}; title = T("settings.title"); break;
     case Panel::Sampler: m = {0, 0, std::min(560.0f, w - 24), std::min(420.0f, h - 24)}; title = T("sampler.title"); break;
@@ -291,19 +287,12 @@ void App::draw_overlays() {
     title = T("browser.add_to");
   }
   m.h = std::min(m.h, h - 12);
-  if (panel_ == Panel::Export) {
-    m.x = std::max(8.0f, w - m.w - 8 - inset_[2]);
-    m.y = 34 + inset_[1];
-  } else {
-    m.x = (w - m.w) / 2;
-    m.y = (h - m.h) / 2;
-  }
-  panel_rect_ = m;
+  return m;
+}
 
-  if (ov_.pressed && !m.contains(ov_.x, ov_.y)) {
-    close_panel();
-    return;
-  }
+// Frame, title, close button and content of the open panel inside `m`.
+void App::draw_panel_body(const Rect& m, const std::string& title) {
+  const ui::Theme& th = theme_;
   dl_.rrect(m.x - 1, m.y - 1, m.w + 2, m.h + 2, 8, with_alpha(th.accent, 160));
   dl_.rrect(m.x, m.y, m.w, m.h, 8, th.panel);
   const std::string head = skin_->fit(title, 14, 1, m.w - 70);
@@ -322,6 +311,34 @@ void App::draw_overlays() {
   else if (panel_ == Panel::Columns) draw_columns_panel(m);
   else if (panel_ == Panel::Smart) draw_smart_editor(m);
   else if (panel_ == Panel::Relink) draw_relink(m);
+}
+
+void App::draw_overlays() {
+  ov_ = raw_;
+  if (panel_fresh_) {  // the click that opened the panel must not reach it
+    ov_.pressed = false;
+    ov_.clicks = 0;
+    panel_fresh_ = false;
+  }
+  if (panel_ == Panel::None) return;
+  const float w = width_px_ / scale_, h = height_px_ / scale_;
+  const bool popup = panel_ == Panel::Export || panel_ == Panel::AddTo;
+  if (!popup) dl_.rect(0, 0, w, h, rgba(0, 0, 0, 120));
+  std::string title;
+  Rect m = panel_size(w, h, title);
+  if (panel_ == Panel::Export) {
+    m.x = std::max(8.0f, w - m.w - 8 - inset_[2]);
+    m.y = 34 + inset_[1];
+  } else {
+    m.x = (w - m.w) / 2;
+    m.y = (h - m.h) / 2;
+  }
+  panel_rect_ = m;
+  if (ov_.pressed && !m.contains(ov_.x, ov_.y)) {
+    close_panel();
+    return;
+  }
+  draw_panel_body(m, title);
 }
 
 std::string App::export_what_() {

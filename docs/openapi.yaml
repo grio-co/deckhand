@@ -1092,6 +1092,59 @@ paths:
         "400": {$ref: "#/components/responses/BadRequest"}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/debug/windows:
+    get:
+      tags: [Settings]
+      operationId: debugWindows
+      summary: The UI's windows (debug)
+      description: |
+        Required scope: `admin`. The windows of the skin in use (main, detached modules, the panel window): id, name, role,
+        visibility, desktop position in points, size, user scale and the window each is docked to. Answered by the UI
+        thread, so it waits for the next frame (503 when none is drawn).
+      x-scope: admin
+      responses:
+        "200":
+          description: One entry per window.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {type: object}
+        "503": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/debug/hit:
+    get:
+      tags: [Settings]
+      operationId: debugHit
+      summary: What a click on a window would do (debug)
+      description: |
+        Required scope: `admin`. Runs the same hit test the shell uses for click-through: `none` (transparent, the click falls
+        through to what is behind the app), `drag`, `control` (with the widget's binding or action in `control`), `resize`
+        or `solid`. `window` is a skin window id or role; `x` and `y` are points in that window.
+      x-scope: admin
+      parameters:
+        - {name: window, in: query, required: true, schema: {type: string}}
+        - {name: x, in: query, required: true, schema: {type: number}}
+        - {name: y, in: query, required: true, schema: {type: number}}
+      responses:
+        "200":
+          description: The hit.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  window: {type: string}
+                  x: {type: number}
+                  y: {type: number}
+                  hit: {type: string, enum: [none, drag, control, resize, solid]}
+                  opaque: {type: boolean}
+                  control: {type: string}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "503": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/history:
     get:
       tags: [History]

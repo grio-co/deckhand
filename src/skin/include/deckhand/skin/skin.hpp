@@ -27,8 +27,14 @@ constexpr size_t kMaxTokens = 512;
 constexpr size_t kMaxAtlases = 16;
 constexpr size_t kMaxRegions = 1024;
 constexpr size_t kMaxAnimations = 64;
-constexpr size_t kMaxWindows = 4;
+constexpr size_t kMaxWindows = 12;
 constexpr size_t kMaxShapePoints = 256;
+constexpr size_t kMaxShapeParts = 64;          // primitives in one shape / drag / resize region list
+constexpr size_t kMaxWindowRegions = 8;        // drag + resize region lists per window
+constexpr size_t kMaxSnapPoints = 32;
+constexpr size_t kMaxPathPoints = 1024;        // after flattening a path
+constexpr int kMaxMaskDim = 4096;              // window mask image, each side
+constexpr size_t kMaxMaskPixels = 16u << 20;
 constexpr size_t kMaxStrings = 2048;
 constexpr int kMaxTemplateDepth = 8;
 constexpr float kMaxWindowDim = 16384;
@@ -53,6 +59,7 @@ enum class TextAlign { Left, Center, Right };
 enum class Kind {
   Row, Column, Stack, Free, Grid, Panel,                                  // containers
   Waveform, Jog, Button, Knob, Fader, Meter, Label, Browser, Tree, Pads, Image, Spacer,
+  PathFader, Arc,                                                         // curved controls (`path`, `arc`)
   Unknown                                                                 // unrecognised widget (warning)
 };
 const char* kind_name(Kind k);
@@ -88,13 +95,35 @@ struct Atlas {
   std::vector<Region> regions;
 };
 
-enum class ShapeKind { Polygon, Ellipse, RoundRect, Chamfer };
+enum class ShapeKind { Polygon, Ellipse, RoundRect, Chamfer, Parts };
+
+// One primitive of a vector region list (shape NAME { ... }, drag { ... }, resize { ... }). Coordinates are logical
+// points of the window's declared size. `sub` removes the primitive from what the earlier ones added (a hole).
+struct ShapePart {
+  enum class Type { Rect, Ellipse, Polygon, Path } type = Type::Rect;
+  bool sub = false;
+  Rect box;                   // Rect: x y w h; Ellipse: bounding box of cx cy rx ry
+  float radius = 0;           // Rect corner radius
+  std::vector<Point> points;  // Polygon and flattened Path, window points
+};
 struct Shape {
   std::string name;
   ShapeKind kind = ShapeKind::Polygon;
   std::vector<Point> points;  // polygon, normalised 0..1 of the window
   float amount = 0;           // corner radius / chamfer size in logical px
+  std::vector<ShapePart> parts;  // kind == Parts: add / subtract primitives in declaration order
 };
+
+// A flattened curve (the data of `path` widgets and `path` shape parts): "M x y L x y Q cx cy x y C c1x c1y c2x c2y x y Z".
+struct PathCurve {
+  std::vector<Point> pts;       // polyline
+  std::vector<float> cum;       // cumulative length at each point
+  float length() const { return cum.empty() ? 0.0f : cum.back(); }
+  Point at(float t) const;                       // point at arc-length fraction t in 0..1
+  float project(float x, float y) const;         // arc-length fraction (0..1) of the point on the curve nearest to (x, y)
+};
+// Parses SVG-like path data (absolute M L H V Q C Z, upper case only). False with `error` on any problem.
+bool parse_path(std::string_view d, PathCurve& out, std::string& error);
 
 enum class Ease { Linear, In, Out, InOut };
 enum class Loop { Once, Repeat, PingPong };
@@ -154,10 +183,46 @@ struct Node {
   std::vector<int> children;                 // indices into Skin::nodes
 };
 
+enum class Chrome { System, None };
+enum class DragMode { Auto, Regions };
+struct SnapPoint {
+  Point at;  // in the window, logical points
+};
+
+// Where a module window opens relative to another window until the user moves it.
+struct Placement {
+  std::string ref;                      // window id or role, usually "main"
+  enum class Side { Over, Below, Above, Left, Right } side = Side::Over;
+  float dx = 0, dy = 0;
+  bool set = false;
+};
+
 struct Window {
   std::string id, title, shape;  // title may be "@i18n.id"
   float width = 1280, height = 720, min_w = 0, min_h = 0;  // logical points
   int root = -1;
+  // ---- free-form windows and modules (all optional; defaults give the classic opaque rectangular window)
+  std::string role;                    // main, browser, sampler, effects, mixer, settings, deck3_4 or a free name
+  Chrome chrome = Chrome::System;      // none = borderless, the skin draws everything
+  bool transparent = false;            // background=transparent: empty space shows the desktop
+  std::string mask;                    // skin-relative PNG: opaque where alpha >= mask_threshold
+  int mask_threshold = 128;
+  bool scale_fit = false;              // uniform scaling by a user factor (shaped art)
+  float scale_min = 0.5f, scale_max = 3.0f, scale_default = 1.0f;
+  float max_w = 0, max_h = 0;          // 0 = unbounded (free resize only)
+  bool aspect_lock = false;
+  bool resizable = true;
+  bool visible = false;                // shown at start (the main window always is)
+  bool floating = false;               // stays above other windows
+  bool snap = false;                   // snaps to the edges / snap points of other windows and moves in a group
+  bool shadow = true;                  // false: no window shadow (shadow=none)
+  Placement place;
+  DragMode drag_mode = DragMode::Auto;  // Regions when a drag { } list exists
+  std::vector<ShapePart> drag, resize;
+  std::string resize_handle;           // tl tr bl br (corner grip), with resize_size
+  float resize_size = 24;
+  std::vector<SnapPoint> snap_points;
+  bool variant = false;                // an alternative layout of `main` (id "four"), not a module
 };
 
 struct Skin {

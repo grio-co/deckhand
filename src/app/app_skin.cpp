@@ -50,6 +50,7 @@ bool App::use_skin(const std::string& name, bool persist) {
     legacy_ = false;
     theme_ = skin_->theme();
     skin_name_ = name;
+    ++skin_gen_;
     if (!skin_->has_window(variant_)) variant_ = "main";
     if (persist) lib_->set_setting("ui.skin", name);
     return true;
@@ -240,6 +241,8 @@ bool App::read_flag(const ui::Target& t) {
     if (n == "multi_language") return i18n_.available().size() > 1;
     if (n == "multi_skin") return skins_.size() > 1;
     if (n == "has_four") return skin_ && skin_->has_window("four");
+    if (n == "multi_window") return multi();
+    if (n.compare(0, 7, "window:") == 0) return module_visible(n.substr(7));
     if (n == "any_grid_edit") {
       for (int i = 0; i < kMaxDecks; ++i)
         if (grid_edit_[i]) return true;
@@ -253,6 +256,10 @@ bool App::read_flag(const ui::Target& t) {
   }
   if (t.type == ui::Target::Type::Action) {
     if (n == "rec") return engine_->recorder_status().recording;
+    if (n.compare(0, 7, "window.") == 0) {
+      const std::size_t c = n.find(':');
+      return c != std::string::npos && n.compare(0, 14, "window.toggle:") == 0 && module_visible(n.substr(c + 1));
+    }
     if (n == "export") return panel_ == Panel::Export;
     if (n == "settings") return panel_ == Panel::Settings;
     if (n == "sampler") return panel_ == Panel::Sampler;
@@ -360,6 +367,10 @@ void App::do_action(const ui::Target& t) {
     cycle_skin();
   } else if (n == "layout") {
     toggle_layout();
+  } else if (n.compare(0, 7, "window.") == 0) {
+    do_window_action(n);
+  } else if (n == "sampler" && module_known("sampler")) {  // the skin has its own sampler window: that is the sampler
+    set_module_visible("sampler", 2);
   } else if (n == "settings" || n == "sampler" || n == "learn") {
     const Panel p = n == "settings" ? Panel::Settings : n == "sampler" ? Panel::Sampler : Panel::Learn;
     if (panel_ == p) close_panel();
@@ -471,11 +482,13 @@ void App::playlist_action(const std::string& which) {
 // ---- frame ------------------------------------------------------------------------------------------------
 void App::draw_skin_ui() {
   const float w = width_px_ / scale_, h = height_px_ / scale_;
-  skin_->layout(skin_->has_window(variant_) ? variant_ : "main", w, h, inset_[0], inset_[1], inset_[2], inset_[3]);
+  ui::SkinView* view = cur_win_ && cur_win_->view ? cur_win_->view.get() : skin_.get();
+  const std::string win = cur_win_ && cur_win_->view ? cur_win_->name : (skin_->has_window(variant_) ? variant_ : "main");
+  view->layout(win, w, h, inset_[0], inset_[1], inset_[2], inset_[3]);
   // Release bookkeeping for held controls started outside the skin widgets.
-  skin_->frame(*this, in_, now_);
-  if (in_.released && drag_deck_ >= 0 && !in_.down) drag_deck_ = -1;
-  if (jog_deck_ >= 0 && !in_.down) {  // the platter vanished mid-touch (hidden, skin switched, overlay opened): let go
+  view->frame(*this, in_, now_);
+  if (in_.released && drag_deck_ >= 0 && !any_down_ && !in_.down) drag_deck_ = -1;
+  if (jog_deck_ >= 0 && !in_.down && !any_down_) {  // the platter vanished mid-touch (hidden, skin switched, overlay opened): let go
     if (jog_top_) {
       Command c;
       c.op = Op::JogTouch;

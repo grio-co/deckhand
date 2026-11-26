@@ -331,4 +331,41 @@ bool load_png_file(const std::string& path, Image& out, std::string& error, std:
   return decode_png(bytes.data(), bytes.size(), out, error);
 }
 
+void bleed_transparent_colors(Image& img, int radius) {
+  const int w = img.width, h = img.height;
+  if (w <= 0 || h <= 0 || img.rgba.size() != static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4) return;
+  // done[i]: the pixel has real colour (visible, or already filled). Each pass fills transparent pixels that touch one.
+  std::vector<std::uint8_t> done(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+  for (std::size_t i = 0; i < done.size(); ++i) done[i] = img.rgba[i * 4 + 3] != 0;
+  for (int pass = 0; pass < radius; ++pass) {
+    std::vector<std::uint8_t> next = done;
+    bool any = false;
+    for (int y = 0; y < h; ++y)
+      for (int x = 0; x < w; ++x) {
+        const std::size_t i = static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x);
+        if (done[i]) continue;
+        int r = 0, g = 0, b = 0, n = 0;
+        for (int dy = -1; dy <= 1; ++dy)
+          for (int dx = -1; dx <= 1; ++dx) {
+            const int nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            const std::size_t j = static_cast<std::size_t>(ny) * static_cast<std::size_t>(w) + static_cast<std::size_t>(nx);
+            if (!done[j]) continue;
+            r += img.rgba[j * 4];
+            g += img.rgba[j * 4 + 1];
+            b += img.rgba[j * 4 + 2];
+            ++n;
+          }
+        if (n == 0) continue;
+        img.rgba[i * 4] = static_cast<std::uint8_t>(r / n);
+        img.rgba[i * 4 + 1] = static_cast<std::uint8_t>(g / n);
+        img.rgba[i * 4 + 2] = static_cast<std::uint8_t>(b / n);
+        next[i] = 1;
+        any = true;
+      }
+    done.swap(next);
+    if (!any) break;
+  }
+}
+
 }  // namespace deckhand::gfx

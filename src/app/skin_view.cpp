@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 #include "deckhand/gfx/png.hpp"
 #include "deckhand/log/log.hpp"
@@ -222,11 +223,12 @@ Target map_binding(std::string_view n) {
     return {};
   }
 
+  if (g == "app" && s.size() == 3 && s[1].name == "window" && s[2].idx < 0) return info("window:" + s[2].name);  // true while that module window is shown
   if (g == "app" && s.size() == 2) {
     const std::string& k = s[1].name;
     for (const char* a : {"import", "rec", "export", "language", "skin", "layout", "settings", "sampler", "learn"})
       if (k == a) return action(a);
-    for (const char* i : {"any_grid_edit", "controller", "audio", "status", "has_import", "multi_language", "multi_skin", "has_four", "rec_time", "tracks_loading"})
+    for (const char* i : {"any_grid_edit", "controller", "audio", "status", "has_import", "multi_language", "multi_skin", "has_four", "rec_time", "tracks_loading", "multi_window"})
       if (k == i) return info(i);
     return {};
   }
@@ -344,7 +346,7 @@ bool SkinView::load(const std::string& path, std::string& error) {
     error = r.describe();
     return false;
   }
-  release_images();
+  textures_ = std::make_shared<TexSet>(dl_);  // the old set's images are released once no other view shares it
   skin_ = r.skin;
   theme_ = Theme::from_skin(*skin_);
   layout_ = skin::Layout{};
@@ -359,19 +361,25 @@ bool SkinView::load(const std::string& path, std::string& error) {
         DH_LOG(Warn, "skin atlas '%s': %s", a.name.c_str(), why.c_str());
         continue;
       }
+      gfx::bleed_transparent_colors(img);  // no dark fringes where bilinear sampling meets transparent texels
       Tex t;
       t.w = img.width;
       t.h = img.height;
       t.id = dl_.add_image(img.width, img.height, std::move(img.rgba));
-      if (t.id) textures_[a.name] = t;
+      if (t.id) textures_->map[a.name] = t;
     }
   }
   return true;
 }
 
-void SkinView::release_images() {
-  for (const auto& kv : textures_) dl_.remove_image(kv.second.id);
-  textures_.clear();
+void SkinView::share_assets(const SkinView& primary) {
+  skin_ = primary.skin_;
+  theme_ = primary.theme_;
+  textures_ = primary.textures_;
+  layout_ = skin::Layout{};
+  slots_.clear();
+  window_.clear();
+  active_ = hot_ = -1;
 }
 
 // Draws "atlas:region" into r: stretched, or as a nine-slice when the region declares slice insets (corners keep
@@ -379,9 +387,10 @@ void SkinView::release_images() {
 void SkinView::draw_sprite(const std::string& sprite, const skin::Rect& r, float opacity, float radians) {
   const std::size_t colon = sprite.find(':');
   if (!skin_ || colon == std::string::npos || r.w <= 0 || r.h <= 0) return;
-  const auto tex = textures_.find(sprite.substr(0, colon));
+  if (!textures_) return;
+  const auto tex = textures_->map.find(sprite.substr(0, colon));
   const skin::Atlas* atlas = skin_->find_atlas(sprite.substr(0, colon));
-  if (tex == textures_.end() || !atlas) return;
+  if (tex == textures_->map.end() || !atlas) return;
   const skin::Region* reg = nullptr;
   for (const skin::Region& g : atlas->regions)
     if (g.name == sprite.substr(colon + 1)) reg = &g;
@@ -410,13 +419,16 @@ void SkinView::draw_sprite(const std::string& sprite, const skin::Rect& r, float
 
 void SkinView::layout(const std::string& window, float w, float h, float il, float it, float ir, float ib) {
   if (!skin_ || skin_->windows.empty()) return;
-  if (window == window_ && w == lw_ && h == lh_ && il == insets_[0] && it == insets_[1] && ir == insets_[2] && ib == insets_[3] &&
+  const float ox = ox_, oy = oy_;
+  if (window == window_ && w == lw_ && h == lh_ && ox == ox_done_ && oy == oy_done_ && il == insets_[0] && it == insets_[1] && ir == insets_[2] && ib == insets_[3] &&
       !layout_.widgets.empty())
     return;
   window_index_ = 0;
   for (std::size_t i = 0; i < skin_->windows.size(); ++i)
     if (skin_->windows[i].id == window) window_index_ = i;
   window_ = window;
+  ox_done_ = ox;
+  oy_done_ = oy;
   lw_ = w;
   lh_ = h;
   insets_[0] = il;
@@ -436,14 +448,32 @@ void SkinView::relayout(bool reset_slots) {
   const float iw = std::max(64.0f, lw_ - insets_[0] - insets_[2]), ih = std::max(64.0f, lh_ - insets_[1] - insets_[3]);
   layout_ = skin::solve_layout(*skin_, window_index_, iw, ih, 1.0f, &node_hidden_);
   for (skin::ResolvedWidget& rw : layout_.widgets) {
-    rw.rect.x += insets_[0];
-    rw.rect.y += insets_[1];
+    rw.rect.x += insets_[0] + ox_done_;
+    rw.rect.y += insets_[1] + oy_done_;
   }
   if (!reset_slots) return;
   slots_.assign(layout_.widgets.size(), Slot{});
   for (std::size_t i = 0; i < slots_.size(); ++i) {
     const skin::ResolvedWidget& rw = layout_.widgets[i];
     if (!rw.bind.empty()) slots_[i].target = map_binding(rw.bind);
+    else if (const auto act = rw.props.find("action"); act != rw.props.end()) slots_[i].target = action(act->second);  // window.toggle:ROLE ...
+    if (rw.kind == skin::Kind::PathFader) {
+      std::string why;
+      const auto d = rw.props.find("d");
+      if (d != rw.props.end() && skin::parse_path(d->second, slots_[i].curve, why)) {
+        float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+        for (const skin::Point& p : slots_[i].curve.pts) {
+          x0 = std::min(x0, p.x); y0 = std::min(y0, p.y); x1 = std::max(x1, p.x); y1 = std::max(y1, p.y);
+        }
+        slots_[i].vb_w = std::max(1.0f, x1);
+        slots_[i].vb_h = std::max(1.0f, y1);
+        const auto vb = rw.props.find("viewbox");  // "w h" of the coordinate space of d (default: the curve's extent)
+        if (vb != rw.props.end()) {
+          float a = 0, b = 0;
+          if (std::sscanf(vb->second.c_str(), "%fx%f", &a, &b) == 2 && a > 0 && b > 0) { slots_[i].vb_w = a; slots_[i].vb_h = b; }
+        }
+      }
+    }
     if (!rw.show.empty()) {
       slots_[i].show_negate = rw.show[0] == '!';
       slots_[i].show = map_binding(slots_[i].show_negate ? rw.show.substr(1) : rw.show);
@@ -524,6 +554,37 @@ skin::Rect SkinView::hit_rect(const skin::ResolvedWidget& w) const {
   return r;
 }
 
+// Is (x, y) on the widget? Honours the widget's rotation (about its centre) and, for `hit=alpha`, the sprite's own alpha
+// (a round button drawn as an image is only hit where the image is visible).
+bool SkinView::widget_hit(const skin::ResolvedWidget& w, const skin::Rect& r, float x, float y, bool force_alpha) const {
+  if (w.rotation != 0) {
+    const float cx = r.x + r.w / 2, cy = r.y + r.h / 2, a = -w.rotation * kPi / 180.0f;
+    const float dx = x - cx, dy = y - cy;
+    x = cx + dx * std::cos(a) - dy * std::sin(a);
+    y = cy + dx * std::sin(a) + dy * std::cos(a);
+  }
+  if (!r.contains(x, y)) return false;
+  const auto hit = w.props.find("hit");
+  if (!force_alpha && (hit == w.props.end() || hit->second != "alpha")) return true;
+  if (!textures_ || !skin_) return true;
+  const std::string& sprite = w.style[0].sprite;
+  const std::size_t colon = sprite.find(':');
+  if (colon == std::string::npos) return true;
+  const auto tex = textures_->map.find(sprite.substr(0, colon));
+  const skin::Atlas* atlas = skin_->find_atlas(sprite.substr(0, colon));
+  if (tex == textures_->map.end() || !atlas) return true;
+  for (const skin::Region& g : atlas->regions) {
+    if (g.name != sprite.substr(colon + 1)) continue;
+    const float u = (g.src.x + (x - r.x) / std::max(1.0f, r.w) * g.src.w) / static_cast<float>(tex->second.w);
+    const float v = (g.src.y + (y - r.y) / std::max(1.0f, r.h) * g.src.h) / static_cast<float>(tex->second.h);
+    int thr = 16;
+    const auto t = w.props.find("hit_threshold");
+    if (t != w.props.end()) thr = std::clamp(std::atoi(t->second.c_str()), 1, 255);
+    return dl_.image_alpha(tex->second.id, u, v) >= thr;
+  }
+  return true;
+}
+
 int SkinView::pick(float x, float y) const {
   const auto editable = [](const skin::ResolvedWidget& w) {
     if (w.kind != skin::Kind::Label) return false;
@@ -533,11 +594,41 @@ int SkinView::pick(float x, float y) const {
   for (int pass = 0; pass < (touch_ ? 2 : 1); ++pass) {
     for (int i = static_cast<int>(layout_.widgets.size()) - 1; i >= 0; --i) {
       const skin::ResolvedWidget& w = layout_.widgets[static_cast<std::size_t>(i)];
-      if (hidden_[static_cast<std::size_t>(i)] || !(w.interactive || editable(w))) continue;
-      if ((pass == 0 ? w.rect : hit_rect(w)).contains(x, y)) return i;
+      if (i >= static_cast<int>(hidden_.size()) || hidden_[static_cast<std::size_t>(i)] || !(w.interactive || editable(w))) continue;
+      if (widget_hit(w, pass == 0 ? w.rect : hit_rect(w), x, y)) return i;
     }
   }
   return -1;
+}
+
+bool SkinView::pointer_over_interactive(float x, float y) const { return pick(x, y) >= 0; }
+
+bool SkinView::painted_at(float x, float y) const {
+  for (int i = static_cast<int>(layout_.widgets.size()) - 1; i >= 0; --i) {
+    const skin::ResolvedWidget& w = layout_.widgets[static_cast<std::size_t>(i)];
+    if (i >= static_cast<int>(hidden_.size()) || hidden_[static_cast<std::size_t>(i)] || !w.drawable) continue;
+    const skin::Style& st = w.style[0];
+    if (!st.sprite.empty()) {
+      if (widget_hit(w, w.rect, x, y, true)) return true;
+    } else if ((st.bg & 0xFF) > 8 && st.opacity > 0.03f && w.rect.contains(x, y)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool SkinView::find_rect(const std::string& id, skin::Rect& out) const {
+  for (const skin::ResolvedWidget& w : layout_.widgets)
+    if (w.id == id) {
+      out = w.rect;
+      return true;
+    }
+  return false;
+}
+
+double SkinView::path_value(const Slot& slot, const skin::Rect& r, float x, float y) const {
+  if (slot.vb_w <= 0 || slot.vb_h <= 0 || r.w <= 0 || r.h <= 0) return 0;
+  return slot.curve.project((x - r.x) * slot.vb_w / r.w, (y - r.y) * slot.vb_h / r.h);
 }
 
 void SkinView::handle_drag(SkinHost& host, const Input& in) {
@@ -546,7 +637,10 @@ void SkinView::handle_drag(SkinHost& host, const Input& in) {
   const Target& t = slots_[static_cast<std::size_t>(active_)].target;
   if (!t || t.type != Target::Type::Control) return;
   const double span = t.hi - t.lo;
-  if (w.kind == skin::Kind::Knob) {
+  if (w.kind == skin::Kind::PathFader) {
+    drag_start_ = path_value(slots_[static_cast<std::size_t>(active_)], w.rect, in.x, in.y);
+    host.set_number(t, t.lo + (t.invert ? 1.0 - drag_start_ : drag_start_) * span);
+  } else if (w.kind == skin::Kind::Knob) {
     const float dy = in.y - drag_y_;
     drag_y_ = in.y;
     drag_start_ = std::clamp(drag_start_ - dy / (in.shift ? 1600.0f : 160.0f), 0.0, 1.0);
@@ -610,6 +704,41 @@ void SkinView::draw_fader(const skin::ResolvedWidget& w, const skin::Style& st, 
     dl_.rrect(tx - cap / 2, cy - th / 2, cap, th, 2, fg);
     dl_.rect(tx - 0.5f, cy - th / 2 + 3, 1, th - 6, groove);
   }
+}
+
+void SkinView::draw_path_fader(const skin::ResolvedWidget& w, const Slot& slot, const skin::Style& st, const skin::Rect& r, double n) {
+  if (slot.curve.pts.size() < 2 || slot.vb_w <= 0 || slot.vb_h <= 0) return;
+  const float sx = r.w / slot.vb_w, sy = r.h / slot.vb_h;
+  const auto map = [&](skin::Point p) { return skin::Point{r.x + p.x * sx, r.y + p.y * sy}; };
+  float thick = 4, handle = 8;
+  if (const auto it = w.props.find("thickness"); it != w.props.end()) thick = std::clamp(static_cast<float>(std::atof(it->second.c_str())), 1.0f, 64.0f);
+  if (const auto it = w.props.find("handle"); it != w.props.end()) handle = std::clamp(static_cast<float>(std::atof(it->second.c_str())), 2.0f, 64.0f);
+  const gfx::Color fg = to_gfx(st.fg, st.opacity), groove = gfx_rgba(10, 11, 14, static_cast<int>(200 * st.opacity));
+  const bool show_track = !(w.props.count("track") && w.props.at("track") == "false");
+  const skin::Point h = map(slot.curve.at(static_cast<float>(n)));
+  if (show_track) {
+    for (std::size_t k = 1; k < slot.curve.pts.size(); ++k) {
+      const skin::Point a = map(slot.curve.pts[k - 1]), b = map(slot.curve.pts[k]);
+      dl_.line(a.x, a.y, b.x, b.y, thick, groove);
+      if (slot.curve.cum[k] <= static_cast<float>(n) * slot.curve.length()) dl_.line(a.x, a.y, b.x, b.y, std::max(1.0f, thick - 2), lerp_color(fg, groove, 0.4f));
+    }
+  }
+  dl_.circle(h.x, h.y, handle, fg);
+  dl_.circle(h.x, h.y, handle * 0.45f, groove);
+}
+
+void SkinView::draw_arc(const skin::ResolvedWidget& w, const skin::Style& st, const skin::Rect& r, double n) {
+  float a0 = 135, a1 = 405, thick = 6;
+  if (const auto it = w.props.find("start"); it != w.props.end()) a0 = static_cast<float>(std::atof(it->second.c_str()));
+  if (const auto it = w.props.find("end"); it != w.props.end()) a1 = static_cast<float>(std::atof(it->second.c_str()));
+  if (const auto it = w.props.find("thickness"); it != w.props.end()) thick = std::clamp(static_cast<float>(std::atof(it->second.c_str())), 1.0f, 128.0f);
+  if (a1 < a0) std::swap(a0, a1);
+  a1 = std::min(a1, a0 + 360.0f);
+  const float cx = r.x + r.w / 2, cy = r.y + r.h / 2, rad = std::max(2.0f, std::min(r.w, r.h) / 2 - thick / 2);
+  const float r0 = a0 * kPi / 180.0f, r1 = a1 * kPi / 180.0f, rv = r0 + (r1 - r0) * static_cast<float>(n);
+  const gfx::Color fg = to_gfx(st.fg, st.opacity);
+  dl_.arc(cx, cy, rad, r0, r1, thick, gfx_rgba(10, 11, 14, static_cast<int>(200 * st.opacity)));
+  if (n > 0.001) dl_.arc(cx, cy, rad, r0, rv, thick, n > 0.9 ? lerp_color(fg, theme_.warn, 0.7f) : fg);
 }
 
 void SkinView::draw_knob(const skin::ResolvedWidget& w, const Target&, const skin::Style& st, const skin::Rect& r, double n, bool bipolar,
@@ -774,6 +903,24 @@ void SkinView::draw_widget(int i, SkinHost& host, const Input& in, double now_s,
       draw_meter(w, st, r, v);
       break;
     }
+    case skin::Kind::PathFader: {
+      double v = 0, n = 0;
+      if (t && host.read_number(t, v)) n = std::clamp((v - t.lo) / std::max(1e-9, t.hi - t.lo), 0.0, 1.0);
+      if (t.invert) n = 1.0 - n;
+      if (active_ == i && in.down) n = drag_start_;
+      draw_path_fader(w, slot, st, r, n);
+      break;
+    }
+    case skin::Kind::Arc: {
+      double v = 0, n = 0;
+      if (t && host.read_number(t, v)) {
+        const auto md = w.props.find("mode");
+        const bool db = md != w.props.end() ? md->second == "db" : t.type == Target::Type::Info;
+        n = db ? std::clamp((20.0 * std::log10(std::max(v, 1e-5)) + 48.0) / 48.0, 0.0, 1.0) : std::clamp((v - t.lo) / std::max(1e-9, t.hi - t.lo), 0.0, 1.0);
+      }
+      draw_arc(w, st, r, n);
+      break;
+    }
     case skin::Kind::Waveform:
     case skin::Kind::Jog:
     case skin::Kind::Pads:
@@ -818,7 +965,13 @@ void SkinView::frame(SkinHost& host, const Input& in, double now_s) {
       const Target& pt = slots_[static_cast<std::size_t>(p)].target;
       if (pw.kind == skin::Kind::Button && pt) {
         active_ = p;
+        press_rect_ = pw.rect;
         host.press(pt);
+      } else if (pw.kind == skin::Kind::PathFader && pt.type == Target::Type::Control) {
+        active_ = p;
+        drag_start_ = path_value(slots_[static_cast<std::size_t>(p)], pw.rect, in.x, in.y);  // pressing anywhere on the track jumps there
+        if (in.clicks >= 2) drag_start_ = std::clamp((pt.def - pt.lo) / std::max(1e-9, pt.hi - pt.lo), 0.0, 1.0);
+        host.set_number(pt, pt.lo + (pt.invert ? 1.0 - drag_start_ : drag_start_) * (pt.hi - pt.lo));
       } else if ((pw.kind == skin::Kind::Knob || pw.kind == skin::Kind::Fader) && pt.type == Target::Type::Control) {
         active_ = p;
         double v = 0;

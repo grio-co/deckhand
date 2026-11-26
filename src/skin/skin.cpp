@@ -9,6 +9,7 @@
 
 #include "deckhand/log/log.hpp"
 #include "deckhand/skin/skin.hpp"
+#include "deckhand/skin/windows.hpp"
 
 namespace deckhand::skin {
 namespace fs = std::filesystem;
@@ -34,6 +35,8 @@ const char* kind_name(Kind k) {
     case Kind::Pads: return "pads";
     case Kind::Image: return "image";
     case Kind::Spacer: return "spacer";
+    case Kind::PathFader: return "path";
+    case Kind::Arc: return "arc";
     case Kind::Unknown: return "unknown";
   }
   return "unknown";
@@ -42,7 +45,7 @@ bool is_container(Kind k) { return k <= Kind::Panel; }
 bool is_interactive(Kind k) {
   switch (k) {
     case Kind::Waveform: case Kind::Jog: case Kind::Button: case Kind::Knob: case Kind::Fader:
-    case Kind::Browser: case Kind::Tree: case Kind::Pads: return true;
+    case Kind::Browser: case Kind::Tree: case Kind::Pads: case Kind::PathFader: return true;
     default: return false;
   }
 }
@@ -410,7 +413,7 @@ Kind kind_from(const std::string& n, bool& known) {
       {"panel", Kind::Panel}, {"waveform", Kind::Waveform}, {"jog", Kind::Jog}, {"button", Kind::Button},
       {"knob", Kind::Knob}, {"fader", Kind::Fader}, {"meter", Kind::Meter}, {"label", Kind::Label},
       {"browser", Kind::Browser}, {"tree", Kind::Tree}, {"pads", Kind::Pads}, {"image", Kind::Image},
-      {"spacer", Kind::Spacer}};
+      {"spacer", Kind::Spacer}, {"path", Kind::PathFader}, {"arc", Kind::Arc}};
   for (auto& e : table)
     if (n == e.first) { known = true; return e.second; }
   known = false;
@@ -420,7 +423,7 @@ Kind kind_from(const std::string& n, bool& known) {
 const std::set<std::string>& extra_props() {
   static const std::set<std::string> s = {"orientation", "bipolar", "count", "detents", "steps", "channels", "ticks",
                                           "peak_hold", "zoom", "mode", "row_h", "cue", "sensitivity", "toggle", "kind", "text_on", "args", "columns",
-                                          "editable"};
+                                          "editable", "action", "hit", "hit_threshold", "d", "viewbox", "handle", "start", "end", "thickness", "track"};
   return s;
 }
 const std::set<std::string>& formats() {
@@ -697,13 +700,99 @@ class Builder {
     }
   }
 
+  // One primitive of a region list. Coordinates are logical points of the window (declared size).
+  bool part(const Stmt& d, ShapePart& out, bool polygon_in_px) {
+    out = ShapePart{};
+    float f = 0;
+    const auto get = [&](const char* key, float& v, float lo, float hi, bool required) {
+      for (auto& pr : d.props)
+        if (pr.first == key) {
+          if (!num(pr.second, v) || v < lo || v > hi) { err(d.line, std::string("bad value '") + pr.second + "' for " + key); return false; }
+          return true;
+        }
+      if (required) { err(d.line, std::string("'") + d.name + "' needs " + key + "="); return false; }
+      return true;
+    };
+    for (auto& pr : d.props)
+      if (pr.first == "op") {
+        if (pr.second == "sub") out.sub = true;
+        else if (pr.second != "add") { err(d.line, "bad op '" + pr.second + "' (add or sub)"); return false; }
+      }
+    constexpr float kC = 100000;
+    if (d.name == "rect" || d.name == "roundrect") {
+      out.type = ShapePart::Type::Rect;
+      if (!get("x", out.box.x, -kC, kC, true) || !get("y", out.box.y, -kC, kC, true) || !get("w", out.box.w, 0, kC, true) || !get("h", out.box.h, 0, kC, true)) return false;
+      if (!get("radius", out.radius, 0, kC, false)) return false;
+    } else if (d.name == "ellipse") {
+      float cx = 0, cy = 0, rx = 0, ry = 0;
+      out.type = ShapePart::Type::Ellipse;
+      if (!get("cx", cx, -kC, kC, true) || !get("cy", cy, -kC, kC, true) || !get("rx", rx, 0, kC, true) || !get("ry", ry, 0, kC, true)) return false;
+      out.box = {cx - rx, cy - ry, rx * 2, ry * 2};
+    } else if (d.name == "polygon") {
+      out.type = ShapePart::Type::Polygon;
+      if (!polygon_in_px) { err(d.line, "polygon in a region list needs units=px"); return false; }
+      if (d.args.size() < 3 || d.args.size() > limits::kMaxShapePoints) { err(d.line, "polygon needs 3.." + std::to_string(limits::kMaxShapePoints) + " points"); return false; }
+      for (auto& a : d.args) {
+        std::vector<float> v;
+        if (!floats(a, v) || v.size() != 2 || std::fabs(v[0]) > kC || std::fabs(v[1]) > kC) { err(d.line, "bad polygon point '" + a + "' (want x,y)"); return false; }
+        out.points.push_back({v[0], v[1]});
+      }
+    } else if (d.name == "path") {
+      out.type = ShapePart::Type::Path;
+      std::string dd;
+      for (auto& pr : d.props) if (pr.first == "d") dd = pr.second;
+      PathCurve c;
+      std::string why;
+      if (!parse_path(dd, c, why)) { err(d.line, "path: " + why); return false; }
+      if (c.pts.size() < 3) { err(d.line, "a path region needs at least three points"); return false; }
+      out.points = c.pts;
+    } else {
+      err(d.line, "unknown region primitive '" + d.name + "' (rect, ellipse, polygon, path)");
+      return false;
+    }
+    (void)f;
+    return true;
+  }
+  bool parts(const std::vector<Stmt>& kids, std::vector<ShapePart>& out) {
+    for (const Stmt& c : kids) {
+      if (out.size() >= limits::kMaxShapeParts) { err(c.line, "too many region primitives"); return false; }
+      ShapePart p;
+      bool px = true;
+      if (!part(c, p, px)) return false;
+      out.push_back(std::move(p));
+    }
+    return true;
+  }
+
   void shape(const Stmt& s) {
     if (s.args.size() != 1) { err(s.line, "shape needs a name"); return; }
     if (sk.shapes.size() >= 32) { err(s.line, "too many shapes"); return; }
     Shape sh;
     sh.name = s.args[0];
-    if (s.children.size() != 1) { err(s.line, "shape '" + sh.name + "' needs exactly one definition"); return; }
-    const Stmt& d = s.children[0];
+    if (s.children.empty()) { err(s.line, "shape '" + sh.name + "' needs a definition"); return; }
+    // A single whole-window definition (polygon in 0..1, ellipse, roundrect, chamfer) is the classic form; anything with
+    // explicit geometry, `op=` or `units=px`, or several primitives, is a region list in window points.
+    const Stmt& d0 = s.children[0];
+    const auto has = [&](const Stmt& d, const char* k) {
+      for (auto& pr : d.props) if (pr.first == k) return true;
+      return false;
+    };
+    const bool classic = s.children.size() == 1 && !has(d0, "op") && !has(d0, "units") && !has(d0, "d") &&
+                         !has(d0, "cx") && !has(d0, "x") && !has(d0, "w") && (d0.name == "polygon" || d0.name == "ellipse" || d0.name == "roundrect" || d0.name == "chamfer");
+    if (!classic) {
+      sh.kind = ShapeKind::Parts;
+      for (const Stmt& c : s.children) {
+        if (sh.parts.size() >= limits::kMaxShapeParts) { err(c.line, "too many region primitives"); return; }
+        ShapePart p;
+        bool px = true;
+        for (auto& pr : c.props) if (pr.first == "units" && pr.second == "norm") px = false;
+        if (!part(c, p, px)) return;
+        sh.parts.push_back(std::move(p));
+      }
+      sk.shapes.push_back(std::move(sh));
+      return;
+    }
+    const Stmt& d = d0;
     if (d.name == "polygon") {
       sh.kind = ShapeKind::Polygon;
       if (d.args.size() < 3 || d.args.size() > limits::kMaxShapePoints) { err(d.line, "polygon needs 3.." + std::to_string(limits::kMaxShapePoints) + " points"); return; }
@@ -807,30 +896,128 @@ class Builder {
     }
   }
 
+  static bool valid_role(const std::string& r) {
+    if (r.empty() || r.size() > 24) return false;
+    for (const char c : r)
+      if (!(std::islower(static_cast<unsigned char>(c)) || std::isdigit(static_cast<unsigned char>(c)) || c == '_')) return false;
+    return true;
+  }
+
   void window(const Stmt& s) {
     if (s.args.size() != 1) { err(s.line, "window needs an id"); return; }
     if (sk.windows.size() >= limits::kMaxWindows) { err(s.line, "too many windows"); return; }
     Window w;
     w.id = s.args[0];
     if (sk.find_window(w.id)) { err(s.line, "duplicate window '" + w.id + "'"); return; }
-    bool have_size = false;
+    w.role = w.id == "four" ? "main" : w.id;
+    w.variant = w.id == "four";
+    bool visible_set = false, resizable_set = false, aspect_set = false;
+    bool scale_pct_default = false;
     for (auto& pr : s.props) {
-      if (pr.first == "size") {
-        have_size = size_pair(pr.second, w.width, w.height);
-        if (!have_size || w.width < limits::kMinWindowDim || w.height < limits::kMinWindowDim || w.width > limits::kMaxWindowDim || w.height > limits::kMaxWindowDim) {
-          err(s.line, "bad window size '" + pr.second + "' (" + std::to_string(int(limits::kMinWindowDim)) + ".." + std::to_string(int(limits::kMaxWindowDim)) + ")");
-          have_size = false;
+      float f = 0;
+      bool b = false;
+      const std::string& k = pr.first;
+      const std::string& v = pr.second;
+      if (k == "size") {
+        const bool ok = size_pair(v, w.width, w.height);
+        if (!ok || w.width < limits::kMinWindowDim || w.height < limits::kMinWindowDim || w.width > limits::kMaxWindowDim || w.height > limits::kMaxWindowDim) {
+          err(s.line, "bad window size '" + v + "' (" + std::to_string(int(limits::kMinWindowDim)) + ".." + std::to_string(int(limits::kMaxWindowDim)) + ")");
           w.width = 1280; w.height = 720;
         }
-      } else if (pr.first == "min") {
-        if (!size_pair(pr.second, w.min_w, w.min_h) || w.min_w < 0 || w.min_h < 0 || w.min_w > limits::kMaxWindowDim || w.min_h > limits::kMaxWindowDim) err(s.line, "bad min size");
-      } else if (pr.first == "shape") w.shape = pr.second;
-      else if (pr.first == "title") w.title = pr.second;
-      else warn(s.line, "unknown window property '" + pr.first + "'");
+      } else if (k == "min") {
+        if (!size_pair(v, w.min_w, w.min_h) || w.min_w < 0 || w.min_h < 0 || w.min_w > limits::kMaxWindowDim || w.min_h > limits::kMaxWindowDim) err(s.line, "bad min size");
+      } else if (k == "max") {
+        if (!size_pair(v, w.max_w, w.max_h) || w.max_w < 0 || w.max_h < 0 || w.max_w > limits::kMaxWindowDim || w.max_h > limits::kMaxWindowDim) err(s.line, "bad max size");
+      } else if (k == "shape") w.shape = v;
+      else if (k == "title") w.title = v;
+      else if (k == "role") {
+        if (!valid_role(v)) err(s.line, "bad role '" + v + "' (a-z, 0-9, _; at most 24)");
+        else w.role = v;
+      } else if (k == "chrome") {
+        if (v == "none") w.chrome = Chrome::None; else if (v == "system") w.chrome = Chrome::System; else err(s.line, "bad chrome '" + v + "' (none or system)");
+      } else if (k == "background") {
+        if (v == "transparent") w.transparent = true; else if (v == "opaque") w.transparent = false; else err(s.line, "bad background '" + v + "' (transparent or opaque)");
+      } else if (k == "mask") {
+        if (!is_safe_relative_path(v)) err(s.line, "unsafe mask path '" + v + "'");
+        else if (!allow_files) err(s.line, "single-file skins cannot reference files ('" + v + "')");
+        else w.mask = v;
+      } else if (k == "mask_threshold") {
+        if (!num(v, f) || f < 1 || f > 255) err(s.line, "bad mask_threshold (1..255)"); else w.mask_threshold = static_cast<int>(f);
+      } else if (k == "scale") {
+        if (v == "fit") w.scale_fit = true; else if (v == "none") w.scale_fit = false; else err(s.line, "bad scale '" + v + "' (fit or none)");
+      } else if (k == "scale_min" || k == "scale_max" || k == "scale_default") {
+        if (!num(v, f) || f < 10 || f > 1000) { err(s.line, "bad " + k + " (percent, 10..1000)"); continue; }
+        (k == "scale_min" ? w.scale_min : k == "scale_max" ? w.scale_max : w.scale_default) = f / 100.0f;
+        scale_pct_default = true;
+      } else if (k == "aspect") {
+        if (v == "lock") w.aspect_lock = true; else if (v == "free") w.aspect_lock = false; else err(s.line, "bad aspect '" + v + "' (lock or free)");
+        aspect_set = true;
+      } else if (k == "resizable") {
+        if (!boolean(v, b)) err(s.line, "bad resizable"); else { w.resizable = b; resizable_set = true; }
+      } else if (k == "visible") {
+        if (!boolean(v, b)) err(s.line, "bad visible"); else { w.visible = b; visible_set = true; }
+      } else if (k == "floating") {
+        if (!boolean(v, b)) err(s.line, "bad floating"); else w.floating = b;
+      } else if (k == "snap") {
+        if (!boolean(v, b)) err(s.line, "bad snap"); else w.snap = b;
+      } else if (k == "shadow") {
+        if (v == "none") w.shadow = false; else if (v == "auto") w.shadow = true; else err(s.line, "bad shadow '" + v + "' (auto or none)");
+      } else if (k == "place") {
+        std::vector<std::string> t;
+        std::string cur;
+        for (const char c : v) {
+          if (c == ' ') { if (!cur.empty()) t.push_back(cur); cur.clear(); } else cur += c;
+        }
+        if (!cur.empty()) t.push_back(cur);
+        static const std::pair<const char*, Placement::Side> sides[] = {{"over", Placement::Side::Over}, {"below", Placement::Side::Below},
+            {"above", Placement::Side::Above}, {"left", Placement::Side::Left}, {"right", Placement::Side::Right}};
+        bool ok = t.size() >= 2 && t.size() <= 4 && valid_role(t[0]);
+        if (ok) {
+          ok = false;
+          for (auto& e : sides) if (t[1] == e.first) { w.place.side = e.second; ok = true; }
+        }
+        if (ok && t.size() >= 3) ok = num(t[2], w.place.dx) && std::fabs(w.place.dx) < 100000;
+        if (ok && t.size() == 4) ok = num(t[3], w.place.dy) && std::fabs(w.place.dy) < 100000;
+        if (!ok) err(s.line, "bad place '" + v + "' (want: ref over|below|above|left|right [dx [dy]])");
+        else { w.place.ref = t[0]; w.place.set = true; }
+      } else warn(s.line, "unknown window property '" + k + "'");
     }
-    (void)have_size;
-    if (s.children.size() != 1) { err(s.line, "window '" + w.id + "' needs exactly one root layout node"); return; }
-    w.root = build_node(s.children[0]);
+    (void)scale_pct_default;
+    if (w.scale_min > w.scale_max || w.scale_default < w.scale_min || w.scale_default > w.scale_max) {
+      err(s.line, "inconsistent scale_min / scale_default / scale_max");
+      w.scale_min = 0.5f; w.scale_max = 3.0f; w.scale_default = 1.0f;
+    }
+    if (!visible_set) w.visible = false;
+    if (!aspect_set) w.aspect_lock = w.scale_fit;
+    if (!resizable_set) w.resizable = w.chrome == Chrome::System;
+    // Window-level declarations beside the one root layout node.
+    std::vector<const Stmt*> layout_nodes;
+    for (const Stmt& c : s.children) {
+      if (c.name == "drag") {
+        if (w.drag_mode == DragMode::Regions) { err(c.line, "duplicate drag list"); continue; }
+        if (!c.has_block || c.children.empty()) { err(c.line, "drag needs a block of regions"); continue; }
+        if (parts(c.children, w.drag)) w.drag_mode = DragMode::Regions;
+      } else if (c.name == "resize") {
+        for (auto& pr : c.props) {
+          float f = 0;
+          if (pr.first == "handle") {
+            if (pr.second == "tl" || pr.second == "tr" || pr.second == "bl" || pr.second == "br") w.resize_handle = pr.second;
+            else err(c.line, "bad resize handle '" + pr.second + "' (tl tr bl br)");
+          } else if (pr.first == "size") {
+            if (!num(pr.second, f) || f < 4 || f > 256) err(c.line, "bad resize size (4..256)"); else w.resize_size = f;
+          } else warn(c.line, "unknown resize property '" + pr.first + "'");
+        }
+        if (c.has_block) parts(c.children, w.resize);
+        if (w.resize_handle.empty() && w.resize.empty()) err(c.line, "resize needs handle= or a block of regions");
+      } else if (c.name == "snap_point") {
+        if (w.snap_points.size() >= limits::kMaxSnapPoints) { err(c.line, "too many snap points"); continue; }
+        std::vector<float> v;
+        if (c.args.size() != 1 || !floats(c.args[0], v) || v.size() != 2 || std::fabs(v[0]) > 100000 || std::fabs(v[1]) > 100000) { err(c.line, "snap_point needs x,y"); continue; }
+        w.snap_points.push_back({{v[0], v[1]}});
+      } else layout_nodes.push_back(&c);
+    }
+    if (layout_nodes.size() != 1) { err(s.line, "window '" + w.id + "' needs exactly one root layout node"); return; }
+    w.root = build_node(*layout_nodes[0]);
     if (w.root >= 0) sk.windows.push_back(std::move(w));
   }
 
@@ -855,9 +1042,41 @@ class Builder {
         else n.anims.push_back(found);
       }
       if (!n.shape.empty() && !sk.find_shape(n.shape)) err(n.line, "unknown shape '" + n.shape + "'");
+      const auto prop = [&](const char* k) -> const std::string* {
+        auto it = n.props.find(k);
+        return it == n.props.end() ? nullptr : &it->second;
+      };
+      if (const std::string* a = prop("action")) {
+        // window.toggle:ROLE  window.show:ROLE  window.hide:ROLE  window.reset
+        bool ok = *a == "window.reset";
+        for (const char* verb : {"window.toggle:", "window.show:", "window.hide:"}) {
+          const std::string v = verb;
+          if (a->compare(0, v.size(), v) == 0 && valid_role(a->substr(v.size()))) ok = true;
+        }
+        if (!ok) err(n.line, "bad action '" + *a + "' (window.toggle:ROLE, window.show:ROLE, window.hide:ROLE, window.reset)");
+      }
+      if (const std::string* h = prop("hit"); h && *h != "alpha" && *h != "rect") err(n.line, "bad hit '" + *h + "' (alpha or rect)");
+      if (n.kind == Kind::PathFader) {
+        const std::string* d = prop("d");
+        PathCurve c;
+        std::string why;
+        if (!d) err(n.line, "path widget needs d=\"M ...\"");
+        else if (!parse_path(*d, c, why)) err(n.line, "path: " + why);
+      }
     }
-    for (auto& w : sk.windows)
+    for (auto& w : sk.windows) {
       if (!w.shape.empty() && !sk.find_shape(w.shape)) err(0, "window '" + w.id + "' uses unknown shape '" + w.shape + "'");
+      if (w.place.set) {
+        bool found = false;
+        for (auto& o : sk.windows) if (&o != &w && (o.id == w.place.ref || o.role == w.place.ref)) found = true;
+        if (!found) warn(0, "window '" + w.id + "' is placed relative to unknown window '" + w.place.ref + "'");
+      }
+      for (auto& o : sk.windows)
+        if (&o < &w && !o.variant && !w.variant && o.role == w.role) err(0, "windows '" + o.id + "' and '" + w.id + "' share the role '" + w.role + "'");
+      if (w.role == "main" && !w.variant) w.visible = true;
+      if (w.variant) w.visible = true;
+    }
+
     if (sk.windows.empty() && !failed) err(0, "skin defines no window");
     if (sk.manifest.name.empty()) err(0, "manifest lacks a name (meta name=...)");
   }
@@ -1015,6 +1234,7 @@ ParseResult load_skin(const std::string& path) {
     };
     for (auto& a : mut->atlases) check_file(a.src);
     for (auto& kv : mut->fonts) if (!kv.second.file.empty()) check_file(kv.second.file);
+    for (auto& w : mut->windows) if (!w.mask.empty()) check_file(w.mask);
     if (bad) res.skin = nullptr;
     else res.skin = mut;
   } catch (const std::exception& e) {

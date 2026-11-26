@@ -909,6 +909,30 @@ struct ApiBridge::Impl {
       return control("preview." + r.params.at("control"), r.body);
     });
 
+    // ---- debug: windows and hit testing (admin). Shows what a click on a shaped, transparent window would do. ----
+    s.add_route("GET", "/v1/debug/windows", "admin", [this](const Request&) {
+      const std::string text = host.api_debug_windows();
+      if (text.empty()) return Response::error(503, "the UI did not answer (no frame is being drawn)");
+      return Response::ok(Json::parse(text));
+    });
+    s.add_route("GET", "/v1/debug/hit", "admin", [this](const Request& r) {
+      const auto num = [&](const char* k, float& v) {
+        const auto it = r.query.find(k);
+        if (it == r.query.end() || it->second.empty()) return false;
+        char* end = nullptr;
+        const double d = std::strtod(it->second.c_str(), &end);
+        if (!end || *end != '\0' || !std::isfinite(d) || std::fabs(d) > 1e6) return false;
+        v = static_cast<float>(d);
+        return true;
+      };
+      float x = 0, y = 0;
+      const auto w = r.query.find("window");
+      if (w == r.query.end() || !num("x", x) || !num("y", y)) return Response::error(400, "give window, x and y (window points)");
+      const std::string text = host.api_debug_hit(w->second, x, y);
+      if (text.empty()) return Response::error(503, "the UI did not answer (no frame is being drawn)");
+      return Response::ok(Json::parse(text));
+    });
+
     s.add_route("GET", "/v1/history", "library:read", [this](const Request&) {
       Json a = Json::array();
       std::lock_guard<std::mutex> lock(lib_mutex);

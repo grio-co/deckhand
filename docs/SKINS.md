@@ -87,9 +87,66 @@ mode can be switched on through the API. The scrolling waveform zooms with the m
 application draws those); the zoom is remembered per deck (`ui.wave_zoom.N`).
 
 ## Windows
-A skin may declare up to four windows. The application uses `main` (the first) and, when present, `four`: the
+A skin may declare up to twelve windows. The application uses `main` (the first) and, when present, `four`: the
 `app.layout` button (shown with `show="app.has_four"`) toggles between them, persisted as setting `ui.layout`.
 `four` is expected to bind decks 1-4.
+
+## Free-form windows and modules
+A skin can draw a window of any shape (a skull, two discs ...) with every empty pixel transparent to the desktop, and put the
+big parts (library, sampler, settings ...) in separate windows that float independently. Everything is optional: a skin
+without any of it (default, voidwave) is one opaque rectangular window exactly as before. Example: `orbit.dhskin/`
+(art by `tools/make_orbit_art.py`). Shells: `docs/SHELL-WINDOWS.md`.
+
+    window main size=1000x560 chrome=none background=transparent mask="img/main.png" mask_threshold=128
+           scale=fit scale_min=50 scale_max=200 snap=true {
+      resize { ellipse cx=880 cy=455 rx=24 ry=24 }          // grip: drag = uniform scale
+      snap_point 500,556
+      free sprite="main:full" { ... }
+    }
+    window browser role=browser size=760x300 chrome=none background=transparent shape=capsule_shape scale=fit
+           snap=true visible=true place="main below 120 -12" { snap_point 380,2  free { ... } }
+    window sampler role=sampler size=300x300 ... floating=true { drag { ellipse ... ellipse ... op=sub }  ... }
+    button action="window.toggle:browser" text="@window.browser"
+
+Window properties: `role` (main, browser, sampler, effects, mixer, settings, deck3_4 or a free name; default = the id; one window
+per role; `four` is a layout of main, not a module); `chrome=none|system` (default system); `background=transparent|opaque`;
+`mask="img/x.png"` (opaque where alpha >= `mask_threshold`, 1..255, default 128; may be the art itself) or `shape=NAME`;
+`scale=fit` with `scale_min/scale_max/scale_default` in percent (50..300 typical; the layout is solved at the declared size and drawn
+uniformly scaled) or `scale=none` with `min= max=` for free resizing; `aspect=lock|free`; `resizable`; `visible` (at start; main is
+always shown, modules default hidden); `floating` (always on top); `snap`; `shadow=auto|none`; `place="REF over|below|above|left|right [dx [dy]]"`
+(where a module first opens, relative to a window id or role). Window children besides the one root node: `drag { regions }`
+(only these areas move the window; default: any opaque pixel that is not a control; opaque pixels elsewhere are inert),
+`resize { regions }` or `resize handle=tl|tr|bl|br size=24`, `snap_point x,y` (up to 32).
+
+Vector regions (`shape NAME { ... }`, `drag`, `resize`), in points of the declared window size, applied in order, `op=sub` cuts a hole:
+`rect x= y= w= h= [radius=]`, `ellipse cx= cy= rx= ry=`, `polygon x,y x,y ... units=px`, `path d="M x y L x y H x V y Q cx cy x y C ... Z"`
+(absolute upper-case commands, curves flattened). The classic single whole-window `polygon 0..1 / ellipse / roundrect / chamfer` form still works.
+
+Hit testing (what a click does): control > resize region > drag. Outside the shape (mask alpha below threshold, or a hole) the click falls
+through to whatever is behind the app. A transparent window with neither mask nor shape counts what is painted (fills, sprite pixels) as
+opaque. Controls overhanging the art still work.
+
+Modules: `action="window.toggle:ROLE"` / `window.show:ROLE` / `window.hide:ROLE` on any button (on-state = shown), `window.reset` (arrangement back
+to the skin's defaults). `show="app.window.ROLE"` is true while that module is shown, `show="app.multi_window"` while the shell can show several windows
+(the default skin's "Pop out" button and the docked library use them: the library moves into its own window and the main layout reflows).
+Which role hosts what: the widgets in a window's layout (`browser`, `tree`, `pads` ...). The app's panels (roles `settings`, `sampler`, `learn`,
+`tags`, `relink`, `columns`, `smart`, `cue`, `export`, `add_to`) open as their own default window; a skin window of the same role hosts the
+panel instead, drawn into its node with `id=content` (or the whole window). A skin that declares a `sampler` window gets it from `app.sampler`.
+Menus (`export`, `add_to`) open as pop-ups hanging from the button that opened them and close when they lose focus; they are never clipped by a shape.
+Position, visibility, scale, size, stacking and docked-to are saved per skin (settings `ui.win.<skin>.<window>`) and restored; Window menu / `window.reset` resets.
+
+Snapping: a `snap=true` window dragged within 12 points of another's edge (docking or lining up) or `snap_point` snaps; docked windows move as
+a group when the one they are docked to is dragged; shift-drag moves one window alone and detaches it.
+
+Curved controls: `path bind=... d="M ..." viewbox=WxH thickness= handle=` (a slider whose handle travels along the curve; the value is the
+nearest arc-length position, pressing anywhere on the track jumps there) and `arc bind=... start=135 end=405 thickness=` (a curved meter, degrees
+clockwise from +x; `mode=db|linear`). `rotate` turns sprites and the hit area of any widget; `hit=alpha [hit_threshold=16]` makes an image
+button hit only where its sprite is visible.
+
+Single-window fallback: a shell without multi-window support gets the visible modules docked beside the main window (per `place`) over the solid
+theme backdrop, shrunk uniformly to fit; shapes are ignored. Images are bled into transparent texels at load so anti-aliased edges never show dark fringes.
+Limits: 12 windows, 64 region primitives per list, 32 snap points, 1024 path points, masks up to 4096 px per side / 16 Mpx.
+Debug: `GET /v1/debug/windows` and `GET /v1/debug/hit?window=&x=&y=` (admin).
 
 ## Interaction
 Knobs: vertical drag, shift = fine, double-click = default. Faders: drag (a press off the thumb jumps there,
@@ -101,8 +158,8 @@ triggers `always hover pressed on beat`, where `beat` is the time since the last
 `image` widget is just a sprite; atlas PNGs (8-bit, non-interlaced, RGBA/RGB/grey/palette) load from skin
 directories only. `rotate` (the property and `rotate` animations, degrees about the centre) turns sprites, not
 other widgets; an `image` with a `bind` follows that toggle, so `trigger=on` spins it while the deck plays
-(see `voidwave.dhskin/`, art generated by `tools/make_voidwave_atlas.py`). Window shapes are solved but the macOS
-shell still shows a rectangular window (the skin has no drag-region declaration yet). Panels the application draws itself
+(see `voidwave.dhskin/`, art generated by `tools/make_voidwave_atlas.py`). The legacy window `shape=` (polygon / ellipse /
+roundrect / chamfer) only clips hit testing inside the classic rectangular window; free-form windows are below. Panels the application draws itself
 (settings, sampler, MIDI learn, track details, export destinations, add-to-playlist) use the skin's colour tokens
 by name: `bg panel panel2 line text dim accent bad good hover deck1..deck4` (with fallbacks, e.g. voidwave's
 `void glass haze rim ink violet cyan magenta`). A skin that cannot be loaded is reported in the status line and

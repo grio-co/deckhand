@@ -72,7 +72,7 @@ class SkinHost {
 class SkinView {
  public:
   SkinView(gfx::DrawList& dl, const i18n::Catalog& catalog) : dl_(dl), catalog_(catalog) {}
-  ~SkinView() { release_images(); }
+  ~SkinView() = default;
   SkinView(const SkinView&) = delete;
   SkinView& operator=(const SkinView&) = delete;
 
@@ -82,10 +82,15 @@ class SkinView {
   const skin::Skin* skin() const { return skin_.get(); }
   const Theme& theme() const { return theme_; }
   bool has_window(const std::string& id) const { return skin_ && skin_->find_window(id); }
+  // Another view of the same skin (one per window): shares the parsed skin and the uploaded images, so the GPU holds
+  // each atlas once however many windows draw it. The other view keeps the images alive as long as any view uses them.
+  void share_assets(const SkinView& primary);
   void set_touch(bool t) { touch_ = t; }
 
   // Solves the layout for the window in points, inside the safe-area insets. Cheap when nothing changed.
   void layout(const std::string& window, float w, float h, float il, float it, float ir, float ib);
+  // Everything the layout produces is shifted by (x, y): a window drawn inside a bigger canvas (single-window fallback).
+  void set_origin(float x, float y) { ox_ = x; oy_ = y; }
   const skin::Layout& current() const { return layout_; }
   float min_w() const { return min_w_; }
   float min_h() const { return min_h_; }
@@ -97,20 +102,33 @@ class SkinView {
   void draw_label(const skin::Rect& r, const std::string& s, const skin::Style& st, gfx::Align align, bool vcenter = true);
   bool bold_font(const skin::Style& st) const;
   std::string fit(const std::string& s, float size, int weight, float max_w);
-  bool pointer_over_interactive(float x, float y) const;
+  bool pointer_over_interactive(float x, float y) const;  // a widget that wants the pointer is at (x, y) (layout coordinates)
+  // The widget rectangle of the last press that started on a button, layout coordinates (pop-ups anchor to it).
+  const skin::Rect& last_press_rect() const { return press_rect_; }
+  const std::string& window_id() const { return window_; }
+  // Is anything painted at (x, y) (a visible background fill or sprite pixel)? Decides the opaque area of a transparent
+  // window that declares neither mask nor shape.
+  bool painted_at(float x, float y) const;
+  // The rectangle of the widget with this id (layout coordinates); false when there is none.
+  bool find_rect(const std::string& id, skin::Rect& out) const;
 
  private:
   struct Slot {
     Target target, show;
+    skin::PathCurve curve;      // `path` widgets: the track, in viewbox units
+    float vb_w = 0, vb_h = 0;   // viewbox of the path data
     bool show_negate = false;
     skin::Style shown;
     bool shown_valid = false;
     double started[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
   };
   void relayout(bool reset_slots);
-  void release_images();
   void draw_sprite(const std::string& sprite, const skin::Rect& r, float opacity, float radians);
   int pick(float x, float y) const;
+  bool widget_hit(const skin::ResolvedWidget& w, const skin::Rect& r, float x, float y, bool force_alpha = false) const;  // rotation, alpha shape
+  void draw_path_fader(const skin::ResolvedWidget& w, const Slot& slot, const skin::Style& st, const skin::Rect& r, double n);
+  void draw_arc(const skin::ResolvedWidget& w, const skin::Style& st, const skin::Rect& r, double n);
+  double path_value(const Slot& slot, const skin::Rect& r, float x, float y) const;
   skin::Rect hit_rect(const skin::ResolvedWidget& w) const;
   void draw_widget(int i, SkinHost& host, const Input& in, double now_s, double dt_ms, bool hidden);
   void draw_knob(const skin::ResolvedWidget& w, const Target& t, const skin::Style& st, const skin::Rect& r, double v, bool bipolar,
@@ -131,7 +149,17 @@ class SkinView {
     std::uint32_t id = 0;
     int w = 0, h = 0;
   };
-  std::map<std::string, Tex> textures_;  // atlas name -> uploaded image (skin directories only)
+  struct TexSet {  // atlas name -> uploaded image (skin directories only); removes the images when the last view lets go
+    explicit TexSet(gfx::DrawList& d) : dl(d) {}
+    ~TexSet() {
+      for (const auto& kv : map) dl.remove_image(kv.second.id);
+    }
+    gfx::DrawList& dl;
+    std::map<std::string, Tex> map;
+  };
+  std::shared_ptr<TexSet> textures_;
+  float ox_ = 0, oy_ = 0, ox_done_ = 0, oy_done_ = 0;  // origin as requested / as last solved
+  skin::Rect press_rect_;
   std::size_t window_index_ = 0;
   std::string window_;
   float lw_ = 0, lh_ = 0, insets_[4] = {0, 0, 0, 0}, min_w_ = 0, min_h_ = 0;

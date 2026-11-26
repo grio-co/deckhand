@@ -922,8 +922,8 @@ void App::load_selected(int deck) {
 
 // ---- input ----------------------------------------------------------------------------
 void App::pointer(dh_ptr_kind kind, float x, float y, int clicks) {
-  raw_.x = x / scale_;
-  raw_.y = y / scale_;
+  raw_.x = x / (scale_ * fit_);
+  raw_.y = y / (scale_ * fit_);
   if (kind == DH_PTR_DOWN) {
     raw_.down = raw_.pressed = true;
     raw_.clicks = clicks;
@@ -1055,7 +1055,7 @@ void App::text(const char* utf8) {
 }
 
 void App::open_file(const std::string& path, float x, float y) {
-  const float px = x / scale_, py = y / scale_;
+  const float px = x / (scale_ * fit_), py = y / (scale_ * fit_);
   if (panel_ == Panel::Sampler && x >= 0) {  // dropped on a sampler slot
     for (int i = 0; i < kSamplerSlots; ++i) {
       if (sampler_slot_rect_[i].contains(px, py)) {
@@ -1084,8 +1084,8 @@ void App::open_file(const std::string& path, float x, float y) {
       }
     }
     // Before the first layout, or off any deck widget in the upper part of the window: left half = deck A.
-    if (j.deck < 0 && py < (height_px_ / scale_) * 0.5f && (!skin_ || skin_->current().widgets.empty()))
-      j.deck = px < (width_px_ / scale_) / 2 ? 0 : 1;
+    if (j.deck < 0 && py < (height_px_ / (scale_ * fit_)) * 0.5f && (!skin_ || skin_->current().widgets.empty()))
+      j.deck = px < (width_px_ / (scale_ * fit_)) / 2 ? 0 : 1;
   }
   if (j.deck >= 0 && engine_->deck(j.deck).playing) j.deck = -1;
   post(j);
@@ -1171,7 +1171,9 @@ void App::refresh_rows() {
   }
 }
 
-const dh_frame* App::frame() {
+// Everything a frame needs before any pixel is drawn: test aids, status, library rows, one consistent snapshot of the
+// engine and deck state. Shared by the single-window frame() and the multi-window begin_frame().
+void App::prepare_frame() {
   now_ = now_seconds();
   if (frame_count_ < 900 && ++frame_count_ > 90 && panel_ == Panel::None) {  // test aid: DECKHAND_OPEN_PANEL=columns|smart|smart-new|cue1|settings opens that overlay once, for screenshots
     if (const char* want = std::getenv("DECKHAND_OPEN_PANEL")) {
@@ -1189,11 +1191,7 @@ const dh_frame* App::frame() {
     status_note_.clear();
   }
   if (rows_dirty_.exchange(false)) refresh_rows();
-  const float w = width_px_ / scale_, h = height_px_ / scale_;
-  dl_.begin(width_px_, height_px_, scale_);
-  dl_.rect(0, 0, w, h, theme_.bg);
 
-  // One consistent snapshot of the engine and deck state for the whole frame.
   for (int i = 0; i < kMaxDecks; ++i) views_[i] = engine_->deck(i);
   mixer_ = engine_->mixer();
   for (int i = 0; i < kSamplerSlots; ++i) samplers_[i] = engine_->sampler(i);
@@ -1213,6 +1211,23 @@ const dh_frame* App::frame() {
       rows_dirty_ = true;
     }
   }
+}
+
+const dh_frame* App::frame() {
+  prepare_frame();
+  serve_debug_requests();
+  sync_windows();
+  const bool docked = !multi() && skin_ && skin_->loaded() && !legacy_ && [&] {  // modules shown inside the one window
+    for (const auto& w : wins_)
+      if (!w->panel && w->role != "main" && w->st.visible) return true;
+    return false;
+  }();
+  if (!docked) fit_ = 1;
+  const float eff = scale_ * fit_;
+  const float w = width_px_ / eff, h = height_px_ / eff;
+  dl_.begin(width_px_, height_px_, eff);
+  dl_.rect(0, 0, w, h, theme_.bg);
+
   raw_.shift = (mods_ & DH_MOD_SHIFT) != 0;
   in_ = raw_;
   if (overlay_open()) {  // the overlay owns the pointer: the main UI sees it far away and never pressed
@@ -1221,10 +1236,15 @@ const dh_frame* App::frame() {
     in_.clicks = 0;
     in_.scroll = 0;
   }
+  any_down_ = raw_.down;
 
-  if (skin_ && skin_->loaded() && !legacy_) draw_skin_ui();
+  if (docked) compose_single();
+  else if (skin_ && skin_->loaded() && !legacy_) draw_skin_ui();
   else draw_legacy();
+  const float saved_scale = scale_;
+  scale_ = eff;  // the overlays and the pointer bookkeeping below work in the same units the layout does
   draw_overlays();
+  scale_ = saved_scale;
 
   raw_.pressed = raw_.released = false;
   raw_.clicks = 0;
@@ -1248,33 +1268,7 @@ const dh_frame* App::frame() {
   frame_.idx_count = static_cast<std::uint32_t>(dl_.indices().size());
   frame_.cmds = cmds_out_.data();
   frame_.cmd_count = static_cast<std::uint32_t>(cmds_out_.size());
-  uploads_out_.clear();
-  releases_out_ = dl_.take_image_releases();
-  for (const gfx::DrawList::ImageUpload& im : dl_.take_image_uploads()) {  // skin images: whole RGBA textures
-    dh_tex_upload u{};
-    u.id = im.id;
-    u.tex_w = u.w = static_cast<std::uint32_t>(im.width);
-    u.tex_h = u.h = static_cast<std::uint32_t>(im.height);
-    u.fmt = DH_TEX_RGBA8;
-    u.stride = u.tex_w * 4;
-    u.pixels = im.pixels;
-    uploads_out_.push_back(u);
-  }
-  int y0 = 0, y1 = 0;
-  if (dl_.atlas_dirty(y0, y1)) {
-    upload_.id = 1;
-    upload_.tex_w = gfx::DrawList::kAtlasWidth;
-    upload_.tex_h = gfx::DrawList::kAtlasHeight;
-    upload_.fmt = DH_TEX_A8;
-    upload_.x = 0;
-    upload_.y = static_cast<std::uint32_t>(y0);
-    upload_.w = gfx::DrawList::kAtlasWidth;
-    upload_.h = static_cast<std::uint32_t>(y1 - y0);
-    upload_.stride = gfx::DrawList::kAtlasWidth;
-    upload_.pixels = dl_.atlas() + static_cast<std::size_t>(y0) * gfx::DrawList::kAtlasWidth;
-    uploads_out_.push_back(upload_);
-    dl_.clear_atlas_dirty();
-  }
+  collect_uploads(uploads_out_, releases_out_);
   frame_.uploads = uploads_out_.empty() ? nullptr : uploads_out_.data();
   frame_.upload_count = static_cast<std::uint32_t>(uploads_out_.size());
   frame_.releases = releases_out_.empty() ? nullptr : releases_out_.data();
@@ -1288,6 +1282,38 @@ const dh_frame* App::frame() {
     frame_.wants_text_input = search_focus_ || rename_id_ != 0 || focus_ != nullptr;
   }
   return &frame_;
+}
+
+// Textures the shell must create, update or destroy before it draws the frame(s): new skin images (whole RGBA textures)
+// and the dirty rows of the glyph atlas. One namespace for all windows.
+void App::collect_uploads(std::vector<dh_tex_upload>& uploads, std::vector<std::uint32_t>& releases) {
+  uploads.clear();
+  releases = dl_.take_image_releases();
+  for (const gfx::DrawList::ImageUpload& im : dl_.take_image_uploads()) {
+    dh_tex_upload u{};
+    u.id = im.id;
+    u.tex_w = u.w = static_cast<std::uint32_t>(im.width);
+    u.tex_h = u.h = static_cast<std::uint32_t>(im.height);
+    u.fmt = DH_TEX_RGBA8;
+    u.stride = u.tex_w * 4;
+    u.pixels = im.pixels;
+    uploads.push_back(u);
+  }
+  int y0 = 0, y1 = 0;
+  if (dl_.atlas_dirty(y0, y1)) {
+    upload_.id = 1;
+    upload_.tex_w = gfx::DrawList::kAtlasWidth;
+    upload_.tex_h = gfx::DrawList::kAtlasHeight;
+    upload_.fmt = DH_TEX_A8;
+    upload_.x = 0;
+    upload_.y = static_cast<std::uint32_t>(y0);
+    upload_.w = gfx::DrawList::kAtlasWidth;
+    upload_.h = static_cast<std::uint32_t>(y1 - y0);
+    upload_.stride = gfx::DrawList::kAtlasWidth;
+    upload_.pixels = dl_.atlas() + static_cast<std::size_t>(y0) * gfx::DrawList::kAtlasWidth;
+    uploads.push_back(upload_);
+    dl_.clear_atlas_dirty();
+  }
 }
 
 }  // namespace deckhand
@@ -1325,5 +1351,26 @@ void dh_app_open_file(dh_app* app, const char* path, float x, float y) {
 }
 void dh_app_audio_route(dh_app* app) { app->app.audio_route(); }
 const dh_frame* dh_app_frame(dh_app* app, double) { return app->app.frame(); }
+
+void dh_app_set_capabilities(dh_app* app, uint32_t caps) { app->app.set_capabilities(caps); }
+void dh_app_begin_frame(dh_app* app, double dt) { app->app.begin_frame(dt); }
+uint32_t dh_app_windows(dh_app* app, dh_window_info* out, uint32_t cap) { return app->app.window_list(out, cap); }
+void dh_app_window_display(dh_app* app, uint32_t window, float w, float h, float backing) { app->app.window_display(window, w, h, backing); }
+const dh_frame* dh_app_window_frame(dh_app* app, uint32_t window) { return app->app.window_frame(window); }
+const dh_frame* dh_app_end_frame(dh_app* app) { return app->app.end_frame(); }
+void dh_app_window_pointer(dh_app* app, uint32_t window, dh_ptr_kind kind, uint32_t, float x, float y, int clicks) {
+  app->app.window_pointer(window, kind, x, y, clicks);
+}
+void dh_app_window_scroll(dh_app* app, uint32_t window, float, float, float, float dy) { app->app.window_scroll(window, dy); }
+void dh_app_window_open_file(dh_app* app, uint32_t window, const char* path, float x, float y) {
+  if (path) app->app.window_open_file(window, path, x, y);
+}
+dh_hit dh_app_hit_test(dh_app* app, uint32_t window, float x, float y) { return app->app.hit_test(window, x, y); }
+void dh_app_window_drag(dh_app* app, uint32_t window, dh_drag_kind kind, dh_drag_phase phase, float gx, float gy, uint32_t mods) {
+  app->app.window_drag(window, kind, phase, gx, gy, mods);
+}
+void dh_app_window_event(dh_app* app, uint32_t window, dh_window_event kind, float a, float b) { app->app.window_event(window, kind, a, b); }
+void dh_app_window_set_visible(dh_app* app, uint32_t window, bool visible) { app->app.window_set_visible(window, visible); }
+void dh_app_windows_reset(dh_app* app) { app->app.windows_reset(); }
 
 }  // extern "C"

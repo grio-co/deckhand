@@ -42,6 +42,10 @@ class ApiHost {
   virtual std::string api_preview_title() = 0;
   virtual std::string api_status() = 0;
   virtual std::string api_audio_device() = 0;
+  // Debug (admin scope): the windows the UI has (JSON array) and what a click at (x, y) of a window would do (JSON object).
+  // x and y are window points. Empty = not available. Runs on the UI thread, so the call waits for the next frame.
+  virtual std::string api_debug_windows() { return {}; }
+  virtual std::string api_debug_hit(const std::string& window, float x, float y) { (void)window; (void)x; (void)y; return {}; }
 };
 
 class ApiBridge {

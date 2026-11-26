@@ -10,6 +10,7 @@
 #include "deckhand/gfx/png.hpp"
 #include "deckhand/i18n/i18n.hpp"
 #include "deckhand/skin/skin.hpp"
+#include "deckhand/skin/windows.hpp"
 
 using namespace deckhand::skin;
 namespace fs = std::filesystem;
@@ -188,7 +189,7 @@ int main() {
 
   // ---- shipped skins
   std::map<std::string, std::shared_ptr<const Skin>> skins;
-  for (const char* n : {"default", "voidwave"}) {
+  for (const char* n : {"default", "voidwave", "orbit"}) {
     ParseResult r = load_skin(std::string("resources/skins/") + n + ".dhskin");
     if (!r.ok() || r.warning_count()) std::fprintf(stderr, "%s", r.describe().c_str());
     CHECK(r.ok());
@@ -209,7 +210,14 @@ int main() {
   // the four-deck window of the default skin lays out cleanly too, and "main" stays first
   {
     const Skin& d = *skins["default"];
-    CHECK(d.windows.size() == 2 && d.windows[0].id == "main" && d.windows[1].id == "four");
+    CHECK(d.windows.size() == 3 && d.windows[0].id == "main" && d.windows[1].id == "four" && d.windows[2].id == "browser");
+    CHECK(d.windows[1].variant && d.windows[2].role == "browser" && !d.windows[2].visible);
+    {
+      const Layout bl = solve_layout(d, 2, 980, 420, 1);
+      bool tree = false, table = false;
+      for (auto& w : bl.widgets) { tree |= w.kind == Kind::Tree; table |= w.kind == Kind::Browser; }
+      CHECK(tree && table);  // the detached library hosts the playlist tree and the track table
+    }
     for (auto& z : sizes) check_layout(d, "default/four", z.w, z.h, z.s, 1);
     // with the grid edit tools of every deck shown, the windows still lay out (no overlaps, nothing outside) at their own size
     check_layout(d, "default/main editing", 1280, 800, 1, 0, true);
@@ -446,6 +454,296 @@ int main() {
     CHECK(solve_layout(*r.skin, 5, 100, 100, 1).widgets.empty());  // bad window index is safe
   }
 
+
+  // ================= free-form windows, modules, snapping, curves =================
+  // ---- the shipped Orbit skin declares them
+  {
+    const Skin& o = *skins["orbit"];
+    CHECK(o.windows.size() == 3);
+    const Window* m = o.find_window("main");
+    const Window* b = o.find_window("browser");
+    const Window* p = o.find_window("sampler");
+    CHECK(m && b && p && m->role == "main" && b->role == "browser" && p->role == "sampler");
+    CHECK(m->chrome == Chrome::None && m->transparent && m->scale_fit && m->snap && m->visible);
+    CHECK(m->mask == "img/main.png" && m->mask_threshold == 128 && m->scale_min == 0.5f && m->scale_max == 2.0f && m->aspect_lock);
+    CHECK(!m->resize.empty() && m->snap_points.size() == 2);
+    CHECK(b->place.set && b->place.ref == "main" && b->place.side == Placement::Side::Below && b->place.dx == 120 && b->place.dy == -12);
+    CHECK(b->visible && p->floating && p->drag_mode == DragMode::Regions && p->drag.size() == 2 && p->drag[1].sub);
+    const Shape* cap = o.find_shape("capsule_shape");
+    CHECK(cap && cap->kind == ShapeKind::Parts && cap->parts.size() == 1);
+    // curved controls and window actions
+    int paths = 0, arcs = 0, actions = 0;
+    for (const Node& n : o.nodes) {
+      paths += n.kind == Kind::PathFader;
+      arcs += n.kind == Kind::Arc;
+      actions += n.props.count("action") ? 1 : 0;
+    }
+    CHECK(paths == 2 && arcs == 2 && actions >= 4);
+    // everything the module windows declare stays inside them
+    check_layout(o, "orbit/main", o.windows[0].width, o.windows[0].height, 1, 0);
+    for (size_t w = 1; w < o.windows.size(); ++w) {  // the modules lay out inside themselves too, at 1x and at a scaled-up size
+      for (const float k : {1.0f, 1.5f}) {
+        const Layout L = solve_layout(o, w, o.windows[w].width * k, o.windows[w].height * k, 1);
+        CHECK(!L.widgets.empty());
+        for (const auto& rw : L.widgets) CHECK(rw.rect.x >= -0.01f && rw.rect.y >= -0.01f && rw.rect.right() <= L.width + 0.01f && rw.rect.bottom() <= L.height + 0.01f);
+      }
+    }
+  }
+
+  // ---- shape hit tests: image mask (with interior holes), vector regions, drag / control / resize classification
+  {
+    const Skin& o = *skins["orbit"];
+    const Window& m = *o.find_window("main");
+    // the real mask: alpha of img/main.png
+    deckhand::gfx::Image img;
+    std::string why;
+    CHECK(deckhand::gfx::load_png_file("resources/skins/orbit.dhskin/img/main.png", img, why));
+    Mask mask;
+    CHECK(mask_from_rgba(img.rgba.data(), img.width, img.height, mask, why) && !mask.empty());
+    WindowShape shape = make_window_shape(o, m, mask);
+    CHECK(!shape.rectangular());
+    CHECK(shape.opaque(255, 280));    // deck A centre
+    CHECK(shape.opaque(745, 280));    // deck B centre
+    CHECK(shape.opaque(500, 280));    // the waist (mixer)
+    CHECK(!shape.opaque(5, 5));       // corner: transparent
+    CHECK(!shape.opaque(500, 60));    // notch between the discs, above the waist
+    CHECK(!shape.opaque(500, 165));   // porthole: a hole inside the shape
+    CHECK(!shape.opaque(500, 395));
+    CHECK(shape.opaque(500, 140));    // rim above the porthole is solid again
+    CHECK(!shape.opaque(-1, 10) && !shape.opaque(10, 600) && !shape.opaque(1000, 280));
+    // classification: control > resize grip > drag; transparent = falls through, even over nothing
+    CHECK(classify_point(shape, m, false, 255, 90) == Hit::Drag);       // bare art: drags the window
+    CHECK(classify_point(shape, m, true, 255, 280) == Hit::Control);
+    CHECK(classify_point(shape, m, false, 880, 455) == Hit::Resize);    // the grip
+    CHECK(classify_point(shape, m, false, 5, 5) == Hit::None);          // desktop shows through, click falls through
+    CHECK(classify_point(shape, m, false, 500, 165) == Hit::None);      // through the porthole too
+    CHECK(classify_point(shape, m, true, 5, 5) == Hit::Control);        // a control overhanging the art still works
+    // vector regions with a drag list: ring drags, the middle swallows the click
+    const Window& pod = *o.find_window("sampler");
+    WindowShape ps = make_window_shape(o, pod, Mask{});
+    CHECK(!ps.rectangular() && ps.opaque(150, 150) && !ps.opaque(2, 2) && !ps.opaque(299, 299));
+    CHECK(classify_point(ps, pod, false, 150, 20) == Hit::Drag);
+    CHECK(classify_point(ps, pod, false, 150, 150) == Hit::Solid);
+    CHECK(classify_point(ps, pod, false, 2, 2) == Hit::None);
+    const Window& cb = *o.find_window("browser");
+    WindowShape cs = make_window_shape(o, cb, Mask{});
+    CHECK(cs.opaque(380, 150) && cs.opaque(10, 150) && !cs.opaque(2, 2) && !cs.opaque(380, 305));  // stadium: round ends
+    // a threshold decides what counts as opaque in an image mask
+    Mask soft;
+    soft.w = 2; soft.h = 1; soft.alpha = {40, 200};
+    Window mw = m; mw.width = 2; mw.height = 1; mw.mask_threshold = 128;
+    WindowShape ss = make_window_shape(o, mw, soft);
+    CHECK(!ss.opaque(0.5f, 0.5f) && ss.opaque(1.5f, 0.5f));
+    // vector region lists: add, subtract, order, polygon and path
+    std::vector<ShapePart> parts(3);
+    parts[0].type = ShapePart::Type::Rect; parts[0].box = {0, 0, 100, 100};
+    parts[1].type = ShapePart::Type::Ellipse; parts[1].box = {40, 40, 20, 20}; parts[1].sub = true;
+    parts[2].type = ShapePart::Type::Polygon; parts[2].points = {{200, 0}, {220, 0}, {210, 20}};
+    CHECK(parts_contain(parts, 10, 10) && !parts_contain(parts, 50, 50) && parts_contain(parts, 210, 5) && !parts_contain(parts, 150, 50));
+    parts[0].radius = 30;
+    CHECK(!parts_contain(parts, 1, 1) && parts_contain(parts, 30, 2));  // rounded corner
+  }
+
+  // ---- window / region syntax: valid forms and what is rejected
+  {
+    const std::string win = "window w size=400x300 {\n row { spacer\n spacer } }\n";
+    ParseResult ok = parse_skin(wrap("shape s {\n rect x=0 y=0 w=100 h=100 radius=10\n ellipse cx=50 cy=50 rx=20 ry=20 op=sub\n path d=\"M 0 0 L 90 0 Q 100 50 90 90 C 60 100 20 100 0 90 Z\"\n}\n"
+                                     "window a size=400x300 role=main chrome=none background=transparent shape=s snap=true scale=fit scale_min=50 scale_max=300 scale_default=120 max=800x600 shadow=none floating=true {\n"
+                                     " drag {\n rect x=0 y=0 w=400 h=40\n }\n resize handle=br size=20\n snap_point 10,20\n row { spacer\n spacer } }\n"
+                                     "window b role=other size=200x100 place=\"a below 5 -6\" visible=true { row { spacer } }\n"));
+    if (!ok.ok()) std::fprintf(stderr, "%s", ok.describe().c_str());
+    CHECK(ok.ok());
+    const Window& a = *ok.skin->find_window("a");
+    CHECK(a.chrome == Chrome::None && a.transparent && a.floating && !a.shadow && a.scale_fit && a.scale_default == 1.2f && a.max_w == 800);
+    CHECK(a.drag_mode == DragMode::Regions && a.resize_handle == "br" && a.resize_size == 20 && a.snap_points.size() == 1);
+    CHECK(ok.skin->find_shape("s")->kind == ShapeKind::Parts && ok.skin->find_shape("s")->parts.size() == 3 && ok.skin->find_shape("s")->parts[2].points.size() > 10);
+    const Window& b = *ok.skin->find_window("b");
+    CHECK(b.place.set && b.place.ref == "a" && b.place.side == Placement::Side::Below && b.place.dy == -6 && b.visible);
+    // old skins are unchanged: classic windows are rectangular, opaque, system chrome, not scaled
+    ParseResult plain = parse_skin(wrap(win));
+    CHECK(plain.ok());
+    const Window& pw = plain.skin->windows[0];
+    CHECK(pw.chrome == Chrome::System && !pw.transparent && !pw.scale_fit && pw.drag_mode == DragMode::Auto && pw.role == "w" && make_window_shape(*plain.skin, pw, Mask{}).rectangular());
+    // rejected: bad values, hostile counts, paths outside the skin
+    CHECK(rejects(wrap("window w size=400x300 chrome=glass { row { spacer } }\n"), "bad chrome"));
+    CHECK(rejects(wrap("window w size=400x300 background=glass { row { spacer } }\n"), "bad background"));
+    CHECK(rejects(wrap("window w size=400x300 role=Bad-Role { row { spacer } }\n"), "bad role"));
+    CHECK(rejects(wrap("window w size=400x300 mask=\"../x.png\" { row { spacer } }\n"), "unsafe mask path"));
+    CHECK(rejects(wrap("window w size=400x300 mask=\"/etc/passwd\" { row { spacer } }\n"), "unsafe mask path"));
+    {
+      ParseOptions single;
+      single.allow_files = false;
+      ParseResult r = parse_skin(wrap("window w size=400x300 mask=\"img/x.png\" { row { spacer } }\n"), single);
+      CHECK(!r.ok() && r.describe().find("single-file skins cannot reference files") != std::string::npos);
+    }
+    CHECK(rejects(wrap("window w size=400x300 mask_threshold=0 { row { spacer } }\n"), "mask_threshold"));
+    CHECK(rejects(wrap("window w size=400x300 scale_min=200 scale_max=100 { row { spacer } }\n"), "inconsistent scale"));
+    CHECK(rejects(wrap("window w size=400x300 place=\"main sideways\" { row { spacer } }\n"), "bad place"));
+    CHECK(rejects(wrap("window a size=400x300 { row { spacer } }\nwindow b role=a size=400x300 { row { spacer } }\n"), "share the role"));
+    CHECK(rejects(wrap("window w size=400x300 { drag { spacer } row { spacer } }\n"), "unknown region primitive"));
+    CHECK(rejects(wrap("window w size=400x300 { resize { rect x=0 y=0 w=1 h=1 } snap_point x row { spacer } }\n"), "snap_point needs"));
+    CHECK(rejects(wrap("window w size=400x300 { resize\n row { spacer } }\n"), "resize needs"));
+    CHECK(rejects(wrap("window w size=400x300 { resize handle=middle\n row { spacer } }\n"), "bad resize handle"));
+    CHECK(rejects(wrap("shape s {\n path d=\"M 0 0 L 10 10 relative\"\n ellipse cx=1 cy=1 rx=1 ry=1\n}\n" + win), "path"));
+    CHECK(rejects(wrap("shape s {\n rect x=0 y=0 w=-5 h=10\n ellipse cx=1 cy=1 rx=1 ry=1\n}\n" + win), "bad value"));
+    CHECK(rejects(wrap("window w size=400x300 { row { button action=\"window.explode:x\" } }\n"), "bad action"));
+    CHECK(rejects(wrap("window w size=400x300 { row { button action=\"window.toggle:Bad Role\" } }\n"), "bad action"));
+    CHECK(rejects(wrap("window w size=400x300 { row { path d=\"nonsense\" } }\n"), "path"));
+    CHECK(rejects(wrap("window w size=400x300 { row { path } }\n"), "needs d="));
+    CHECK(parse_skin(wrap("window w size=400x300 { row { button action=\"window.toggle:browser\"\n button action=\"window.reset\" } }\n")).ok());
+    {  // absurd counts: too many windows, too many region primitives, too many snap points
+      std::string many = wrap("");
+      for (int i = 0; i < 13; ++i) many += "window w" + std::to_string(i) + " size=100x100 { row { spacer } }\n";
+      CHECK(rejects(many, "too many windows"));
+      std::string shape = "shape s {\n";
+      for (int i = 0; i < 70; ++i) shape += " rect x=0 y=0 w=1 h=1\n";
+      CHECK(rejects(wrap(shape + "}\n" + win), "too many region primitives"));
+      std::string snaps = "window w size=400x300 {\n";
+      for (int i = 0; i < 40; ++i) snaps += " snap_point 1,1\n";
+      CHECK(rejects(wrap(snaps + " row { spacer } }\n"), "too many snap points"));
+      std::string longpath = "M 0 0";
+      for (int i = 0; i < 2000; ++i) longpath += " L 1 1";
+      CHECK(rejects(wrap("window w size=400x300 { row { path d=\"" + longpath + "\" } }\n"), "too long"));
+      std::string curvy = "M 0 0";
+      for (int i = 0; i < 300; ++i) curvy += " Q 1 1 2 2";  // under the string limit, over the point limit once flattened
+      CHECK(curvy.size() < 4000 && rejects(wrap("window w size=400x300 { row { path d=\"" + curvy + "\" } }\n"), "path"));
+    }
+    // a hostile mask: oversized images and empty data are refused, never allocated
+    Mask big;
+    std::string err;
+    std::vector<std::uint8_t> px(16, 255);
+    CHECK(!mask_from_rgba(px.data(), 100000, 100000, big, err) && big.empty());
+    CHECK(!mask_from_rgba(px.data(), 5000, 5000, big, err));
+    CHECK(!mask_from_rgba(nullptr, 2, 2, big, err) && !mask_from_rgba(px.data(), 0, 2, big, err));
+    CHECK(mask_from_rgba(px.data(), 2, 2, big, err) && big.sample(0.1f, 0.1f) == 255 && big.sample(1.5f, 0.1f) == 0 && big.sample(-1, 0) == 0);
+  }
+
+  // ---- snapping geometry and groups
+  {
+    using namespace deckhand::skin;
+    std::vector<SnapTarget> others;
+    SnapTarget main_t;
+    main_t.frame = {100, 100, 400, 300};
+    main_t.id = 0;
+    main_t.points = {{300, 400}};
+    others.push_back(main_t);
+    // right edge near the main window's left edge: docks to it
+    SnapResult r = snap_frame({-295, 120, 400, 150}, {}, others);
+    CHECK(r.snapped_x);
+    CHECK(std::fabs(r.dx - (100 - 105)) < 1e-4f && r.attach == 0);
+    // top edge near the main window's bottom edge: docks below, x aligned by the left-left candidate
+    r = snap_frame({105, 407, 200, 100}, {}, others);
+    CHECK(r.snapped_y && std::fabs(r.dy - (-7)) < 1e-4f && r.attach == 0 && r.snapped_x && std::fabs(r.dx - (-5)) < 1e-4f);
+    // far away: nothing
+    r = snap_frame({800, 800, 100, 100}, {}, others);
+    CHECK(!r.snapped_x && !r.snapped_y && r.attach == -1 && r.dx == 0 && r.dy == 0);
+    // lining up edges beside a window without touching it does not dock (no attach), but still aligns
+    r = snap_frame({120, 96, 100, 100}, {}, others);  // on top of main, 4 points above its top edge: tops line up
+    CHECK(r.snapped_y && std::fabs(r.dy - 4) < 1e-4f && r.attach == -1 && !r.snapped_x);
+    r = snap_frame({600, 104, 100, 100}, {}, others);  // 100 points beside it: too far apart to care
+    CHECK(!r.snapped_x && !r.snapped_y);
+    // anchor points: both axes at once, exact, and they dock
+    r = snap_frame({290, 450, 80, 80}, {{298, 452}}, others);  // the anchor is 52 points below the target point: too far
+    CHECK(!(r.snapped_x && r.snapped_y && r.attach == 0 && std::fabs(298 + r.dx - 300) < 1e-4f && std::fabs(452 + r.dy - 400) < 1e-4f));
+    // a point 4 px off in each axis snaps exactly
+    r = snap_frame({-1000, -1000, 100, 100}, {{296, 404}}, others);
+    CHECK(r.snapped_x && r.snapped_y && std::fabs(296 + r.dx - 300) < 1e-4f && std::fabs(404 + r.dy - 400) < 1e-4f && r.attach == 0);
+    // beyond the threshold: no snapping
+    r = snap_frame({-1000, -1000, 100, 100}, {{300 - kSnapThreshold - 3, 400 + kSnapThreshold + 3}}, others);
+    CHECK(!r.snapped_x && !r.snapped_y);
+    // the closest candidate wins
+    others.push_back({{100, 420, 400, 80}, {}, 1});
+    r = snap_frame({105, 396, 200, 20}, {}, others);  // bottom at 416: 4 from window 1's top (420), top 396: 4 from window 0's bottom (400)
+    CHECK(r.snapped_y && std::fabs(std::fabs(r.dy) - 4) < 1e-4f);
+    // groups: parent[i] = window i is docked to parent[i]
+    CHECK(group_children({-1, 0, 1, -1, 0}, 0) == std::vector<int>({1, 2, 4}));
+    CHECK(group_children({-1, 0, 1, -1, 0}, 1) == std::vector<int>({2}));
+    CHECK(group_children({-1, 0, 1, -1, 0}, 3).empty());
+    CHECK(group_children({1, 0}, 0).size() == 1);  // a cycle terminates
+    CHECK(group_children({0}, 5).empty() && group_children({}, 0).empty());
+    // default placement
+    Placement below;
+    below.side = Placement::Side::Below; below.dx = 10; below.dy = 20;
+    const Point pb = place_relative(below, {100, 100, 400, 300}, 200, 100);
+    CHECK(pb.x == 110 && pb.y == 420);
+    Placement left;
+    left.side = Placement::Side::Left; left.dx = -8;
+    const Point pl = place_relative(left, {100, 100, 400, 300}, 200, 100);
+    CHECK(pl.x == -108 && pl.y == 100);
+    Placement above;
+    above.side = Placement::Side::Above;
+    CHECK(place_relative(above, {100, 100, 400, 300}, 200, 100).y == 0);
+  }
+
+  // ---- uniform scaling and free resizing
+  {
+    const Skin& o = *skins["orbit"];
+    const Window& m = *o.find_window("main");
+    CHECK(clamp_user_scale(m, 0.1f) == 0.5f && clamp_user_scale(m, 9) == 2.0f && clamp_user_scale(m, 1.25f) == 1.25f);
+    CHECK(window_size(m, 1.5f).w == 1500 && window_size(m, 1.5f).h == 840);
+    // dragging the bottom-right grip outwards grows uniformly; inwards shrinks; clamped at the limits
+    const float grown = scale_from_corner_drag(m, 1.0f, "br", 100, 56);
+    CHECK(grown > 1.0f && grown < 1.2f);
+    CHECK(scale_from_corner_drag(m, 1.0f, "br", -100, -56) < 1.0f);
+    CHECK(scale_from_corner_drag(m, 1.0f, "tl", -100, -56) > 1.0f);  // the top-left corner moves the other way
+    CHECK(scale_from_corner_drag(m, 1.0f, "br", 100000, 100000) == 2.0f && scale_from_corner_drag(m, 1.0f, "br", -100000, -100000) == 0.5f);
+    CHECK(window_size(m, 1.0f).w * 0.56f == window_size(m, 1.0f).h);  // aspect preserved
+    Window free_w;
+    free_w.width = 400; free_w.height = 200; free_w.min_w = 200; free_w.min_h = 100; free_w.max_w = 800; free_w.max_h = 400;
+    CHECK(clamp_free_size(free_w, 100, 50).w == 200 && clamp_free_size(free_w, 9000, 9000).h == 400 && clamp_free_size(free_w, 300, 150).w == 300);
+    free_w.aspect_lock = true;
+    const deckhand::skin::Size ar = clamp_free_size(free_w, 600, 600);
+    CHECK(std::fabs(ar.w / ar.h - 2.0f) < 1e-4f);
+    CHECK(window_size(*skins["default"]->find_window("main"), 3.0f).w == 1280);  // classic windows ignore the factor
+  }
+
+  // ---- arrangement persistence
+  {
+    WinState s;
+    s.have_pos = true; s.x = -1440.5f; s.y = 62; s.scale = 1.375f; s.w = 700; s.h = 300; s.visible = true; s.z = 4; s.parent = "main";
+    const std::string text = encode_win_state(s);
+    WinState back;
+    CHECK(decode_win_state(text, back));
+    CHECK(back.have_pos && back.x == -1440.5f && back.y == 62 && std::fabs(back.scale - 1.375f) < 1e-3f && back.w == 700 && back.h == 300 && back.visible && back.z == 4 && back.parent == "main");
+    WinState nopos;
+    nopos.visible = false;
+    CHECK(decode_win_state(encode_win_state(nopos), back) && !back.have_pos && !back.visible && back.parent.empty());
+    for (const char* bad : {"", "x=1", "garbage", "x=abc y=2", "x=1e99 y=2", "x=1 y=2 s=0 v=1", "x=1 y=2 s=99", "x=1 y=2 p=../../etc", "x=1 y=2 w=-5", "x=1 y=2 q=3", "= =", "x=1 y=2 s=nan"}) {
+      WinState keep = back;
+      CHECK(!decode_win_state(bad, keep));
+      CHECK(keep.x == back.x && keep.parent == back.parent);  // untouched on failure
+    }
+    CHECK(!decode_win_state(std::string(500, 'x'), back));
+    CHECK(win_setting_key("orbit", "browser") == "ui.win.orbit.browser");
+    CHECK(win_setting_key("../evil skin", "a b") == "ui.win.___evil_skin.a_b");
+  }
+
+  // ---- path sliders: value <-> position along an arbitrary curve
+  {
+    PathCurve line;
+    std::string err;
+    CHECK(parse_path("M 0 0 L 100 0", line, err) && std::fabs(line.length() - 100) < 1e-3f);
+    CHECK(std::fabs(line.at(0.5f).x - 50) < 1e-3f && line.at(0.5f).y == 0 && line.at(-3).x == 0 && line.at(7).x == 100);
+    CHECK(std::fabs(line.project(25, 40) - 0.25f) < 1e-4f && line.project(-50, 0) == 0 && line.project(500, 9) == 1);
+    PathCurve curve;
+    CHECK(parse_path("M 55 8 Q 8 140 55 272", curve, err));
+    CHECK(curve.pts.size() > 10 && curve.length() > 264);  // longer than the chord because it bulges
+    for (float v = 0; v <= 1.0001f; v += 0.1f) {
+      const Point p = path_handle_at(curve, v);
+      CHECK(std::fabs(path_value_at(curve, p.x, p.y) - v) < 0.01f);  // position -> value -> position round trips
+      CHECK(std::fabs(path_value_at(curve, p.x - 3, p.y + 2) - v) < 0.05f);  // near the track also works
+    }
+    // a cubic jaw-line with a hairpin keeps the nearest-point mapping monotone on each leg
+    PathCurve jaw;
+    CHECK(parse_path("M 0 0 C 40 80 160 80 200 0 L 200 40 H 0 V 60 Z", jaw, err) && jaw.length() > 300);
+    CHECK(jaw.project(jaw.at(0.3f).x, jaw.at(0.3f).y) > 0.2f && jaw.project(jaw.at(0.3f).x, jaw.at(0.3f).y) < 0.4f);
+    for (const char* bad : {"", "L 1 1", "M 1", "M 0 0 L", "M 0 0 l 1 1", "M 0 0 X 1 1", "M 0 0", "M 1e99 0 L 1 1", "M 0 0 L nan 1"}) {
+      PathCurve c;
+      CHECK(!parse_path(bad, c, err));
+    }
+    CHECK(PathCurve{}.project(1, 1) == 0 && PathCurve{}.at(0.5f).x == 0);
+  }
+
   // ---- directory skins: confinement of asset paths
   {
     fs::path root = fs::temp_directory_path() / "dh_skin_test";
@@ -464,6 +762,16 @@ int main() {
     CHECK(ok.skin->find_atlas("a") && ok.skin->find_atlas("a")->regions[0].nine_slice);
     ParseResult evil = load_skin((root / "evil").string());
     if (!ec) CHECK(!evil.ok() && evil.describe().find("outside the skin directory") != std::string::npos);
+    {  // a window mask is an asset too: it must stay inside the skin directory
+      fs::create_directories(root / "maskevil" / "img", ec);
+      std::ofstream(root / "maskevil" / "skin.dhs") << wrap("window w size=400x300 chrome=none mask=\"img/m.png\" {\n row { spacer\n spacer } }\n");
+      fs::create_symlink(root / "secret.png", root / "maskevil" / "img" / "m.png", ec);
+      ParseResult me = load_skin((root / "maskevil").string());
+      if (!ec) CHECK(!me.ok() && me.describe().find("outside the skin directory") != std::string::npos);
+      fs::create_directories(root / "maskmissing", ec);
+      std::ofstream(root / "maskmissing" / "skin.dhs") << wrap("window w size=400x300 chrome=none mask=\"img/none.png\" {\n row { spacer\n spacer } }\n");
+      CHECK(!load_skin((root / "maskmissing").string()).ok());
+    }
     ParseResult miss = load_skin((root / "missing").string());
     CHECK(!miss.ok());
     CHECK(!load_skin((root / "nonexistent").string()).ok());

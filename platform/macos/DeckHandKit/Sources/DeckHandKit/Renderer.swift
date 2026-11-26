@@ -9,7 +9,7 @@ final class Renderer {
   private let pipeline: MTLRenderPipelineState      // A8 textures (glyphs): vertex colour, alpha from the texel
   private let imagePipeline: MTLRenderPipelineState  // RGBA8 textures (skin images): vertex colour times the texel
   private let sampler: MTLSamplerState
-  private var textures: [UInt32: MTLTexture] = [:]
+  var textures: [UInt32: MTLTexture] = [:]  // shared by every window of the multi-window shell
 
   private static let shader = """
   #include <metal_stdlib>
@@ -81,7 +81,7 @@ final class Renderer {
     self.sampler = sampler
   }
 
-  private func apply(_ u: dh_tex_upload) {
+  func apply(_ u: dh_tex_upload) {
     guard let pixels = u.pixels, u.w > 0, u.h > 0 else { return }
     var texture = textures[u.id]
     if texture == nil || texture!.width != Int(u.tex_w) || texture!.height != Int(u.tex_h) {

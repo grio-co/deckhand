@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "deckhand/skin/skin.hpp"
+#include "deckhand/skin/windows.hpp"
 
 namespace deckhand::skin {
 namespace {
@@ -309,39 +310,6 @@ void place(Ctx& c, int node, const Rect& slot, int parent, bool parent_flow) {
   }
 }
 
-std::vector<Point> shape_polygon(const Skin& sk, const Shape& sh, float W, float H, float scale) {
-  std::vector<Point> p;
-  const float pi = 3.14159265358979f;
-  switch (sh.kind) {
-    case ShapeKind::Polygon:
-      for (auto& q : sh.points) p.push_back({q.x * W, q.y * H});
-      break;
-    case ShapeKind::Ellipse:
-      for (int i = 0; i < 64; ++i) {
-        float a = 2 * pi * static_cast<float>(i) / 64;
-        p.push_back({W / 2 + std::cos(a) * W / 2, H / 2 + std::sin(a) * H / 2});
-      }
-      break;
-    case ShapeKind::Chamfer: {
-      float k = std::min({sh.amount * scale, W / 2, H / 2});
-      p = {{k, 0}, {W - k, 0}, {W, k}, {W, H - k}, {W - k, H}, {k, H}, {0, H - k}, {0, k}};
-      break;
-    }
-    case ShapeKind::RoundRect: {
-      float r = std::min({sh.amount * scale, W / 2, H / 2});
-      const Point centres[4] = {{W - r, r}, {W - r, H - r}, {r, H - r}, {r, r}};
-      for (int corner = 0; corner < 4; ++corner)
-        for (int i = 0; i <= 8; ++i) {
-          float a = (static_cast<float>(corner) * 90 + 270 + 90.0f * static_cast<float>(i) / 8) * pi / 180;
-          p.push_back({centres[corner].x + std::cos(a) * r, centres[corner].y + std::sin(a) * r});
-        }
-      break;
-    }
-  }
-  (void)sk;
-  return p;
-}
-
 bool in_polygon(const std::vector<Point>& poly, float x, float y) {
   bool in = false;
   for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
@@ -371,7 +339,7 @@ Layout solve_layout(const Skin& skin, size_t window_index, float width, float he
     out.height = height;
     out.scale = scale;
     if (!w.shape.empty())
-      if (const Shape* sh = skin.find_shape(w.shape)) out.shape = shape_polygon(skin, *sh, width, height, scale);
+      if (const Shape* sh = skin.find_shape(w.shape)) out.shape = shape_outline(*sh, width, height, scale);
     if (width < w.min_w * scale || height < w.min_h * scale) out.warnings.push_back("window smaller than the skin's minimum size");
     Ctx c{skin, scale, out, hidden_nodes};
     if (w.root >= 0) place(c, w.root, Rect{0, 0, width, height}, -1, false);

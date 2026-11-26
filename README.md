@@ -51,6 +51,8 @@ full control API.
 - Skins: the whole UI is drawn from declarative skin files ([docs/SKINS.md](docs/SKINS.md));
   two- and four-deck default layouts, one example skin, switchable while running.
 - Panels for settings, sampler, MIDI learn and track details.
+- Free-form skins on macOS: shaped transparent windows and detachable floating modules (try
+  the `orbit` skin). Windows and Linux still use one rectangular window.
 
 ## Goals
 - **Stable.** The audio path never blocks; the engine runs as its own process.

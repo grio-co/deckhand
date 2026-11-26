@@ -21,6 +21,11 @@ bool decode_png(const std::uint8_t* data, std::size_t size, Image& out, std::str
 // Same, reading a file (at most `max_bytes` long).
 bool load_png_file(const std::string& path, Image& out, std::string& error, std::size_t max_bytes = 8u << 20);
 
+// Copies the colour of the nearest visible pixels into fully transparent ones (up to `radius` pixels away) so that
+// bilinear sampling at an anti-aliased edge never blends in black: with straight-alpha textures the transparent texels'
+// RGB leaks into the edge otherwise. Alpha is untouched.
+void bleed_transparent_colors(Image& img, int radius = 4);
+
 // Raw zlib/deflate stream (RFC 1950/1951) decoder, exposed for tests. `limit` caps the output size.
 bool zlib_inflate(const std::uint8_t* data, std::size_t size, std::vector<std::uint8_t>& out, std::size_t limit,
                   std::string& error);

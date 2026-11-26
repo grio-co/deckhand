@@ -12,6 +12,8 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <map>
 #include <mutex>
 #include <set>
@@ -32,6 +34,7 @@
 #include "deckhand/library/library.hpp"
 #include "deckhand/library/palette.hpp"
 #include "deckhand/log/log.hpp"
+#include "deckhand/skin/windows.hpp"
 #include "deckhand/midi/controller.hpp"
 #include "deckhand/services/track_analysis.hpp"
 #include "deckhand/services/usb_export.hpp"
@@ -169,6 +172,39 @@ struct SyncSummary {
   int skipped = 0;             // files of other devices the last run could not use (passphrase mismatch)
 };
 
+// One window of the UI. In single-window mode these exist too (they hold the arrangement of the modules that are
+// docked into the one window); with a multi-window shell each is a native window.
+struct Win {
+  std::uint32_t id = 0;
+  std::string name;   // skin window id ("main", "four", "browser") or "panel"
+  std::string role;   // main, browser, ... or the panel kind
+  bool panel = false; // the application panel window (settings, ...)
+  int skin_index = -1;
+  skin::WinState st;  // persisted per skin: position, user scale, size, visibility, stacking, docked-to
+  float pt_w = 0, pt_h = 0;               // content size the core wants, points
+  std::uint32_t move_seq = 1;
+  float px_w = 0, px_h = 0, backing = 1;  // as the shell reported them
+  bool reported = false;                  // the shell told us where the window is
+  bool placed = false;                    // the core chose or restored the position (a position the shell merely made up does not count)
+  ui::Input raw;                          // pointer state of this window (points)
+  std::unique_ptr<ui::SkinView> view;
+  skin::WindowShape shape;
+  bool shape_built = false;
+  std::vector<dh_vertex> vtx;
+  std::vector<std::uint32_t> idx;
+  std::vector<dh_draw_cmd> cmds;
+  dh_frame frame{};
+  bool popup = false;                     // panel anchored to a control: closes when it loses focus
+  bool has_anchor = false;
+  float anchor_x = 0, anchor_y = 0;       // desktop point the pop-up hangs from
+  bool focused = false;
+  bool in_drag = false;                   // moved by a core-driven drag: ignore the shell's move echoes
+  bool dirty = false;
+  double dirty_at = 0;
+  std::string title;
+  float user_scale() const { return st.scale; }
+};
+
 // A single-line text field shared by the overlays: the focused one receives typed text.
 struct Field {
   std::string text;
@@ -195,12 +231,30 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   }
   void set_modifiers(std::uint32_t mods) { mods_ = mods; }
   void pointer(dh_ptr_kind kind, float x, float y, int clicks);
-  void scroll(float dy) { raw_.scroll += dy / scale_; }
+  void scroll(float dy) { raw_.scroll += dy / (scale_ * fit_); }
   void key(dh_key key, std::uint32_t mods);
   void text(const char* utf8);
   void open_file(const std::string& path, float x, float y);
   void audio_route() { audio_recheck_ = true; }
   const dh_frame* frame();
+
+  // ---- multi-window shells (app_windows.cpp) ----
+  void set_capabilities(std::uint32_t caps) { caps_ = caps; }
+  void begin_frame(double dt);
+  std::uint32_t window_list(dh_window_info* out, std::uint32_t cap);
+  void window_display(std::uint32_t id, float w_px, float h_px, float backing);
+  const dh_frame* window_frame(std::uint32_t id);
+  const dh_frame* end_frame();
+  void window_pointer(std::uint32_t id, dh_ptr_kind kind, float x, float y, int clicks);
+  void window_scroll(std::uint32_t id, float dy);
+  void window_open_file(std::uint32_t id, const std::string& path, float x, float y);
+  dh_hit hit_test(std::uint32_t id, float x, float y);
+  void window_drag(std::uint32_t id, dh_drag_kind kind, dh_drag_phase phase, float gx, float gy, std::uint32_t mods);
+  void window_event(std::uint32_t id, dh_window_event kind, float a, float b);
+  void window_set_visible(std::uint32_t id, bool visible);
+  void windows_reset();
+  std::string api_debug_windows() override;
+  std::string api_debug_hit(const std::string& window, float x, float y) override;
 
   // ApiHost (called from API threads)
   IEngine& api_engine() override { return *engine_; }
@@ -415,6 +469,38 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   bool choose_folder(const std::string& title, std::string& out);
   static std::string host_name();
 
+  // ---- windows and modules (app_windows.cpp) -------------------------------------------
+  bool multi() const { return (caps_ & DH_CAP_MULTI_WINDOW) != 0; }
+  void sync_windows();
+  Win* find_win(std::uint32_t id);
+  Win* find_win_role(const std::string& role);
+  void bind_window(Win& w, int skin_index);
+  void load_win_state(Win& w);
+  void save_win_state(Win& w);
+  void mark_dirty(Win& w) {
+    w.dirty = true;
+    w.dirty_at = now_;
+  }
+  void place_modules();
+  Rect win_frame_rect(const Win& w) const { return {w.st.x, w.st.y, w.pt_w, w.pt_h}; }
+  float win_eff_scale(const Win& w) const;
+  void ensure_shape(Win& w);
+  void do_window_action(const std::string& action);
+  void set_module_visible(const std::string& role, int how);  // 0 hide, 1 show, 2 toggle
+  bool module_visible(const std::string& role) const;
+  bool module_known(const std::string& role) const;
+  static const char* panel_role(Panel p);
+  void sync_panel_window();
+  void draw_window_pass(Win& w);
+  void draw_panel_window(Win& w);
+  void compose_single();
+  void serve_debug_requests();
+  std::string run_on_ui(std::function<std::string()> fn);
+  void prepare_frame();
+  void collect_uploads(std::vector<dh_tex_upload>& uploads, std::vector<std::uint32_t>& releases);
+  Rect panel_size(float w, float h, std::string& title);
+  void draw_panel_body(const Rect& m, const std::string& title);
+
   // ---- legacy code-drawn fallback (app_legacy.cpp) ---------------------------------------
   void draw_legacy();
   bool legacy_button(const Rect& r, const std::string& label, bool lit, Color lit_color);
@@ -588,6 +674,34 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   MixerView mixer_;
   DeckInfo info_[kMaxDecks];
   SamplerView samplers_[kSamplerSlots];
+
+  // ---- windows
+  std::uint32_t caps_ = 0;  // DH_CAP_* the shell announced (0 = one rectangular window)
+  std::vector<std::unique_ptr<Win>> wins_;
+  std::uint32_t next_win_id_ = 1;
+  int z_counter_ = 1;
+  unsigned skin_gen_ = 0, arr_gen_ = ~0u;  // bumped by use_skin(); the arrangement follows
+  std::string arr_variant_;
+  Win* cur_win_ = nullptr;   // the window being drawn (null: the single window)
+  float fit_ = 1;            // single-window fallback: uniform shrink of the docked canvas
+  bool any_down_ = false;    // a pointer button is down in some window
+  std::mutex dbg_mutex_;
+  std::vector<std::function<void()>> dbg_queue_;
+  dh_frame end_frame_{};
+  std::vector<dh_tex_upload> end_uploads_;
+  std::vector<std::uint32_t> end_releases_;
+  bool arrangement_reset_ = false;         // windows_reset(): ignore the saved arrangement while rebuilding
+  bool panel_anchor_valid_ = false;        // the open pop-up hangs from this desktop point
+  float panel_anchor_x_ = 0, panel_anchor_y_ = 0;
+  struct DragSession {                     // a core-driven window move or resize
+    bool active = false, alone = false;
+    std::uint32_t win = 0;
+    dh_drag_kind kind = DH_DRAG_MOVE;
+    float gx = 0, gy = 0, start_scale = 1;
+    skin::Frame start;
+    std::string corner, attach;
+    std::vector<std::pair<std::uint32_t, skin::Point>> group;  // windows that move along, with their start positions
+  } drag_;
 
   std::unique_ptr<ui::SkinView> skin_;
   ui::Theme theme_ = ui::Theme::defaults();

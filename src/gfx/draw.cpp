@@ -114,6 +114,14 @@ std::vector<std::uint32_t> DrawList::take_image_releases() {
   return out;
 }
 
+int DrawList::image_alpha(std::uint32_t id, float u, float v) const {
+  const auto it = images_.find(id);
+  if (it == images_.end() || !(u >= 0) || !(v >= 0) || u >= 1 || v >= 1) return 0;
+  const Stored& st = it->second;
+  const int x = std::min(st.width - 1, static_cast<int>(u * static_cast<float>(st.width))), y = std::min(st.height - 1, static_cast<int>(v * static_cast<float>(st.height)));
+  return st.rgba[(static_cast<std::size_t>(y) * static_cast<std::size_t>(st.width) + static_cast<std::size_t>(x)) * 4 + 3];
+}
+
 void DrawList::image(std::uint32_t id, float x, float y, float w, float h, float u0, float v0, float u1, float v1, Color tint,
                      float radians) {
   if (w <= 0 || h <= 0 || !images_.count(id)) return;
