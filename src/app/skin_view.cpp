@@ -108,6 +108,22 @@ Target map_binding(std::string_view n) {
     const std::string k = rest(1);
     for (const char* tog : {"play", "sync", "key_lock", "quantize", "slip", "reverse"})
       if (k == tog) return control(dn + "." + k, d);
+    if (k.rfind("stem.", 0) == 0 || k.rfind("stems.", 0) == 0) {  // stems: deck[1].stem.vocals.mute / .active, deck[1].stems.available
+      if (k == "stems.available") return info("stems_available", d);
+      if (k.rfind("stems.", 0) == 0) return control(dn + "." + k, d);
+      const auto dot = k.rfind('.');
+      const std::string verb = dot == std::string::npos ? "" : k.substr(dot + 1);
+      const std::string base = dot == std::string::npos ? k : k.substr(0, dot);
+      if (verb == "active") {  // lit while the stem is audible: the button toggles mute, the lamp is the inverse
+        Target t = control(dn + "." + base + ".mute", d);
+        t.invert = true;
+        return t;
+      }
+      if (verb == "level") return control(dn + "." + k, d, 0, 1.5, 1.0);
+      Target t = control(dn + "." + k, d);
+      t.momentary = verb == "isolate";
+      return t;
+    }
     if (k == "cue") {
       Target t = control(dn + ".cue", d);
       t.momentary = true;

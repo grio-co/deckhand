@@ -708,6 +708,20 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
       put_chain_info(out, res.info);
       return;
     }
+    case kReqStemsAttach: {  // stems of a loaded track, read from the stem cache by this process; the UI is untrusted input
+      const int deck = rd.u8();
+      const std::int64_t track_id = rd.i64();
+      const std::string path = rd.str();
+      std::string error;
+      bool ok = rd.ok() && deck < kMaxDecks && !path.empty() && path.size() <= 1024 && path.find('\0') == std::string::npos;
+      const std::filesystem::path p = std::filesystem::u8path(path);
+      ok = ok && p.extension() == ".dhstems";  // only stem cache files, whatever the UI asks for
+      if (ok) ok = engine_.stems_attach(deck, track_id, path, error);
+      else if (error.empty()) error = "bad request";
+      out.u8(ok ? 1 : 0);
+      out.str(error);
+      return;
+    }
     case kReqSetTrackMeta: {  // grid and memory cues of a loaded track; the UI is untrusted input
       const int deck = rd.u8();
       const std::int64_t track_id = rd.i64();

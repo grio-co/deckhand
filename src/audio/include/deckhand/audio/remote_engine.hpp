@@ -115,6 +115,8 @@ class RemoteEngine final : public IEngine {
   // Effect chains live in the engine process; edits are control-socket requests, reads are cached for ~100 ms.
   bool fx_chain_edit(const FxChainEdit& edit, FxChainResult& result) override;
   FxChainInfo fx_chain(int target) const override;
+  // The engine process reads the stem cache file itself (it has the same file access as the UI).
+  bool stems_attach(int deck, std::int64_t track_id, const std::string& path, std::string& error) override;
 
  private:
   void share_track(Op op, int deck, std::unique_ptr<LoadedTrack> track);

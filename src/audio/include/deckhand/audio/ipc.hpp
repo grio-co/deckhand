@@ -25,6 +25,7 @@
 
 namespace deckhand::ipc {
 
+// 6: stem playback (StemParam / StemEnable / StemPreset / StemDetach ops, DeckView stem fields, kReqStemsAttach).
 // 5: effect chains (kReqFxChain request, ops FxChainSwap / FxUnitSet / FxChainSet stay engine-internal, new EffectKind
 //    values, Command::chain). The snapshot structs and the command ring layout are unchanged.
 // 4: pre-listen player (Preview* ops, PreviewView snapshot, PreviewLoad through a track block).
@@ -32,7 +33,7 @@ namespace deckhand::ipc {
 // 2: microphone channel (Mic* ops, MixerView fields, InputInfo snapshot, input requests, include-mic flags).
 // Bump whenever a wire layout or the meaning of a request changes: a UI that finds an engine with another version
 // asks it to quit and starts a fresh one (RemoteEngine::establish), and the segment's fingerprint covers the sizes.
-constexpr std::uint32_t kProtocolVersion = 5;
+constexpr std::uint32_t kProtocolVersion = 6;
 constexpr int kBlockSlots = 64;  // track / sample blocks in flight at once
 
 // What the OS hands out for a file or socket: a descriptor on POSIX, a HANDLE / SOCKET on Windows (-1 = none).
@@ -548,6 +549,7 @@ enum Req : std::uint8_t {
   kReqInputDevices,    // -> u32 n, str...
   kReqSetTrackMeta,    // u8 deck, i64 track id, f64 bpm, u32 n grid, (f64 frame, f64 bpm, i32 bar_beat)..., u32 n cues, f64... -> u8 ok
   kReqFxChain,         // u8 verb, u8 target, i32 id, i32 pos, u8 kind, i32 field, f64 value, str text -> u8 ok, i32 id, str error, str text, chain info
+  kReqStemsAttach,     // u8 deck, i64 track id, str path (.dhstems) -> u8 ok, str error   (loads in the background)
 };
 
 class Wr {

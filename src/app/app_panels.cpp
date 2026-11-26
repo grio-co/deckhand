@@ -164,7 +164,7 @@ void App::open_panel(Panel p) {
       output_devices_ = engine_->devices();
       input_devices_ = engine_->input_devices();
       for (const auto& kv : std::vector<std::pair<const char*, const char*>>{{"api.enabled", "1"}, {"api.port", "7373"}, {"stream.files", "0"},
-                                                                          {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"preview.master", "0"}, {"browser.key_musical", "0"}, {"ui.show_phrases", "1"}, {"obs.host", "127.0.0.1"},
+                                                                          {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"preview.master", "0"}, {"stems.auto_attach", "1"}, {"browser.key_musical", "0"}, {"ui.show_phrases", "1"}, {"obs.host", "127.0.0.1"},
                                                                           {"obs.port", "4455"}, {"obs.text_source", ""}, {"sync.folder", ""}})
         sv_[kv.first] = lib_->setting(kv.first, kv.second);
       sv_["sync.device_name"] = lib_->setting("sync.device_name", host_name());
@@ -571,6 +571,12 @@ void App::draw_settings(const Rect& m) {
     y += line;
     dl_.text(x, y, skin_->fit(T("settings.preview_master_hint"), 11, 0, rw), 11, th.dim, Align::Left, rw);
     y += 22;
+    const bool stem_auto = sv_["stems.auto_attach"] != "0";
+    if (ui_toggle({x, y, rw, 24}, T("settings.stems_auto_attach"), stem_auto)) {
+      sv_["stems.auto_attach"] = stem_auto ? "0" : "1";
+      save_setting("stems.auto_attach", sv_["stems.auto_attach"]);
+    }
+    y += line;
     const bool musical = sv_["browser.key_musical"] == "1";
     if (ui_toggle({x, y, rw, 24}, T("settings.key_musical"), musical)) {
       sv_["browser.key_musical"] = musical ? "0" : "1";

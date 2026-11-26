@@ -118,7 +118,7 @@ struct DeckInfo {
 
 struct Job {
   enum Kind { Load, Reattach, AddFile, Import, SaveMainCue, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample, Sync, SyncInfo, RestoreSamples,
-              SaveGrid, SaveMemCues, SaveHotStyle, SaveTrackColor, Reanalyse, PreviewLoad, SuggestCues, SyncCues } kind = Load;
+              SaveGrid, SaveMemCues, SaveHotStyle, SaveTrackColor, Reanalyse, PreviewLoad, SuggestCues, SyncCues, StemsReady } kind = Load;
   int deck = -1;
   std::int64_t track_id = 0;
   std::string path;
@@ -396,6 +396,8 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void sync_job(Library& lib, bool run);
   void restore_sampler(Library& lib, bool reload);
   void load_track(Library& lib, int deck, std::int64_t track_id, bool attach_only = false);
+  // Gives the deck the stems of its track when the stem cache has them (setting stems.auto_attach, default on).
+  void attach_stems(Library& lib, int deck, std::int64_t track_id);
   void setup_engine(const std::vector<std::string>& mapping_folders);
   void start_signal_watch();
   void stop_signal_watch();

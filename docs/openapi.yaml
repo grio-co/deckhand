@@ -400,6 +400,58 @@ paths:
               schema: {$ref: "#/components/schemas/Error"}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/decks/{deck}/stems:
+    get:
+      tags: [Decks]
+      operationId: getDeckStems
+      summary: Stem playback state of a deck
+      description: "Required scope: `read`. `state` is none, loading, attached or failed; `active` is true while the deck plays the stems instead of the original mix."
+      x-scope: read
+      parameters:
+        - {$ref: "#/components/parameters/Deck"}
+      responses:
+        "200":
+          description: Availability and the per-stem mute, solo, isolate, level, meter (post-gain peak, 0..1) and effect flag.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Decks]
+      operationId: setDeckStems
+      summary: Mute, solo, level and preset the stems of a deck
+      description: |
+        Required scope: `control:deck:{deck}`. Every key is optional. `attach` loads the stems of the loaded track from the
+        stem cache (409 when it has none), `detach` drops them, `enabled` switches between stems and the original mix,
+        `preset` is acapella, instrumental, drums_only, no_drums or reset, and `stems` sets `mute`, `solo`, `isolate`
+        (booleans) and `level` (0..1.5) per stem (vocals, drums, bass, other). Changes ramp over about 10 ms. The same
+        state is available as controls `deckN.stem.<vocals|drums|bass|other>.<mute|solo|isolate|level>` and
+        `deckN.stems.<acapella|instrumental|drums_only|no_drums|reset|enable|detach>`; effect chains of a stem use
+        target `deckN.stemM` (M 1..4 are vocals, drums, bass, other).
+      x-scope: "control:deck:{deck}"
+      parameters:
+        - {$ref: "#/components/parameters/Deck"}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        "200":
+          description: The stem state after the change (same as GET).
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: No stems for the loaded track, or the engine refused.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/decks/{deck}/cues:
     get:
       tags: [Preparation]

@@ -83,6 +83,14 @@ struct FxChainRT {
   void run(float* buf, int n, const FxCtx& cx, FxGarbageRing& gar);  // interleaved stereo, in place
   bool busy() const;                // needs to keep running even with no input
   bool used() const { return cur || pending; }
+  // The chain has something to do with its input right now (units running, an edit waiting, a tail ringing): a stem bus
+  // is split out of the shared deck path only while this is true.
+  bool wants_audio() const {
+    if (pending) return true;
+    for (const FxUnit* g : ghost)
+      if (g) return true;
+    return cur && cur->count > 0 && !(bypass && act <= 0.0f);
+  }
   bool active() const { return busy() || (cur && cur->count > 0); }  // has something to run
   FxUnit* find_id(int id) const;
   FxUnit* find_legacy(int slot) const;

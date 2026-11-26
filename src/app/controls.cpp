@@ -287,6 +287,103 @@ const AutomixDef kAutomix[] = {
     {"queue_back", "none", "Go back to the previous track (the one playing now follows it)"},
 };
 
+
+// ---- stem controls: deck1.stem.vocals.mute, deck2.stems.acapella ... -----------------------------------------------------
+const char* const kStemNames[kStemCount] = {"vocals", "drums", "bass", "other"};
+struct StemCtl {
+  int deck = 0;
+  int stem = -1;       // 0..3, or -1 for a preset / enable / detach control
+  std::string verb;    // mute solo isolate level | acapella instrumental drums_only no_drums reset enable detach
+};
+bool parse_stem_control(std::string_view name, StemCtl& out) {
+  if (name.size() < 12 || name.substr(0, 4) != "deck") return false;
+  const auto dot = name.find('.');
+  int deck = 0;
+  if (dot == std::string_view::npos || !parse_int(name.substr(4, dot - 4), deck) || deck < 1 || deck > kMaxDecks) return false;
+  std::string_view rest = name.substr(dot + 1);
+  if (rest.substr(0, 5) == "stem.") {
+    rest.remove_prefix(5);
+    const auto d2 = rest.find('.');
+    if (d2 == std::string_view::npos) return false;
+    int stem = -1;
+    for (int i = 0; i < kStemCount; ++i)
+      if (rest.substr(0, d2) == kStemNames[i]) stem = i;
+    const std::string_view verb = rest.substr(d2 + 1);
+    if (stem < 0 || (verb != "mute" && verb != "solo" && verb != "isolate" && verb != "level")) return false;
+    out = StemCtl{deck - 1, stem, std::string(verb)};
+    return true;
+  }
+  if (rest.substr(0, 6) == "stems.") {
+    const std::string_view verb = rest.substr(6);
+    for (const char* v : {"acapella", "instrumental", "drums_only", "no_drums", "reset", "enable", "detach"})
+      if (verb == v) {
+        out = StemCtl{deck - 1, -1, std::string(verb)};
+        return true;
+      }
+  }
+  return false;
+}
+bool is_stem_control(std::string_view name) {
+  StemCtl c;
+  return parse_stem_control(name, c);
+}
+bool build_stem_control(std::string_view name, bool has_value, double value, std::vector<Command>& out, std::string& error) {
+  StemCtl c;
+  if (!parse_stem_control(name, c)) return false;
+  if (has_value && !std::isfinite(value)) {
+    error = "value must be a finite number";
+    return false;
+  }
+  Command cmd;
+  cmd.deck = static_cast<std::uint8_t>(c.deck);
+  if (c.stem >= 0) {
+    cmd.op = Op::StemParam;
+    StemField f = StemField::Mute;
+    if (c.verb == "solo") f = StemField::Solo;
+    else if (c.verb == "isolate") f = StemField::Isolate;
+    else if (c.verb == "level") f = StemField::Level;
+    cmd.i = (c.stem << 8) | static_cast<int>(f);
+    if (f == StemField::Level) {
+      if (!has_value || value < 0 || value > kStemMaxLevel) {
+        error = "value needed: 0..1.5 (1 = unity)";
+        return false;
+      }
+      cmd.f = static_cast<float>(value);
+    } else {
+      cmd.f = has_value ? (value != 0 ? 1.0f : 0.0f) : -1.0f;
+    }
+  } else if (c.verb == "enable") {
+    cmd.op = Op::StemEnable;
+    cmd.i = has_value ? (value != 0 ? 1 : 0) : -1;
+  } else if (c.verb == "detach") {
+    cmd.op = Op::StemDetach;
+  } else {
+    cmd.op = Op::StemPreset;
+    cmd.i = static_cast<int>(c.verb == "acapella" ? StemPresetId::Acapella : c.verb == "instrumental" ? StemPresetId::Instrumental
+                             : c.verb == "drums_only" ? StemPresetId::DrumsOnly : c.verb == "no_drums" ? StemPresetId::NoDrums
+                                                                                                          : StemPresetId::Reset);
+  }
+  out.push_back(cmd);
+  return true;
+}
+bool read_stem_control(const IEngine& engine, std::string_view name, double& value) {
+  StemCtl c;
+  if (!parse_stem_control(name, c)) return false;
+  const DeckView v = engine.deck(c.deck);
+  if (c.stem >= 0) {
+    const std::uint32_t bit = 1u << c.stem;
+    if (c.verb == "mute") value = (v.stem_mute & bit) ? 1 : 0;
+    else if (c.verb == "solo") value = (v.stem_solo & bit) ? 1 : 0;
+    else if (c.verb == "isolate") value = (v.stem_isolate & bit) ? 1 : 0;
+    else value = v.stem_level[c.stem];
+    return true;
+  }
+  if (c.verb == "enable") {
+    value = v.stems_on ? 1 : 0;
+    return true;
+  }
+  return false;
+}
 }  // namespace
 
 bool parse_automix_control(std::string_view name, std::string& action) {
@@ -371,6 +468,23 @@ std::vector<ControlInfo> list_controls() {
       out.push_back({b + "load", "trigger", "body text = preset JSON", "Replace the chain with a preset"});
     }
   }
+  for (int deck = 1; deck <= kMaxDecks; ++deck) {
+    const std::string dk = "deck" + std::to_string(deck);
+    for (int st = 0; st < kStemCount; ++st) {
+      const std::string b = dk + ".stem." + kStemNames[st] + ".";
+      out.push_back({b + "mute", "toggle", "0 off, 1 on, none = toggle", std::string("Mute the ") + kStemNames[st] + " stem (needs stems on the deck)"});
+      out.push_back({b + "solo", "toggle", "0 off, 1 on, none = toggle", std::string("Solo the ") + kStemNames[st] + " stem"});
+      out.push_back({b + "isolate", "button", "1 press (solo while held), 0 release, none = toggle", std::string("Momentary solo of the ") + kStemNames[st] + " stem"});
+      out.push_back({b + "level", "value", "0..1.5 (1 = unity)", std::string("Level of the ") + kStemNames[st] + " stem"});
+    }
+    out.push_back({dk + ".stems.acapella", "trigger", "none", "Vocals only"});
+    out.push_back({dk + ".stems.instrumental", "trigger", "none", "Everything except the vocals"});
+    out.push_back({dk + ".stems.drums_only", "trigger", "none", "Drums only"});
+    out.push_back({dk + ".stems.no_drums", "trigger", "none", "Everything except the drums"});
+    out.push_back({dk + ".stems.reset", "trigger", "none", "All stems on at unity level"});
+    out.push_back({dk + ".stems.enable", "toggle", "0 original mix, 1 stems, none = toggle", "Play the stems or the original mix"});
+    out.push_back({dk + ".stems.detach", "trigger", "none", "Drop the stems of the loaded track"});
+  }
   for (const Def& d : kPreview) out.push_back({std::string("preview.") + d.name, kind_name(d.kind), d.range, d.help});
   for (int slot = 1; slot <= kSamplerSlots; ++slot)
     for (const Def& d : kSampler) out.push_back({"sampler." + std::to_string(slot) + "." + d.name, kind_name(d.kind), d.range, d.help});
@@ -379,6 +493,7 @@ std::vector<ControlInfo> list_controls() {
 
 bool build_control(const IEngine& engine, std::string_view name, bool has_value, double value, std::vector<Command>& out,
                    std::string& error) {
+  if (is_stem_control(name)) return build_stem_control(name, has_value, value, out, error);
   if (is_chain_control(name)) {
     error = "effect chain edits are applied at once and cannot be scheduled";
     return false;
@@ -538,6 +653,7 @@ bool apply_control(IEngine& engine, std::string_view name, bool has_value, doubl
 }
 
 bool read_control(const IEngine& engine, std::string_view name, double& value) {
+  if (is_stem_control(name)) return read_stem_control(engine, name, value);
   if (is_chain_control(name)) {
     const auto at = name.find(".chain.");
     int target = 0;

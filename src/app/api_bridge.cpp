@@ -425,6 +425,32 @@ struct ApiBridge::Impl {
   Impl(ApiHost& h, const std::string& dir) : host(h), data_dir(dir), lib(dir + "/library.db"), tokens(dir + "/api-tokens.json") {}
 
   // ---- JSON views --------------------------------------------------------------------
+  // Stems of a deck: availability (cache and engine), whether they play, per-stem mute / solo / isolate / level / meter.
+  Json stems_json(int index) {
+    const DeckView v = host.api_engine().deck(index);
+    static const char* const names[kStemCount] = {"vocals", "drums", "bass", "other"};
+    Json j = Json::object();
+    const char* state = v.stems_state == 2 ? "attached" : v.stems_state == 1 ? "loading" : v.stems_state == 3 ? "failed" : "none";
+    j.set("state", state);
+    j.set("attached", v.stems_state == 2);
+    j.set("active", v.stems_state == 2 && v.stems_on != 0);
+    j.set("mix", static_cast<double>(v.stems_mix));
+    if (StemService* st = host.api_stems(); st && v.loaded && v.track_id != 0) j.set("cached", !st->stems_file(v.track_id).empty());
+    Json arr = Json::object();
+    for (int k = 0; k < kStemCount; ++k) {
+      Json e = Json::object();
+      e.set("mute", (v.stem_mute >> k & 1u) != 0);
+      e.set("solo", (v.stem_solo >> k & 1u) != 0);
+      e.set("isolate", (v.stem_isolate >> k & 1u) != 0);
+      e.set("level", static_cast<double>(v.stem_level[k]));
+      e.set("meter", static_cast<double>(v.stem_meter[k]));
+      e.set("fx", (v.stem_fx >> k & 1u) != 0);
+      arr.set(names[k], std::move(e));
+    }
+    j.set("stems", std::move(arr));
+    return j;
+  }
+
   Json deck_json(int index) {
     const DeckView v = host.api_engine().deck(index);
     Json j = Json::object();
@@ -455,6 +481,7 @@ struct ApiBridge::Impl {
     j.set("slip", v.slip);
     j.set("reverse", v.reverse);
     j.set("auto_gain_db", static_cast<double>(v.auto_gain_db));
+    j.set("stems", stems_json(index));
     Json fx = Json::array();
     for (int f = 0; f < kFxSlots; ++f) {
       Json e = Json::object();
@@ -1779,6 +1806,42 @@ struct ApiBridge::Impl {
       Response ok = Response::ok();
       ok.status = 202;
       return ok;
+    });
+    s.add_route("GET", "/v1/decks/{deck}/stems", "read", [this](const Request& r) {
+      std::int64_t deck = 0;
+      if (!int_param(r, "deck", deck) || deck < 1 || deck > kMaxDecks) return Response::error(404, "no such deck");
+      return Response::ok(stems_json(static_cast<int>(deck - 1)));
+    });
+    // Body (every key optional): {"preset": "acapella|instrumental|drums_only|no_drums|reset", "enabled": true,
+    //   "attach": true, "detach": true, "stems": {"vocals": {"mute": true, "solo": false, "isolate": false, "level": 0.8}}}
+    s.add_route("POST", "/v1/decks/{deck}/stems", "control:deck:{deck}", [this](const Request& r) {
+      std::int64_t deck = 0;
+      if (!int_param(r, "deck", deck) || deck < 1 || deck > kMaxDecks) return Response::error(404, "no such deck");
+      const int di = static_cast<int>(deck - 1);
+      const std::string dn = "deck" + std::to_string(deck);
+      IEngine& eng = host.api_engine();
+      std::string error;
+      const auto set = [&](const std::string& name, double v) { return apply_control(eng, name, true, v, error); };
+      if (r.body["attach"].is_bool() && r.body["attach"].as_bool()) {
+        const DeckView v = eng.deck(di);
+        StemService* st = host.api_stems();
+        const std::string file = st && v.loaded ? st->stems_file(v.track_id) : std::string();
+        if (file.empty()) return Response::error(409, "this track has no stems yet; separate it first (POST /v1/stems/tracks/{id})");
+        if (!eng.stems_attach(di, v.track_id, file, error)) return Response::error(409, error);
+      }
+      if (r.body["detach"].is_bool() && r.body["detach"].as_bool() && !set(dn + ".stems.detach", 1)) return Response::error(400, error);
+      if (r.body["preset"].is_string() && !set(dn + ".stems." + r.body["preset"].as_string(), 1)) return Response::error(400, error);
+      if (r.body["enabled"].is_bool() && !set(dn + ".stems.enable", r.body["enabled"].as_bool() ? 1 : 0)) return Response::error(400, error);
+      if (r.body["stems"].is_object()) {
+        for (const char* name : {"vocals", "drums", "bass", "other"}) {
+          const Json& e = r.body["stems"][name];
+          if (!e.is_object()) continue;
+          for (const char* f : {"mute", "solo", "isolate"})
+            if (e[f].is_bool() && !set(dn + ".stem." + name + "." + f, e[f].as_bool() ? 1 : 0)) return Response::error(400, error);
+          if (e["level"].is_number() && !set(dn + ".stem." + name + ".level", e["level"].as_double())) return Response::error(400, error);
+        }
+      }
+      return Response::ok(stems_json(di));
     });
     // Every deck control: POST /v1/decks/1/play, /v1/decks/2/hotcue.3, /v1/decks/1/seek {"value": 62.5}
     s.add_route("POST", "/v1/decks/{deck}/{control}", "control:deck:{deck}", [this](const Request& r) {

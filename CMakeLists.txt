@@ -310,6 +310,12 @@ foreach(t ${test_srcs})
     dh_broadcast dh_sync dh_platform)
   add_test(NAME ${n} COMMAND ${n} WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endforeach()
+# The stem playback test writes real stem cache files, so it also links the stem module (and wants the engine process built first).
+if(TARGET test_engine_stems)
+  target_link_libraries(test_engine_stems dh_stems)
+  target_include_directories(test_engine_stems PRIVATE src/audio)
+  add_dependencies(test_engine_stems deckhand-engine)
+endif()
 # The keymap test checks the shipped shortcuts against the application's control table, which lives in dh_app.
 if(TARGET test_keymap)
   target_link_libraries(test_keymap dh_app)

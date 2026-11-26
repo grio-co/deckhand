@@ -19,6 +19,8 @@ constexpr int kHotCues = 8;
 constexpr int kFxSlots = 3;       // assignable effect slots per channel and on the master bus
 constexpr int kSamplerSlots = 16;
 constexpr int kFxMaster = 4;      // `deck` value that addresses the master effect bus in Fx commands
+constexpr int kStemCount = 4;     // stems per deck, in the stem cache's order: vocals, drums, bass, other
+struct StemSet;                   // four-stem audio of a loaded track (engine-internal)
 
 struct GridSection {
   double first_beat_frame = 0;
@@ -143,8 +145,19 @@ enum class Op : std::uint8_t {
   FxChainSwap,     // deck = chain target, Command::chain = prepared chain state (built by fx_chain_edit)
   FxUnitSet,       // deck = chain target, i = (FxField << 16) | unit id, f / d = value
   FxChainSet,      // deck = chain target, i = 0 bypass (f > 0.5) / 1 chain wet (f 0..1)
+  // ---- stem playback (protocol 6) ----
+  StemParam,       // deck, i = (stem 0..3) << 8 | StemField, f = value (booleans: 1 / 0, f < 0 toggles; Level: 0..1.5)
+  StemEnable,      // deck, i = 1 play the stems, 0 play the original mix, -1 toggle (needs stems attached)
+  StemPreset,      // deck, i = StemPresetId
+  StemDetach,      // deck: drop the stems of the loaded track (a click-free crossfade back to the original)
+  StemAttach,      // internal pointer command (Command::stems, built by IEngine::stems_attach)
   Count,           // number of ops; not a command
 };
+
+enum class StemField : std::uint8_t { Mute = 0, Solo, Isolate, Level, Count };
+enum class StemPresetId : std::int32_t { Reset = 0, Acapella, Instrumental, DrumsOnly, NoDrums, Count };
+constexpr double kStemRampSeconds = 0.010;  // a full-scale gain change takes this long (mutes never click)
+constexpr float kStemMaxLevel = 1.5f;
 
 enum class ColorFx : std::uint8_t { Filter = 0, Noise, DubEcho, Crush, Pitch, Space, Count };
 
@@ -285,6 +298,7 @@ struct Command {
   LoadedTrack* track = nullptr;
   LoadedSample* sample = nullptr;
   FxChainState* chain = nullptr;  // Op::FxChainSwap only (internal)
+  StemSet* stems = nullptr;       // Op::StemAttach only (internal)
 };
 
 // ScheduledFired: `sched_id` fired at engine clock frame `clock_frame` (the first output sample the command
@@ -377,6 +391,15 @@ struct DeckView {
   double hot_cue_end[kHotCues] = {-1, -1, -1, -1, -1, -1, -1, -1};  // hot loop ends, -1 = plain cue
   std::uint32_t meta_rev = 0;   // counts grid / memory-cue replacements of the loaded track
   std::uint32_t metronome = 0;  // 1 = the deck's click is on
+  // appended (protocol 6): stems
+  std::uint32_t stems_state = 0;  // 0 none, 1 loading, 2 attached, 3 the last attach failed
+  std::uint32_t stems_on = 0;     // 1 = the deck plays the stems (target of the blend), 0 = the original mix
+  std::uint32_t stem_mute = 0, stem_solo = 0, stem_isolate = 0;  // bit s = stem s
+  std::uint32_t stem_fx = 0;      // bit s = stem s runs through its own effect chain
+  float stem_level[kStemCount] = {1, 1, 1, 1};  // 0..1.5
+  float stem_meter[kStemCount] = {0, 0, 0, 0};  // post-gain peak, 0..1
+  float stems_mix = 0;            // current blend, 0 = original .. 1 = stems
+  std::int64_t stems_track_id = 0;
 };
 
 // The pre-listen player (IEngine::preview()).
@@ -530,6 +553,21 @@ class IEngine {
     (void)target;
     return FxChainInfo{};
   }
+  // ---- stem playback (protocol 6) ----
+  // Starts loading the stems of the track on `deck` from a stem cache file (.dhstems) in the background and attaches
+  // them when ready (the deck blends from the mix to the stems without a click and keeps its position). Returns false
+  // for an empty deck or a bad request; a later failure shows as DeckView::stems_state == 3. `track_id` 0 = whatever is
+  // loaded. A deck that gets another track meanwhile drops the result.
+  virtual bool stems_attach(int deck, std::int64_t track_id, const std::string& path, std::string& error) {
+    (void)deck; (void)track_id; (void)path;
+    error = "stems are not supported by this engine";
+    return false;
+  }
+  void stems_detach(int deck);
+  void stem_set(int deck, int stem, StemField field, double value);  // value < 0 on a boolean field toggles it
+  void stem_preset(int deck, StemPresetId p);
+  void stems_enable(int deck, int on);  // 1 / 0 / -1 toggle
+
   // Convenience wrappers over fx_chain_edit.
   int fx_insert(int target, EffectKind kind, int pos = -1, bool on = false);  // unit id, 0 on failure
   bool fx_remove(int target, int id);
@@ -619,6 +657,9 @@ class Engine final : public IEngine {
   void collect_garbage() override;
   bool fx_chain_edit(const FxChainEdit& edit, FxChainResult& result) override;
   FxChainInfo fx_chain(int target) const override;
+  bool stems_attach(int deck, std::int64_t track_id, const std::string& path, std::string& error) override;
+  // Tests: hands already loaded stems to the deck (blocks until the audio thread could take them is not needed).
+  bool stems_attach_set(int deck, std::unique_ptr<StemSet> set);
 
   // Offline rendering without a device (tests, tools). Interleaved float output.
   void configure_offline(std::uint32_t sample_rate, int channels);

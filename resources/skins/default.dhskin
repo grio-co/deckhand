@@ -196,6 +196,12 @@ template deck n color {
           use tog bind="deck[${n}].reverse" label="@deck.reverse" on=accent
           use tog bind="deck[${n}].grid.edit" label="@deck.grid_edit" on=warn
         }
+        row h=22 gap=3 show="deck[${n}].stems.available" {
+          use tog bind="deck[${n}].stem.vocals.active" label="@deck.stem_vocals" on=good
+          use tog bind="deck[${n}].stem.drums.active" label="@deck.stem_drums" on=good
+          use tog bind="deck[${n}].stem.bass.active" label="@deck.stem_bass" on=good
+          use tog bind="deck[${n}].stem.other.active" label="@deck.stem_other" on=good
+        }
         row h=22 gap=3 {
           use tog bind="deck[${n}].key_shift.minus" label="@deck.key_down" on=accent
           label bind="deck[${n}].key_shift" font=small color=text text_align=center
@@ -274,6 +280,12 @@ template deck_small n color {
           use tog bind="deck[${n}].slip" label="@deck.slip" on=accent
           use tog bind="deck[${n}].reverse" label="@deck.reverse" on=accent
           use tog bind="deck[${n}].grid.edit" label="@deck.grid_edit" on=warn
+        }
+        row h=22 gap=3 show="deck[${n}].stems.available" {
+          use tog bind="deck[${n}].stem.vocals.active" label="@deck.stem_vocals" on=good
+          use tog bind="deck[${n}].stem.drums.active" label="@deck.stem_drums" on=good
+          use tog bind="deck[${n}].stem.bass.active" label="@deck.stem_bass" on=good
+          use tog bind="deck[${n}].stem.other.active" label="@deck.stem_other" on=good
         }
         label bind="deck[${n}].time" font=small color=text text_align=right
       }

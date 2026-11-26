@@ -207,6 +207,8 @@ bool StemService::ensure_queue(std::string& error, std::unique_ptr<stems::StemQu
 void StemService::job_changed(const stems::JobInfo& j) {
   if (j.state == stems::JobState::Done || j.state == stems::JobState::AlreadyCached) {
     bool save = false;
+    std::int64_t ready_track = 0;
+    std::function<void(std::int64_t)> ready;
     {
       std::lock_guard<std::mutex> lock(mu_);
       const auto it = job_track_.find(j.id);
@@ -214,9 +216,12 @@ void StemService::job_changed(const stems::JobInfo& j) {
         track_key_[it->second] = j.key;
         track_model_[it->second] = queue_model_;
         save = true;
+        ready_track = it->second;
+        ready = ready_;
       }
     }
     if (save) save_index();
+    if (ready && ready_track != 0) ready(ready_track);
   }
   emit("stems.job", std::to_string(j.id), stems::job_state_name(j.state), j.progress, j.error);
 }
@@ -306,6 +311,18 @@ StemStatus StemService::status() {
 }
 
 // ---- per-track ----------------------------------------------------------------------------------------------------------
+
+std::string StemService::stems_file(std::int64_t id) {
+  std::lock_guard<std::mutex> lock(mu_);
+  const auto k = track_key_.find(id);
+  if (k == track_key_.end() || !cache_.has_stems(k->second)) return {};
+  return cache_.path_for(k->second).string();
+}
+
+void StemService::set_ready_sink(std::function<void(std::int64_t)> fn) {
+  std::lock_guard<std::mutex> lock(mu_);
+  ready_ = std::move(fn);
+}
 
 StemTrackInfo StemService::track(std::int64_t id) {
   StemTrackInfo t;

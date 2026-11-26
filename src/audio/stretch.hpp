@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "stemset.hpp"
+
 namespace deckhand {
 
 class Stretcher {
@@ -16,12 +18,11 @@ class Stretcher {
   // advances per output frame, `ratio` source-rate / output-rate and `pitch` the resampling factor applied
   // after stretching (1 = none; 2^(semitones/12) for key shift). The grain centre is aligned to `pos`, so the
   // reported position needs no latency correction.
-  void next(const float* pcm, std::int64_t frames, double ratio, double pos, double v, double pitch, float& l,
-            float& r);
+  void next(const Source& src, double ratio, double pos, double v, double pitch, float& l, float& r);
 
  private:
-  void produce(const float* pcm, std::int64_t frames, double ratio, double pos_w, double adv);
-  int search(const float* pcm, std::int64_t frames, double ratio, double a);
+  void produce(const Source& src, double ratio, double pos_w, double adv);
+  int search(const Source& src, double ratio, double a);
 
   int n_ = 0, hs_ = 0, range_ = 0;
   std::int64_t mask_ = 0;

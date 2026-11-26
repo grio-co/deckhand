@@ -6,6 +6,12 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Stem playback: a deck whose track has cached stems plays the four stems in sample lock; mute,
+  solo, hold-to-isolate and level per stem with click-free ramps, acapella / instrumental /
+  drums-only presets, and an effect chain per stem. With all stems at unity the output is
+  bit-identical to normal playback. Stems attach automatically on load, or live when a
+  separation finishes. Stem buttons in the default skin, shortcuts, REST routes. Engine
+  protocol 6. Nobody has listened to it yet.
 - Automix and play queue: add to end or "play next", reorder, endless fill from a playlist; per-track
   mix-in/mix-out points, transition length and type, maximum play time; crossfade with bass swap,
   cut, fade and echo-out, started on a bar line with the incoming beat aligned (0.3 samples in the

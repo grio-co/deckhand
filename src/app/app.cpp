@@ -117,6 +117,12 @@ App::App(const dh_platform& platform, const dh_config& config)
       if (engine_->deck(i).playing) return true;
     return false;
   });
+  stems_->set_ready_sink([this](std::int64_t track_id) {
+    Job j;
+    j.kind = Job::StemsReady;
+    j.track_id = track_id;
+    post(j);
+  });
   api_ = std::make_unique<ApiBridge>(*this, data_dir_);
   stream_ = std::make_unique<StreamBridge>(*engine_, data_dir_, [this](int deck, TrackRow& row) {
     std::lock_guard<std::mutex> lock(state_mutex_);
@@ -530,6 +536,12 @@ void App::run_job(Library& lib, const Job& j) {
   switch (j.kind) {
     case Job::Load: load_track(lib, j.deck, j.track_id); break;
     case Job::Reattach: load_track(lib, j.deck, j.track_id, true); break;
+    case Job::StemsReady:  // a separation finished: a deck that holds this track and has no stems yet gets them live
+      for (int d = 0; d < kMaxDecks; ++d) {
+        const DeckView v = engine_->deck(d);
+        if (v.loaded && v.track_id == j.track_id && v.stems_state == 0) attach_stems(lib, d, j.track_id);
+      }
+      break;
     case Job::AddFile: {
       FileTags tags;
       read_file_tags(j.path, tags);
@@ -887,6 +899,7 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
     g.f = static_cast<float>(std::clamp(gain.value_or(0.0), -12.0, 12.0));
     engine_->send(g);
   }
+  attach_stems(lib, deck, track_id);
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     decks_[deck] = std::move(info);
@@ -895,6 +908,14 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
   }
   DH_LOG(Info, "deck %d loaded: %s - %s (%.1f s, %u Hz)", deck + 1, row->artist.c_str(), row->title.c_str(),
          static_cast<double>(audio->frames) / sr, audio->sample_rate);
+}
+
+void App::attach_stems(Library& lib, int deck, std::int64_t track_id) {
+  if (!stems_ || lib.setting("stems.auto_attach", "1") == "0") return;
+  const std::string file = stems_->stems_file(track_id);
+  if (file.empty()) return;
+  std::string error;
+  if (!engine_->stems_attach(deck, track_id, file, error)) DH_LOG(Warn, "deck %d: stems not attached: %s", deck + 1, error.c_str());
 }
 
 // Starts or stops recording the master output. Safe from any thread.

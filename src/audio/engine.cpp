@@ -6,6 +6,8 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <unordered_set>
 
@@ -19,6 +21,7 @@
 #include "miniaudio.h"
 #include "mic.hpp"
 #include "recorder.hpp"
+#include "stemset.hpp"
 #include "stretch.hpp"
 
 #if defined(__APPLE__)
@@ -245,6 +248,19 @@ struct Deck {
   bool kl_hot = false;        // key lock engaged (hysteresis)
   Stretcher st;
 
+  // stems: the four-stem audio of the loaded track and the per-stem mixer state
+  StemSet* stems = nullptr;   // owned by the audio thread; retired through Impl::stem_garbage
+  bool stems_on = true;       // play the stems (blend target)
+  bool stems_drop = false;    // detach once the blend is back at the original mix
+  bool st_mute[kStems] = {}, st_solo[kStems] = {}, st_iso[kStems] = {};
+  float st_level[kStems] = {1, 1, 1, 1};
+  float st_g[kStems] = {};    // gain actually applied (ramped)
+  float st_sep[kStems] = {};  // 0..1: share of the stem that runs through its own stretcher and effect chain
+  float st_wmix = 0;          // 0 = original mix .. 1 = stems
+  float st_meter[kStems] = {};
+  bool stk_live[kStems] = {};
+  Stretcher stk[kStems];      // one per stem for the stems that have an effect chain running
+
   Deck() {
     for (int i = 0; i < kHotCues; ++i) hot[i] = hot_end[i] = -1;
   }
@@ -294,6 +310,20 @@ struct Engine::Impl {
   std::mutex send_mutex;
   SpscRing<EngineEvent, 2048> events;
   SpscRing<LoadedTrack*, 64> garbage;
+  SpscRing<StemSet*, 32> stem_garbage;
+  std::atomic<int> stem_state[kMaxDecks] = {};  // 0 none, 1 loading, 3 failed (2 = attached is read from the deck)
+  float sbuf[kStems][kChunk * 2];               // stems that run through their own chain, this chunk
+  bool sbuf_on[kStems] = {};
+  struct StemJob {
+    int deck = 0;
+    std::int64_t track_id = 0;
+    std::string path;
+  };
+  std::mutex stem_mx;
+  std::condition_variable stem_cv;
+  std::deque<StemJob> stem_jobs;
+  std::thread stem_thread;
+  bool stem_quit = false;
 
   Deck decks[kMaxDecks];
   float crossfader = 0.5f, head_mix = 0.5f, head_level = 0.8f, master_level = 0.8f;
@@ -418,10 +448,12 @@ struct Engine::Impl {
   }
 
   void prepare_audio() {
-    for (Deck& d : decks) d.st.prepare(sr);
+    for (Deck& d : decks) {
+      d.st.prepare(sr);
+      for (Stretcher& k : d.stk) k.prepare(sr);
+    }
     for (FxBus& b : fxb) b.prepare(sr);
     for (int t = 0; t < kFxTargetCount; ++t) {
-      chains[t].immediate = t >= kFxTargetStemBase;
       std::vector<FxUnit*> units;
       std::vector<FxChainState*> states;
       chains[t].collect(units, states);
@@ -581,6 +613,100 @@ struct Engine::Impl {
     d.preview_slot = -1;
   }
 
+  // ---- stems (audio thread) ----
+  void stems_reset(Deck& d, int di) {
+    if (d.stems) stem_garbage.push(d.stems);
+    d.stems = nullptr;
+    d.stems_on = true;
+    d.stems_drop = false;
+    d.st_wmix = 0;
+    for (int s = 0; s < kStems; ++s) {
+      d.st_mute[s] = d.st_solo[s] = d.st_iso[s] = false;
+      d.st_level[s] = 1;
+      d.st_g[s] = 1;
+      d.st_sep[s] = 0;
+      d.st_meter[s] = 0;
+      d.stk_live[s] = false;
+    }
+    stem_state[di].store(0, std::memory_order_relaxed);
+  }
+  static void stem_targets(const Deck& d, float* tg) {
+    bool any = false;
+    for (int s = 0; s < kStems; ++s) any = any || d.st_solo[s] || d.st_iso[s];
+    for (int s = 0; s < kStems; ++s) tg[s] = (any ? (d.st_solo[s] || d.st_iso[s]) : !d.st_mute[s]) ? d.st_level[s] : 0.0f;
+  }
+  static bool stem_flag(bool cur, float f) { return f < 0 ? !cur : f > 0.5f; }
+  void apply_stem(const Command& c) {
+    if (c.deck >= kMaxDecks) {
+      if (c.op == Op::StemAttach && c.stems) stem_garbage.push(c.stems);
+      return;
+    }
+    Deck& d = decks[c.deck];
+    switch (c.op) {
+      case Op::StemParam: {
+        const int s = (c.i >> 8) & 0xFF, field = c.i & 0xFF;
+        if (s >= kStems) return;
+        switch (static_cast<StemField>(field)) {
+          case StemField::Mute: d.st_mute[s] = stem_flag(d.st_mute[s], c.f); break;
+          case StemField::Solo: d.st_solo[s] = stem_flag(d.st_solo[s], c.f); break;
+          case StemField::Isolate: d.st_iso[s] = stem_flag(d.st_iso[s], c.f); break;
+          case StemField::Level: d.st_level[s] = std::clamp(c.f, 0.0f, kStemMaxLevel); break;
+          default: break;
+        }
+        return;
+      }
+      case Op::StemEnable:
+        if (!d.stems) return;
+        d.stems_on = c.i < 0 ? !d.stems_on : c.i != 0;
+        d.stems_drop = false;
+        return;
+      case Op::StemPreset: {
+        for (int s = 0; s < kStems; ++s) d.st_solo[s] = d.st_iso[s] = d.st_mute[s] = false;
+        switch (static_cast<StemPresetId>(c.i)) {
+          case StemPresetId::Reset: for (float& l : d.st_level) l = 1; break;
+          case StemPresetId::Acapella: d.st_solo[0] = true; break;
+          case StemPresetId::Instrumental: d.st_mute[0] = true; break;
+          case StemPresetId::DrumsOnly: d.st_solo[1] = true; break;
+          case StemPresetId::NoDrums: d.st_mute[1] = true; break;
+          default: break;
+        }
+        return;
+      }
+      case Op::StemDetach:
+        if (d.stems) {
+          d.stems_on = false;
+          d.stems_drop = true;
+        }
+        stem_state[c.deck].store(0, std::memory_order_relaxed);
+        return;
+      case Op::StemAttach: {
+        StemSet* ns = c.stems;
+        if (!ns) return;
+        const bool ok = d.trk && (ns->track_id == 0 || d.trk->track_id == ns->track_id) &&
+                        static_cast<std::uint32_t>(ns->rate) == d.trk->audio->sample_rate &&
+                        std::llabs(ns->frames - static_cast<std::int64_t>(d.trk->audio->frames)) <= 2048;
+        if (!ok) {
+          stem_garbage.push(ns);
+          return;
+        }
+        if (d.stems) stem_garbage.push(d.stems);
+        d.stems = ns;
+        d.stems_on = true;
+        d.stems_drop = false;
+        d.st_wmix = 0;
+        float tg[kStems];
+        stem_targets(d, tg);
+        for (int s = 0; s < kStems; ++s) {
+          d.st_g[s] = tg[s];
+          d.st_sep[s] = 0;
+          d.stk_live[s] = false;
+        }
+        return;
+      }
+      default: return;
+    }
+  }
+
   void apply_core(const Command& c) {
     if (c.op == Op::Crossfader) { crossfader = std::clamp(c.f, 0.0f, 1.0f); return; }
     if (c.op == Op::HeadMix) { head_mix = std::clamp(c.f, 0.0f, 1.0f); return; }
@@ -597,6 +723,7 @@ struct Engine::Impl {
     switch (c.op) {
       case Op::Load: {
         if (d.trk) garbage.push(d.trk);  // freed later, off the audio thread
+        stems_reset(d, di);
         d.trk = c.track;
         d.playing = d.preview = d.touching = d.loop_active = false;
         d.loop_in = d.loop_out = -1;
@@ -639,6 +766,7 @@ struct Engine::Impl {
     switch (c.op) {
       case Op::Eject:
         garbage.push(d.trk);
+        stems_reset(d, di);
         d.trk = nullptr;
         d.playing = d.preview = d.loop_active = false;
         break;
@@ -1034,6 +1162,9 @@ struct Engine::Impl {
         ++d.meta_rev;
         return true;
       }
+      case Op::StemParam: case Op::StemEnable: case Op::StemPreset: case Op::StemDetach: case Op::StemAttach:
+        apply_stem(c);
+        return true;
       case Op::SchedInsert: sched_accept(c.i); return true;
       case Op::SchedCancel: sched_cancel(static_cast<std::uint64_t>(c.d)); return true;
       case Op::SchedCancelAll: sched_cancel_all(); return true;
@@ -1382,14 +1513,20 @@ struct Engine::Impl {
       d.st_live = false;
       d.xf_left = 0;
       std::memset(buf, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
+      if (d.stems) stems_idle(d, di, n);
       return;
     }
 
     // A jump of the play position (command, loop, slip return): crossfade from where we would have been.
+    const auto flush_all = [&] {
+      if (d.st_live) d.st.flush();
+      for (int k = 0; k < kStems; ++k)
+        if (d.stk_live[k]) d.stk[k].flush();
+    };
     if (d.pos != d.pos_prev && steady && d.amp > 0.01f) {
       d.xf_pos = d.pos_prev;
       d.xf_left = 128;
-      if (d.st_live) d.st.flush();
+      flush_all();
     }
     if (d.slip_on) d.slip_pos = std::min(d.slip_pos + d.tempo_mult * ratio * n, static_cast<double>(total));
 
@@ -1401,6 +1538,42 @@ struct Engine::Impl {
     d.kl_hot = want;
     const float w_target = want ? 1.0f : 0.0f;
     const float w_step = 1.0f / 256.0f;
+
+    // Stems: this block's gain ramps. Everything below reads through `src` (the plain PCM, or the stem sum blended in).
+    Source src;
+    src.pcm = a.data();
+    src.frames = total;
+    float sg0[kStems] = {}, sg1[kStems] = {}, sp0[kStems] = {}, sp1[kStems] = {};
+    float sw0 = 0, sw1 = 0;
+    bool stem_blk = false, any_sep = false;
+    bool sep_k[kStems] = {};
+    const double pos_b0 = d.pos;
+    if (d.stems) {
+      stem_blk = d.st_wmix > 0 || (d.stems_on && !d.stems_drop);
+      float tg[kStems];
+      stem_targets(d, tg);
+      const float stepg = static_cast<float>(n / (kStemRampSeconds * sr));
+      for (int k = 0; k < kStems; ++k) {
+        sg0[k] = d.st_g[k];
+        sg1[k] = sg0[k] + std::clamp(tg[k] - sg0[k], -stepg, stepg);
+        d.st_g[k] = sg1[k];
+        const float want = chains[fx_target_stem(di, k)].wants_audio() ? 1.0f : 0.0f;
+        sp0[k] = d.st_sep[k];
+        sp1[k] = sp0[k] + std::clamp(want - sp0[k], -static_cast<float>(n) / 256.0f, static_cast<float>(n) / 256.0f);
+        d.st_sep[k] = sp1[k];
+        sep_k[k] = (sp0[k] > 0 || sp1[k] > 0) && stem_blk;
+        any_sep = any_sep || sep_k[k];
+      }
+      const float wt = (d.stems_on && !d.stems_drop) ? 1.0f : 0.0f;
+      sw0 = d.st_wmix;
+      sw1 = sw0 + std::clamp(wt - sw0, -static_cast<float>(n / (0.020 * sr)), static_cast<float>(n / (0.020 * sr)));
+      d.st_wmix = sw1;
+      src.st = d.stems;
+      for (int k = 0; k < kStems; ++k) sbuf_on[k] = sep_k[k];
+    } else {
+      for (int k = 0; k < kStems; ++k) sbuf_on[k] = false;
+    }
+    const float lsb = d.stems ? d.stems->lsb : 0.0f;
 
     const double slew = 1.0 - std::exp(-1.0 / (0.003 * sr));
     const float amp_slew = static_cast<float>(1.0 - std::exp(-1.0 / (0.004 * sr)));
@@ -1417,29 +1590,60 @@ struct Engine::Impl {
         d.st_live = false;
       }
       metro_step(d, i);
-      float l = 0, r = 0;
-      if (d.kl_w < 1.0f) read_frame(a.data(), total, d.pos, l, r);
-      if (d.xf_left > 0) {
-        if (d.kl_w < 1.0f) {
+      if (stem_blk) {
+        const float t = static_cast<float>(i + 1) / static_cast<float>(n);
+        src.w = sw0 + (sw1 - sw0) * t;
+        for (int k = 0; k < kStems; ++k) src.g[k] = lsb * (sg0[k] + (sg1[k] - sg0[k]) * t) * (1.0f - (sp0[k] + (sp1[k] - sp0[k]) * t));
+      }
+      const auto fetch = [&](const Source& sc, Stretcher& stt, float& l, float& r) {
+        l = r = 0;
+        if (d.kl_w < 1.0f) sc.hermite(d.pos, l, r);
+        if (d.xf_left > 0 && d.kl_w < 1.0f) {
           float ol, orr;
-          read_frame(a.data(), total, d.xf_pos, ol, orr);
+          sc.hermite(d.xf_pos, ol, orr);
           const float t = static_cast<float>(d.xf_left) / 128.0f;
           l = l * (1.0f - t) + ol * t;
           r = r * (1.0f - t) + orr * t;
         }
+        if (d.kl_w > 0.0f) {
+          float sl, sr_;
+          stt.next(sc, ratio, d.pos, std::fabs(d.speed) * ratio, pitch, sl, sr_);
+          if (d.kl_w < 1.0f) {
+            l = l * (1.0f - d.kl_w) + sl * d.kl_w;
+            r = r * (1.0f - d.kl_w) + sr_ * d.kl_w;
+          } else {
+            l = sl;
+            r = sr_;
+          }
+        }
+      };
+      float l, r;
+      fetch(src, d.st, l, r);
+      if (any_sep) {
+        const float t = static_cast<float>(i + 1) / static_cast<float>(n);
+        for (int k = 0; k < kStems; ++k) {
+          if (!sep_k[k]) continue;
+          if (d.kl_w > 0 && !d.stk_live[k]) {
+            d.stk[k].reset();
+            d.stk_live[k] = true;
+          } else if (d.kl_w == 0) {
+            d.stk_live[k] = false;
+          }
+          Source ks;
+          ks.pcm = src.pcm;
+          ks.frames = total;
+          ks.st = d.stems;
+          ks.w = 1.0f;
+          ks.g[k] = lsb * (sg0[k] + (sg1[k] - sg0[k]) * t) * (sp0[k] + (sp1[k] - sp0[k]) * t);
+          float kl_, kr_;
+          fetch(ks, d.stk[k], kl_, kr_);
+          sbuf[k][i * 2] = kl_ * d.amp * src.w;
+          sbuf[k][i * 2 + 1] = kr_ * d.amp * src.w;
+        }
+      }
+      if (d.xf_left > 0) {
         d.xf_pos += d.speed * ratio;
         --d.xf_left;
-      }
-      if (d.kl_w > 0.0f) {
-        float sl, sr_;
-        d.st.next(a.data(), total, ratio, d.pos, std::fabs(d.speed) * ratio, pitch, sl, sr_);
-        if (d.kl_w < 1.0f) {
-          l = l * (1.0f - d.kl_w) + sl * d.kl_w;
-          r = r * (1.0f - d.kl_w) + sr_ * d.kl_w;
-        } else {
-          l = sl;
-          r = sr_;
-        }
       }
       buf[i * 2] = l * d.amp;
       buf[i * 2 + 1] = r * d.amp;
@@ -1448,7 +1652,7 @@ struct Engine::Impl {
         const double len = d.loop_out - d.loop_in;
         d.xf_pos = d.pos;
         d.xf_left = 128;
-        if (d.st_live) d.st.flush();
+        flush_all();
         d.pos = len > 1 ? d.loop_in + std::fmod(d.pos - d.loop_out, len) : d.loop_in;
         if (d.touching) d.scratch_target -= len;
       } else if (d.loop_active && d.speed < 0 && d.pos < d.loop_in) {
@@ -1473,6 +1677,63 @@ struct Engine::Impl {
       }
     }
     d.pos_prev = d.pos;
+    if (d.stems) {
+      if (stem_blk && sw1 > 0) stems_meter(d, pos_b0, n);
+      else stems_idle(d, di, n);
+      if (d.stems_drop && d.st_wmix <= 0) {
+        stem_garbage.push(d.stems);
+        d.stems = nullptr;
+        d.stems_drop = false;
+        d.stems_on = true;
+        for (int k = 0; k < kStems; ++k) d.stk_live[k] = false;
+      }
+    }
+  }
+
+  // Meters: peak of the stem gains applied to a few frames sampled across the block's source range.
+  void stems_meter(Deck& d, double p0, int n) {
+    const StemSet& ss = *d.stems;
+    const double span = d.pos - p0;
+    float pk[kStems] = {};
+    for (int j = 0; j < 16; ++j) {
+      const std::int64_t k = static_cast<std::int64_t>(p0 + span * (j / 15.0));
+      if (k < 0 || k >= ss.frames) continue;
+      for (int s = 0; s < kStems; ++s) {
+        float a, b;
+        if (!ss.s16.empty()) {
+          a = ss.s16[static_cast<std::size_t>(k) * 8 + static_cast<std::size_t>(s) * 2];
+          b = ss.s16[static_cast<std::size_t>(k) * 8 + static_cast<std::size_t>(s) * 2 + 1];
+        } else {
+          a = static_cast<float>(ss.s32[static_cast<std::size_t>(k) * 8 + static_cast<std::size_t>(s) * 2]);
+          b = static_cast<float>(ss.s32[static_cast<std::size_t>(k) * 8 + static_cast<std::size_t>(s) * 2 + 1]);
+        }
+        pk[s] = std::max(pk[s], std::max(std::fabs(a), std::fabs(b)) * ss.lsb * d.st_g[s]);
+      }
+    }
+    const float decay = static_cast<float>(std::exp(-static_cast<double>(n) / (0.3 * sr)));
+    for (int s = 0; s < kStems; ++s) d.st_meter[s] = std::max(pk[s], d.st_meter[s] * decay);
+  }
+  // Nothing is playing (or the stems are blended out): ramps jump to their targets, meters fall.
+  void stems_idle(Deck& d, int di, int n) {
+    (void)di;
+    float tg[kStems];
+    stem_targets(d, tg);
+    const bool silent = d.amp < 1e-4f;
+    const float decay = static_cast<float>(std::exp(-static_cast<double>(n) / (0.3 * sr)));
+    for (int s = 0; s < kStems; ++s) {
+      if (silent) d.st_g[s] = tg[s];
+      d.st_meter[s] *= decay;
+      sbuf_on[s] = false;
+    }
+    if (silent) {
+      d.st_wmix = (d.stems_on && !d.stems_drop) ? 1.0f : 0.0f;
+      if (d.stems_drop && d.st_wmix <= 0) {
+        stem_garbage.push(d.stems);
+        d.stems = nullptr;
+        d.stems_drop = false;
+        d.stems_on = true;
+      }
+    }
   }
 
   // Trim, three-band EQ and the filter knob, in place. Also tracks the pre-fader level.
@@ -1593,6 +1854,16 @@ struct Engine::Impl {
       }
       render_deck(d, di, buf, n);
       const FxCtx cx = make_ctx(d, fxb[di], n);
+      if (d.stems) {
+        for (int k = 0; k < kStems; ++k) {
+          if (!sbuf_on[k]) continue;
+          chains[fx_target_stem(di, k)].run(sbuf[k], n, cx, fx_garbage);
+          for (int i = 0; i < n * 2; ++i) buf[i] += sbuf[k][i];
+          float pk = 0;
+          for (int i = 0; i < n * 2; ++i) pk = std::max(pk, std::fabs(sbuf[k][i]));
+          d.st_meter[k] = std::max(d.st_meter[k], pk);
+        }
+      }
       process_channel(d, di, buf, n, cx);
       chains[di].run(buf, n, cx, fx_garbage);
       const float xf = (di % 2 == 0) ? std::min(1.0f, 2.0f * (1.0f - crossfader)) : std::min(1.0f, 2.0f * crossfader);
@@ -1796,6 +2067,27 @@ struct Engine::Impl {
         v.meta_rev = d.meta_rev;
       }
       v.metronome = d.metro ? 1 : 0;
+      if (d.stems) {
+        v.stems_state = 2;
+        v.stems_on = d.stems_on && !d.stems_drop ? 1 : 0;
+        v.stems_track_id = d.stems->track_id ? d.stems->track_id : v.track_id;
+        v.stems_mix = d.st_wmix;
+        for (int s = 0; s < kStems; ++s) {
+          if (d.st_mute[s]) v.stem_mute |= 1u << s;
+          if (d.st_solo[s]) v.stem_solo |= 1u << s;
+          if (d.st_iso[s]) v.stem_isolate |= 1u << s;
+          if (d.st_sep[s] > 0 || chains[fx_target_stem(di, s)].wants_audio()) v.stem_fx |= 1u << s;
+          v.stem_meter[s] = std::min(1.0f, d.st_meter[s]);
+        }
+      } else {
+        v.stems_state = static_cast<std::uint32_t>(stem_state[di].load(std::memory_order_relaxed));
+        for (int s = 0; s < kStems; ++s) {
+          if (d.st_mute[s]) v.stem_mute |= 1u << s;
+          if (d.st_solo[s]) v.stem_solo |= 1u << s;
+          if (d.st_iso[s]) v.stem_isolate |= 1u << s;
+        }
+      }
+      for (int s = 0; s < kStems; ++s) v.stem_level[s] = d.st_level[s];
       deck_views[di].write(v);
     }
     PreviewView pw;
@@ -2345,6 +2637,12 @@ Engine::Engine() : impl_(std::make_unique<Impl>()) {
 Engine::~Engine() {
   stop();
   close_input();
+  {
+    std::lock_guard<std::mutex> lk(impl_->stem_mx);
+    impl_->stem_quit = true;
+  }
+  impl_->stem_cv.notify_all();
+  if (impl_->stem_thread.joinable()) impl_->stem_thread.join();
   Command c;
   impl_->rec.abort();
   std::unordered_set<FxUnit*> fx_units;
@@ -2352,6 +2650,7 @@ Engine::~Engine() {
   while (impl_->commands.pop(c)) {
     delete c.track;
     delete c.sample;
+    delete c.stems;
     if (c.op == Op::FxChainSwap && c.chain) {
       fx_states.insert(c.chain);
       for (int i = 0; i < c.chain->count; ++i) fx_units.insert(c.chain->unit[i]);
@@ -2375,7 +2674,10 @@ Engine::~Engine() {
   for (FxChainState* st : fx_states) delete st;
   for (auto& sl : impl_->sampler_slots) delete sl.s;
   { LoadedSample* ls = nullptr; while (impl_->sample_garbage.pop(ls)) delete ls; }
-  for (Deck& d : impl_->decks) delete d.trk;
+  for (Deck& d : impl_->decks) {
+    delete d.trk;
+    delete d.stems;
+  }
   collect_garbage();
 }
 
@@ -2521,7 +2823,72 @@ void Engine::send(const Command& c) {
     DH_LOG(Warn, "engine command queue full; dropped a command");
     delete c.track;
     delete c.sample;
+    delete c.stems;
   }
+}
+
+bool Engine::stems_attach_set(int deck, std::unique_ptr<StemSet> set) {
+  if (deck < 0 || deck >= kMaxDecks || !set) return false;
+  Command c;
+  c.op = Op::StemAttach;
+  c.deck = static_cast<std::uint8_t>(deck);
+  c.stems = set.release();
+  send(c);
+  return true;
+}
+
+bool Engine::stems_attach(int deck, std::int64_t track_id, const std::string& path, std::string& error) {
+  Impl& s = *impl_;
+  if (deck < 0 || deck >= kMaxDecks || path.empty() || path.size() > 1024) {
+    error = "bad request";
+    return false;
+  }
+  s.stem_state[deck].store(1, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lk(s.stem_mx);
+    s.stem_jobs.push_back(Impl::StemJob{deck, track_id, path});
+    if (!s.stem_thread.joinable()) {
+      s.stem_thread = std::thread([this] {
+        Impl& im = *impl_;
+        for (;;) {
+          Impl::StemJob job;
+          {
+            std::unique_lock<std::mutex> lk(im.stem_mx);
+            im.stem_cv.wait(lk, [&] { return im.stem_quit || !im.stem_jobs.empty(); });
+            if (im.stem_quit) return;
+            job = std::move(im.stem_jobs.front());
+            im.stem_jobs.pop_front();
+          }
+          auto set = std::make_unique<StemSet>();
+          std::string err;
+          if (!stemset_load_file(job.path, *set, err)) {
+            DH_LOG(Warn, "stems: %s (%s)", err.c_str(), job.path.c_str());
+            int expect = 1;
+            im.stem_state[job.deck].compare_exchange_strong(expect, 3);
+            continue;
+          }
+          set->track_id = job.track_id;
+          // The track may still be on its way (load and attach race): wait until the deck shows it, at most a few seconds.
+          for (int k = 0; k < 300 && job.track_id != 0; ++k) {
+            {
+              std::lock_guard<std::mutex> lk(im.stem_mx);
+              if (im.stem_quit) return;
+            }
+            const DeckView dv = im.deck_views[job.deck].read();
+            if (dv.loaded && dv.track_id == job.track_id) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          }
+          Command c;
+          c.op = Op::StemAttach;
+          c.deck = static_cast<std::uint8_t>(job.deck);
+          c.stems = set.release();
+          send(c);
+        }
+      });
+    }
+  }
+  s.stem_cv.notify_one();
+  return true;
 }
 
 void Engine::load(int deck, std::unique_ptr<LoadedTrack> track) {
@@ -2691,6 +3058,8 @@ void Engine::collect_garbage() {
   while (impl_->garbage.pop(t)) delete t;
   LoadedSample* ls = nullptr;
   while (impl_->sample_garbage.pop(ls)) delete ls;
+  StemSet* sset = nullptr;
+  while (impl_->stem_garbage.pop(sset)) delete sset;
   FxGarbage g;
   while (impl_->fx_garbage.pop(g)) {
     delete g.unit;
@@ -2798,6 +3167,35 @@ FxChainEdit edit_of(FxChainVerb v, int target) {
   return e;
 }
 }  // namespace
+
+void IEngine::stems_detach(int deck) {
+  Command c;
+  c.op = Op::StemDetach;
+  c.deck = static_cast<std::uint8_t>(deck);
+  send(c);
+}
+void IEngine::stem_set(int deck, int stem, StemField field, double value) {
+  Command c;
+  c.op = Op::StemParam;
+  c.deck = static_cast<std::uint8_t>(deck);
+  c.i = (stem << 8) | static_cast<int>(field);
+  c.f = static_cast<float>(value);
+  send(c);
+}
+void IEngine::stem_preset(int deck, StemPresetId p) {
+  Command c;
+  c.op = Op::StemPreset;
+  c.deck = static_cast<std::uint8_t>(deck);
+  c.i = static_cast<int>(p);
+  send(c);
+}
+void IEngine::stems_enable(int deck, int on) {
+  Command c;
+  c.op = Op::StemEnable;
+  c.deck = static_cast<std::uint8_t>(deck);
+  c.i = on;
+  send(c);
+}
 
 int IEngine::fx_insert(int target, EffectKind kind, int pos, bool on) {
   FxChainEdit e = edit_of(FxChainVerb::Insert, target);

@@ -276,7 +276,7 @@ Scope scope_of(Op op) {
     case Op::SamplerTrigger: case Op::SamplerSync: case Op::SamplerLoop: case Op::SamplerGain:
       return Scope::Slot;
     case Op::Load: case Op::SamplerLoad: case Op::ReplaceMeta: case Op::PreviewLoad: case Op::SchedInsert: case Op::SchedCancel: case Op::SchedCancelAll:
-    case Op::FxChainSwap: case Op::FxUnitSet: case Op::FxChainSet: case Op::Count:
+    case Op::FxChainSwap: case Op::FxUnitSet: case Op::FxChainSet: case Op::StemAttach: case Op::Count:
       return Scope::Reject;
     default:
       return Scope::Deck;
@@ -332,6 +332,16 @@ bool validate_command(const WireCommand& w, Command& out) {
       break;
     case Op::Metronome:
       if (w.i < -1 || w.i > 1) return false;
+      break;
+    case Op::StemParam:
+      if (w.i < 0 || (w.i >> 8) >= kStemCount || (w.i & 0xFF) >= static_cast<int>(StemField::Count) || (w.i >> 16) != 0) return false;
+      if (!finite_in(w.f, -1.001, 1.501)) return false;
+      break;
+    case Op::StemEnable:
+      if (w.i < -1 || w.i > 1) return false;
+      break;
+    case Op::StemPreset:
+      if (w.i < 0 || w.i >= static_cast<int>(StemPresetId::Count)) return false;
       break;
     case Op::MetronomeLevel:
       if (!finite_in(w.f, -0.001, 1.001)) return false;

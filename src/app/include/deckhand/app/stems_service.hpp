@@ -82,6 +82,10 @@ class StemService {
   void pause();   // the user's pause; auto-pause is separate
   void resume();
   StemTrackInfo track(std::int64_t track_id);
+  // Path of the cache file holding the stems of this track ("" when there is none yet): what the engine reads for playback.
+  std::string stems_file(std::int64_t track_id);
+  // Called (from the queue's thread) when a separation of `track_id` finished and its stems are in the cache.
+  void set_ready_sink(std::function<void(std::int64_t track_id)> fn);
   bool evict_track(std::int64_t track_id);  // drops the cached stems of this track; true when something was removed
 
  private:
@@ -104,6 +108,7 @@ class StemService {
   std::map<std::int64_t, std::string> track_key_;        // track id -> cache key (persisted)
   std::map<std::int64_t, std::string> track_model_;
   EventFn sink_;
+  std::function<void(std::int64_t)> ready_;
 
   std::mutex install_mu_;
   StemInstallState install_;

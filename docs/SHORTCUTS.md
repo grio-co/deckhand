@@ -168,6 +168,15 @@ Besides the engine's control table the keymap can call these application actions
 | `Shift+X` | Pitch bend up (nudge forward) | `ui.nudge.1 0.01 (repeat)` |
 | `-` | Zoom the scrolling waveform out | `deck1.wave_zoom_out` |
 | `=` | Zoom the scrolling waveform in | `deck1.wave_zoom_in` |
+| `Mod+Alt+1` | Deck 1: mute / unmute the vocals stem | `deck1.stem.vocals.mute` |
+| `Mod+Alt+2` | Deck 1: mute / unmute the drums stem | `deck1.stem.drums.mute` |
+| `Mod+Alt+3` | Deck 1: mute / unmute the bass stem | `deck1.stem.bass.mute` |
+| `Mod+Alt+4` | Deck 1: mute / unmute the other stem | `deck1.stem.other.mute` |
+| `Mod+Alt+Q` | Deck 1: solo the vocals while held | `deck1.stem.vocals.isolate (hold)` |
+| `Mod+Alt+W` | Deck 1: solo the drums while held | `deck1.stem.drums.isolate (hold)` |
+| `Mod+Alt+E` | Deck 1: vocals only | `deck1.stems.acapella` |
+| `Mod+Alt+R` | Deck 1: everything except the vocals | `deck1.stems.instrumental` |
+| `Mod+Alt+5` | Deck 1: all stems back on | `deck1.stems.reset` |
 
 ### Deck 2
 
@@ -213,6 +222,15 @@ Besides the engine's control table the keymap can call these application actions
 | `Shift+.` | Pitch bend up (nudge forward) | `ui.nudge.2 0.01 (repeat)` |
 | `[` | Zoom the scrolling waveform out | `deck2.wave_zoom_out` |
 | `]` | Zoom the scrolling waveform in | `deck2.wave_zoom_in` |
+| `Mod+Alt+7` | Deck 2: mute / unmute the vocals stem | `deck2.stem.vocals.mute` |
+| `Mod+Alt+8` | Deck 2: mute / unmute the drums stem | `deck2.stem.drums.mute` |
+| `Mod+Alt+9` | Deck 2: mute / unmute the bass stem | `deck2.stem.bass.mute` |
+| `Mod+Alt+0` | Deck 2: mute / unmute the other stem | `deck2.stem.other.mute` |
+| `Mod+Alt+U` | Deck 2: solo the vocals while held | `deck2.stem.vocals.isolate (hold)` |
+| `Mod+Alt+I` | Deck 2: solo the drums while held | `deck2.stem.drums.isolate (hold)` |
+| `Mod+Alt+O` | Deck 2: vocals only | `deck2.stems.acapella` |
+| `Mod+Alt+P` | Deck 2: everything except the vocals | `deck2.stems.instrumental` |
+| `Mod+Alt+6` | Deck 2: all stems back on | `deck2.stems.reset` |
 
 ### Mixer
 

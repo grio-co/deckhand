@@ -204,6 +204,16 @@ planning run. An idle machine will be faster; Windows and Linux use the portable
 - Per-stem mute/solo/volume (and FX sends), applied before the deck's EQ and fader; "all on, unity" must pass the mix through.
   When stems are active the deck can play the stem sum instead of the original file, which is transparent to within 16-bit rounding.
 - IPC (`src/audio` protocol and `src/enginehost`): commands for stem gains/mutes per deck, a "stems ready" state and progress events.
+- **Implemented (engine, protocol 6; Phase 2 playback).** The engine reads the `.dhstems` file itself (the helper process too:
+  `IEngine::stems_attach(deck, track_id, path)`, request `kReqStemsAttach`) on a loader thread and holds it as interleaved int16
+  (16 bytes per frame: 42.3 MB per minute per deck, 84.7 MB for 24-bit files), next to the float PCM of the mix. The deck reads
+  through one `Source` (plain PCM, or the sum of stems x gain, blended): the sum is made before the varispeed read and before the one
+  shared key-lock stretcher, so mutes and levels cost one 4-way mix per sample. A stem whose effect chain (`deckN.stemM.chain`,
+  M 1 to 4 = vocals, drums, bass, other) is running is split out onto its own stretcher and chain (an extra stretch per such stem
+  while key lock is engaged), crossfaded in over 256 samples, and summed back before trim, EQ and fader. Gains ramp in 10 ms,
+  attach and detach blend over 20 ms without moving the playhead. With every stem at unity the output equals normal playback
+  (exactly, in the tests). Controls `deckN.stem.<name>.<mute|solo|isolate|level>`, `deckN.stems.<acapella|instrumental|drums_only|no_drums|reset|enable|detach>`,
+  REST `/v1/decks/{deck}/stems`, setting `stems.auto_attach`. Not done: a stems pad mode on controllers (FLX4 uses all eight pad modes).
 - Library: store the cache key per track, queue separation on load when idle, pause the queue while a deck plays.
 - The RoFormer skeleton and the combination above (the bag runner for `htdemucs_ft` is done).
 

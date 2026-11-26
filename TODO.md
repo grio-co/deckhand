@@ -122,8 +122,9 @@ Gaps in the incumbent that DeckHand should close (owner's list, 2026-11-26)
 - [~] Pre-analysed stems: built-in inference engine (no outside runtime) runs the two Demucs models
       offline, verified numerically against a reference on synthetic audio (nobody has listened yet);
       cache, queue, installer and catalogue exist; no model ships (user installs from the authors'
-      host). Still to do: the RoFormer vocal model, stem playback in the engine, stems on the USB
-      stick
+      host). Stem playback on the decks with per-stem mute/solo/level/effects exists (unheard;
+      42 MB of memory per minute per deck). Still to do: the RoFormer vocal model, a stems pad
+      mode for controllers, stems on the USB stick
 - [~] Fluid beat grid: drifting tempo, live drummers and tempo jumps become as many sections as
       needed (within ~10 ms on synthetic tests); untested on real recordings
 - [x] Cues follow the grid (API; the in-app confirm is still a status line only)

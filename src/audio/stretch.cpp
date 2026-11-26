@@ -11,9 +11,7 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kAttack = 64;  // frames of fade-in for a grain that starts after a jump
 
-inline float mono_at(const float* pcm, std::int64_t frames, std::int64_t i) {
-  return (i < 0 || i >= frames) ? 0.0f : 0.5f * (pcm[i * 2] + pcm[i * 2 + 1]);
-}
+inline float mono_at(const Source& s, std::int64_t i) { return s.mono(i); }
 
 }  // namespace
 
@@ -64,22 +62,22 @@ void Stretcher::flush() {
 
 // Similarity search: the grain start (in output frames, relative to `a`) whose first half best continues
 // the previous grain. Coarse pass on a 4x-decimated mono signal, then a fine pass.
-int Stretcher::search(const float* pcm, std::int64_t frames, double ratio, double a) {
+int Stretcher::search(const Source& src, double ratio, double a) {
   const int stride = 4;
   const int m = hs_ / stride;
   const bool unity = ratio == 1.0;
   const std::int64_t c0i = std::llround(cont_), b0 = std::llround(a) - range_;
   if (unity) {  // contiguous mono window: the search loops below then read plain floats
     const int len = 2 * range_ + hs_ + 8;
-    for (int j = 0; j < len; ++j) seg_[static_cast<std::size_t>(j)] = mono_at(pcm, frames, b0 + j);
+    for (int j = 0; j < len; ++j) seg_[static_cast<std::size_t>(j)] = mono_at(src, b0 + j);
   }
   const auto cand = [&](int d, int k, int step) {
     return unity ? seg_[static_cast<std::size_t>(d + range_ + k * step)]
-                 : mono_at(pcm, frames, static_cast<std::int64_t>(std::llround(a + d * ratio + k * step * ratio)));
+                 : mono_at(src, static_cast<std::int64_t>(std::llround(a + d * ratio + k * step * ratio)));
   };
   const auto targ = [&](int k, int step) {
-    return unity ? mono_at(pcm, frames, c0i + static_cast<std::int64_t>(k) * step)
-                 : mono_at(pcm, frames, static_cast<std::int64_t>(std::llround(cont_ + k * step * ratio)));
+    return unity ? mono_at(src, c0i + static_cast<std::int64_t>(k) * step)
+                 : mono_at(src, static_cast<std::int64_t>(std::llround(cont_ + k * step * ratio)));
   };
   double yy = 0;
   for (int k = 0; k < m; ++k) {
@@ -127,11 +125,11 @@ int Stretcher::search(const float* pcm, std::int64_t frames, double ratio, doubl
 }
 
 // Builds the grain whose first half is added into the ring (w_ .. w_ + hs) and keeps its second half.
-void Stretcher::produce(const float* pcm, std::int64_t frames, double ratio, double pos_w, double adv) {
+void Stretcher::produce(const Source& src, double ratio, double pos_w, double adv) {
   // Centre the grain on where the play position will be half a grain from now.
   const double a = pos_w + (adv - ratio) * hs_;
   int d = 0;
-  if (have_ && !jump_) d = search(pcm, frames, ratio, a);
+  if (have_ && !jump_) d = search(src, ratio, a);
   const double start = a + d * ratio;
   const bool unity = ratio == 1.0;
   const std::int64_t i0 = static_cast<std::int64_t>(std::llround(start));
@@ -140,14 +138,9 @@ void Stretcher::produce(const float* pcm, std::int64_t frames, double ratio, dou
     float xl, xr;
     if (unity) {
       const std::int64_t k = i0 + j;
-      if (k < 0 || k >= frames) {
-        xl = xr = 0;
-      } else {
-        xl = pcm[k * 2];
-        xr = pcm[k * 2 + 1];
-      }
+      src.frame(k, xl, xr);
     } else {
-      hermite_frame(pcm, frames, start + j * ratio, xl, xr);
+      src.hermite(start + j * ratio, xl, xr);
     }
     float wgt = win_[static_cast<std::size_t>(j)];
     if (j < hs_ && jump_) wgt = std::min(1.0f, static_cast<float>(j) / kAttack);
@@ -170,11 +163,10 @@ void Stretcher::produce(const float* pcm, std::int64_t frames, double ratio, dou
   keep_ = 0;
 }
 
-void Stretcher::next(const float* pcm, std::int64_t frames, double ratio, double pos, double v, double pitch,
-                     float& l, float& r) {
+void Stretcher::next(const Source& src, double ratio, double pos, double v, double pitch, float& l, float& r) {
   const double adv = v / pitch;
   while (w_ < static_cast<std::int64_t>(std::floor(rpos_)) + 4)
-    produce(pcm, frames, ratio, pos + adv * (static_cast<double>(w_) - rpos_), adv);
+    produce(src, ratio, pos + adv * (static_cast<double>(w_) - rpos_), adv);
   const std::int64_t i = static_cast<std::int64_t>(std::floor(rpos_));
   const double frac = rpos_ - static_cast<double>(i);
   if (frac == 0.0) {

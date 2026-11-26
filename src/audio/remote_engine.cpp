@@ -493,6 +493,26 @@ void RemoteEngine::share_track(Op op, int deck, std::unique_ptr<LoadedTrack> tra
   }
 }
 
+bool RemoteEngine::stems_attach(int deck, std::int64_t track_id, const std::string& path, std::string& error) {
+  if (deck < 0 || deck >= kMaxDecks || path.empty() || path.size() > 1024) {
+    error = "bad request";
+    return false;
+  }
+  Wr w;
+  w.u8(static_cast<std::uint8_t>(deck));
+  w.i64(track_id);
+  w.str(path);
+  std::vector<std::uint8_t> reply;
+  if (!rpc(kReqStemsAttach, w.bytes(), reply, 4000)) {
+    error = "the engine did not answer";
+    return false;
+  }
+  Rd rd(reply.data(), reply.size());
+  const bool ok = rd.u8() != 0;
+  error = rd.str();
+  return ok && rd.ok();
+}
+
 void RemoteEngine::set_track_meta(int deck, std::int64_t track_id, const TrackMeta& meta) {
   if (deck < 0 || deck >= kMaxDecks || meta.grid.size() > kMaxMetaGrid || meta.memory_cues.size() > kMaxMetaCues) return;
   Wr w;

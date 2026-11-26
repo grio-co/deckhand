@@ -104,6 +104,26 @@ bind shift+period ui.nudge.2 0.01 mode=repeat desc="Pitch bend up (nudge forward
 bind lbracket deck2.wave_zoom_out
 bind rbracket deck2.wave_zoom_in
 
+# ---- stems (decks 1 and 2; the track needs separated stems): Mod+Alt+digit mutes a stem, hold the isolate key to solo it
+bind mod+alt+1 deck1.stem.vocals.mute desc="Deck 1: mute / unmute the vocals stem"
+bind mod+alt+2 deck1.stem.drums.mute desc="Deck 1: mute / unmute the drums stem"
+bind mod+alt+3 deck1.stem.bass.mute desc="Deck 1: mute / unmute the bass stem"
+bind mod+alt+4 deck1.stem.other.mute desc="Deck 1: mute / unmute the other stem"
+bind mod+alt+q deck1.stem.vocals.isolate mode=hold desc="Deck 1: solo the vocals while held"
+bind mod+alt+w deck1.stem.drums.isolate mode=hold desc="Deck 1: solo the drums while held"
+bind mod+alt+e deck1.stems.acapella desc="Deck 1: vocals only"
+bind mod+alt+r deck1.stems.instrumental desc="Deck 1: everything except the vocals"
+bind mod+alt+5 deck1.stems.reset desc="Deck 1: all stems back on"
+bind mod+alt+7 deck2.stem.vocals.mute desc="Deck 2: mute / unmute the vocals stem"
+bind mod+alt+8 deck2.stem.drums.mute desc="Deck 2: mute / unmute the drums stem"
+bind mod+alt+9 deck2.stem.bass.mute desc="Deck 2: mute / unmute the bass stem"
+bind mod+alt+0 deck2.stem.other.mute desc="Deck 2: mute / unmute the other stem"
+bind mod+alt+u deck2.stem.vocals.isolate mode=hold desc="Deck 2: solo the vocals while held"
+bind mod+alt+i deck2.stem.drums.isolate mode=hold desc="Deck 2: solo the drums while held"
+bind mod+alt+o deck2.stems.acapella desc="Deck 2: vocals only"
+bind mod+alt+p deck2.stems.instrumental desc="Deck 2: everything except the vocals"
+bind mod+alt+6 deck2.stems.reset desc="Deck 2: all stems back on"
+
 # ---- deck 3
 bind alt+1 deck3.hotcue.1 mode=hold desc="Hot cue 1: set it, or jump to it while held"
 bind alt+2 deck3.hotcue.2 mode=hold desc="Hot cue 2: set it, or jump to it while held"

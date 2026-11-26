@@ -232,10 +232,12 @@ bool App::read_flag(const ui::Target& t) {
         t.special == ui::Special::SetValue)
       return false;
     double v = 0;
-    return read_control(*engine_, t.name, v) && v != 0;
+    const bool on = read_control(*engine_, t.name, v) && v != 0;
+    return t.invert ? !on : on;
   }
   const std::string& n = t.name;
   if (t.type == ui::Target::Type::Info) {
+    if (n == "stems_available") return deck_ok && views_[d].stems_state == 2;
     if (n == "loaded") return deck_ok && views_[d].loaded;
     if (n == "has_import") return import_available();
     if (n == "multi_language") return i18n_.available().size() > 1;
