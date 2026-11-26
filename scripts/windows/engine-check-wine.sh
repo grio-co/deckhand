@@ -24,9 +24,10 @@ perl -e 'my $r=44100; my $d=""; for my $i (0..$r-1){ my $t=$i/$r; my $beat=($t*2
 FAIL=0
 ok() { echo "PASS $*"; }
 bad() { echo "FAIL $*"; FAIL=1; }
+# the Windows app writes the token file with CRLF line ends: strip them
 TOKEN=
 api() { curl -s -m 4 -H "Authorization: Bearer $TOKEN" "$@"; }
-wait_api() { i=0; while [ $i -lt 200 ]; do [ -f "$DATA/api-admin-token.txt" ] && TOKEN=$(cat "$DATA/api-admin-token.txt") && api http://127.0.0.1:7373/v1/status | grep -q . && return 0; sleep 0.3; i=$((i+1)); done; return 1; }
+wait_api() { i=0; while [ $i -lt 200 ]; do [ -f "$DATA/api-admin-token.txt" ] && TOKEN=$(tr -d '\r\n ' < "$DATA/api-admin-token.txt")  && api http://127.0.0.1:7373/v1/status | grep -q . && return 0; sleep 0.3; i=$((i+1)); done; return 1; }
 pos() { api http://127.0.0.1:7373/v1/decks/1 | sed -n 's/.*"position_seconds":\([0-9.]*\).*/\1/p' | head -1; }
 loaded() { api http://127.0.0.1:7373/v1/decks/1 | grep -q '"loaded":true'; }
 engine_pids() { pgrep -f 'deckhand-engine\.exe' | tr '\n' ' ' | sed 's/ *$//'; }
@@ -77,7 +78,7 @@ i=0; while [ $i -lt 60 ] && pgrep -f '[\\/]deckhand\.exe' >/dev/null; do sleep 0
 pgrep -f '[\\/]deckhand\.exe' >/dev/null && bad "UI did not exit after WM_CLOSE" || ok "UI exited"
 i=0; while [ $i -lt 30 ] && [ -n "$(engine_pids)" ]; do sleep 0.5; i=$((i+1)); done
 [ -z "$(engine_pids)" ] && ok "helper stopped after the quit" || bad "helper still running after the quit"
-PROBE=$(wine64 "$APP/deckhand-engine.exe" --probe --data-dir "$(winepath -w "$DATA")" 2>/dev/null | tr -d '\r')
+PROBE=$(wine64 "$APP/deckhand-engine.exe" --probe --data-dir "Z:$(printf %s "$DATA" | tr / '\\')" 2>/dev/null | tr -d '\r')
 echo "probe: $PROBE"
 echo "$PROBE" | grep -q "engine not running, main segment absent, 0 block segments, socket absent" && ok "no named objects left" || bad "objects left behind"
 

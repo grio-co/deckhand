@@ -5,7 +5,7 @@ shell (`platform/windows/shell/`: window and input, Direct3D 11 renderer, Direct
 (`platform/windows/decoder_windows.cpp`, `midi_windows.cpp`). Windows-specific core code is `src/audio/ipc_win32.cpp`
 (engine-process IPC) and the Winsock paths in `src/api/net.cpp` and `src/broadcast/sock.cpp`.
 
-**Status.** The code cross-compiles with mingw-w64 and its tests run under Wine in a container
+**Status.** The code builds with MSVC in CI and cross-compiles with mingw-w64 and its tests run under Wine in a container
 (`scripts/windows/docker-build.sh`). Nothing of it has run on real Windows yet: WASAPI output, real MIDI hardware, the
 MSVC build (`scripts/build-windows.ps1`), GPU drivers, per-monitor DPI changes and the IME are unverified.
 
@@ -149,6 +149,12 @@ falls back to in-process audio. `ARCHITECTURE.md` ("Engine process") describes t
   stops the helper and `deckhand-engine --probe` shows no object left. It runs in the CI job "Windows (MSVC)". With no sound
   device the engine runs on miniaudio's null device (paced like a real one). `scripts/windows/engine-check-wine.sh` is the same
   under Wine in the Docker build (`docker-build.sh` runs it after the tests).
+
+Measured: on the GitHub `windows-latest` runner (MSVC Release, real Windows, no audio device) `engine-check.ps1` passes every
+step with the default mode (position continued +4.6 s across a 4 s UI kill, helper restarted in under 3 s, quit stops it);
+under Wine the same steps pass and `test_windows_ipc` reports a deck that advanced 2.52 s over a 2.53 s kill gap, a 3.95 s WAV
+that spanned the kill and a 1.56 s WAV finalised by the orderly quit. What only a real PC can show: a WASAPI device (and the
+Remote Desktop "Remote Audio" device, which appears and disappears with the session), real MIDI/HID hardware, and sleep/resume.
 
 ## Changes needed in src/app (done unless listed)
 
