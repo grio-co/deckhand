@@ -226,3 +226,59 @@ steps however you like; it uses a fixed test passphrase and temporary libraries,
     computer 2:  test_sync --interop reply  FOLDER
     computer 1:  test_sync --interop verify FOLDER
 
+
+# Sharing one playlist with another person
+
+Library sync above keeps *your* devices identical: playlists, folders and their entries already sync as shared
+objects between devices of the same library (entities `P` and `E`, tracks named by content fingerprint). It does not
+share anything with a different person's library, which has its own tracks, ids and folders. A shared playlist does,
+for one playlist at a time.
+
+Where it lives: `src/sync/shared_playlist.cpp` (`deckhand::sync::share_playlist`, `join_shared_playlist`,
+`sync_shared_playlist`, `shared_playlist_entries`), tested with two libraries and a temp folder in
+`tests/test_shared_playlist.cpp`. It is not wired to a screen or the API yet.
+
+## How it works
+
+```
+<folder>/DeckHandShared/<shared id>/<participant id>.dhsp
+```
+
+Every participant writes only their own file (a temporary file, then a rename), and reads everyone's. A file is
+UTF-8 text: the magic line `DHSP1`, `playlist`, `participant` (id and label), `name` (with its stamp), one `e` line
+per entry the participant authored or changed, and a final `end` line. A file without `end` was cut off and is
+ignored until it is whole.
+
+An entry holds its own id (`<participant id>:<counter>`), a position key (the same fractional keys as the library
+sync), a tombstone flag, a stamp (time, counter, participant) and the track's identity: content hash when known,
+artist, title and duration. It carries nothing of the sender's ids or paths.
+
+- **Matching.** Each side finds its own file for an entry: the same content hash when both have one, else the same
+  artist and title (case-insensitive) and a duration within two seconds. An entry with no match is *missing*: it stays
+  in the shared playlist, `shared_playlist_entries` lists it with `missing = true`, and it is never put in the local
+  playlist. When the track is added to the library the entry takes its place at the next sync, and a copy added by
+  hand is recognised as the same entry (no duplicate).
+- **Merging.** Per entry, the larger stamp wins, so adds, removals and moves from both sides combine, the order
+  of reading does not matter and repeating a sync changes nothing. The playlist is the live entries ordered by
+  (position key, entry id). A move and a removal of the same entry resolve to whichever came last. The name travels
+  the same way (the larger stamp wins; the one who joined does not send it back).
+- **Local changes.** The library keeps, per shared playlist, the merged list as it last applied it (setting
+  `shared.link.<playlist id>`). A sync compares the local playlist with it: tracks that disappeared are removals,
+  new tracks are adds, tracks that changed their relative order are moves (the longest run that kept its order
+  stays put; the rest get new keys between their neighbours). Entries that were missing here are not touched.
+
+## Limits
+
+- Clocks: stamps use each computer's clock first, so a computer whose clock is far ahead wins ties for a while.
+- Nothing is encrypted (the files hold artist, title, duration and an optional content hash): put the folder where
+  only the people you share with can read it.
+- The hash is only used when the library has one for the track (the duplicate finder computes it); otherwise
+  artist, title and duration decide, which can confuse two different recordings of the same name and length.
+- Removing a participant, joining a playlist you already have, and a screen for all of this are left for later.
+
+## Through the API, and transitions from sync
+Shared playlists have REST routes (docs/API.md): `GET /v1/library/shared-playlists?folder=`, `POST /v1/library/playlists/{id}/share`
+(publish), `POST /v1/library/shared-playlists/{shared_id}/join` (subscribe), `POST /v1/library/playlists/{id}/shared-sync`
+(merge; the reply carries `summary`: `sent_added`, `sent_removed`, `sent_moved`, `received`, `missing`) and
+`DELETE /v1/library/playlists/{id}/share`. Library sync also rebuilds the transition counts behind the track suggestions
+whenever play history arrives from another device, so what you played on the laptop shapes the suggestions on the desktop.

@@ -191,6 +191,7 @@ bool create_track_block(const std::string& name, int slot, std::uint64_t generat
   p.track_id = t.track_id;
   p.bpm = t.bpm;
   p.cue_point = t.cue_point;
+  p.key_index = t.key_index;
   for (int i = 0; i < kHotCues; ++i) {
     p.hot_cue[i] = t.hot_cue[i];
     p.hot_loop_end[i] = t.hot_loop_end[i];
@@ -240,6 +241,7 @@ std::unique_ptr<LoadedTrack> map_track_block(const std::string& name, int slot, 
   t->grid = std::move(pb.grid);
   t->memory_cues = std::move(pb.memory_cues);
   t->cue_point = std::max(0.0, pb.h.cue_point);
+  t->key_index = pb.h.key_index >= 0 && pb.h.key_index <= 23 ? pb.h.key_index : -1;
   for (int i = 0; i < kHotCues; ++i) {
     t->hot_cue[i] = pb.h.hot_cue[i] >= 0 ? pb.h.hot_cue[i] : -1;
     t->hot_loop_end[i] = pb.h.hot_loop_end[i] >= 0 ? pb.h.hot_loop_end[i] : -1;
@@ -337,8 +339,15 @@ bool validate_command(const WireCommand& w, Command& out) {
       if (w.i < 0 || (w.i >> 8) >= kStemCount || (w.i & 0xFF) >= static_cast<int>(StemField::Count) || (w.i >> 16) != 0) return false;
       if (!finite_in(w.f, -1.001, 1.501)) return false;
       break;
-    case Op::StemEnable:
+    case Op::StemEnable: case Op::KeyFollow: case Op::CueOnly:
       if (w.i < -1 || w.i > 1) return false;
+      break;
+    case Op::TrackKey:
+      if (w.i < -1 || w.i > 23) return false;
+      break;
+    case Op::KeySyncConfig:
+      if (w.i < 0 || w.i > 0x101 || (w.i & 0xFE) != 0) return false;
+      if (!finite_in(w.f, -0.001, 12.001)) return false;
       break;
     case Op::StemPreset:
       if (w.i < 0 || w.i >= static_cast<int>(StemPresetId::Count)) return false;

@@ -204,6 +204,77 @@ the stick is taken anywhere; `export_usb(..., ExportResult&)` carries the same r
   audio editor. Converted files carry no tags (the database holds the metadata) and are limited to < 4 GB.
 - Tests: `tests/test_export_preflight.cpp`.
 
+## Stems on the stick (`export_stems.hpp`, `ExportOptions::stems`)
+Club players cannot separate stems, so each exported track with cached stems can bring its mixes along as ordinary
+tracks. **Not verified on hardware**; nothing here adds a format field, it only writes more of the same rows.
+- **Option** `StemOptions`: `mixes` (bit set: acapella = vocals, instrumental = drums + bass + other, drums, bass,
+  other; `parse_stem_mixes` reads `off`, `acapella+instrumental`, `all` = acapella/drums/bass/other, `everything`
+  = all five, or a list), `mixes_by_playlist` (per playlist or folder, inherited by what is inside; a track gets the
+  union over the playlists holding it), `bits` (24 default, or 16), `placement` (`MirrorFolder` default, or `Inline`),
+  `folder_name` ("Stems") and `lookup` (callback `ExportTrack -> path of the .dhstems file`, "" = none cached).
+- **Reading stems**: the module parses the `.dhstems` file itself (128-byte header, planar stem-major channel-major
+  16/24-bit PCM, float scale, trailer; layout in `src/stems/include/deckhand/stems/cache.hpp`) instead of linking
+  `dh_stems`. There is no cycle either way (`dh_stems` depends on core only), but the reader is 60 lines and linking
+  would drag the inference engine into every export consumer. The CRC in the trailer is **not** checked (header, exact
+  file size and end marker are). If the cache layout version changes the parser refuses the file ("not a stem cache file").
+- **Tracks**: for each requested mix a track `"<Title> (Acapella|Instrumental|Drums|Bass|Other)"` with artist, album,
+  genre, BPM, key, comment, rating, year and colour copied, the parent's beat grid, hot cues, memory cues and loops
+  (sample-aligned by construction), the parent's length, and its own waveform computed from the stem audio (the same
+  one-pole 200 Hz / 2.5 kHz three-band algorithm as the application's `build_waveform`, duplicated because this module may
+  not depend on audio; keep them in step). The audio is a plain 44-byte-header stereo PCM WAV, mix summed in double
+  precision, rounded and clamped, no dither, at the stems' sample rate (must be one of the profile's PCM rates and the
+  length must match the track within 100 ms, otherwise the track is listed under `no_stems`). Stored at
+  `Contents/<Artist>/<Album>/<Title> (Mix).wav`. Track ids are `1 000 000 000 + parent id x 8 + mix index`
+  (stable, so a re-export finds its files); mirrored playlist ids start at 1 500 000 000.
+- **Playlists**: default `MirrorFolder`: a top-level folder "Stems" holding a copy of the playlist tree (only branches with
+  stems) whose playlists list just the stem tracks; ordinary playlists are untouched. `Inline`: the stems follow their
+  parent in every playlist that holds it. Parents in no playlist land in "Stems / Unfiled" (mirror mode, when other
+  playlists exist).
+- **Re-export**: an existing file of the stem's name is reused when byte-identical to what would be rendered (compared
+  chunk by chunk, nothing written); replaced when it is a stereo PCM WAV of the same rate and depth with a 44-byte header
+  (stems were re-separated); anything else keeps the usual ` (2)` rule. So a user's own plain stereo WAV with exactly such a
+  name would be replaced: the name always ends in "(Acapella)" etc.
+- **Space**: `ExportResult::required_bytes` / `available_bytes` are filled before anything is written (all exports, not
+  only stems); the free-space check was already in the normal export and now includes stem files not already on the stick.
+  The estimate is an upper bound. `ExportResult::stems` lists tracks without usable stems (`no_stems`, reason "no stems
+  cached" or why the file was unusable), stem tracks, reused files and bytes to write. `copy_audio=false` does not stop
+  stems: they are generated files and are always written.
+- Tests: `tests/test_export_stems.cpp` (synthetic stems in the cache layout; every mode, sample-exact sums, same
+  grids/cues, no duplication, mirror and inline playlists, free-space refusal, damaged stem files).
+
+## Hot cues 9-16 are not exported
+DeckHand decks have 16 hot cue slots; the stick format carries hot cues A-H (the PCOB / PCO2 hot cue number is 1..8, and
+nothing in the public documentation of the format or in the reference exports lets a ninth one be written). So the first
+eight are exported, cues in slots 9-16 are left out, and nothing fails: the preflight lists them per track as the warning
+`cues.not_exported`, the export result counts them (`ExportResult::cues_not_exported`, `cues_not_exported` in
+`GET /v1/export/report`, the status line after an export) and the validator still demands 1..8. Memory cues are not
+affected. If a player or a reference export ever shows more slots, `kExportHotCues` (export_preflight.hpp), the writer
+filter in anlz_writer.cpp and the validator are the three places to change.
+
+## SD cards
+The format code has no notion of media type and none of the sources named at the top of this file describes a difference
+between a stick and an SD card (same `PIONEER/rekordbox/export.pdb` and `PIONEER/USBANLZ` tree, same `Contents` folder).
+Therefore the same export is written for both and **no `media` option exists**. Format SD cards FAT32 (or exFAT where
+the player supports it) like sticks. This is the absence of documentation, not a confirmation.
+
+## Device backup, restore and check (`export_device.hpp`)
+Only the library folders the exporter writes are ever touched (`PIONEER/rekordbox/export.pdb`, `exportExt.pdb`,
+`PIONEER/USBANLZ/**`) plus, optionally, the audio files the database refers to. Nothing is formatted; nothing outside
+those paths is deleted.
+- `backup_device(stick, backup_dir, {include_audio, stamp}, path, error)`: writes `DeckHand-device-<YYYYMMDD-HHMMSS>[-n]/`
+  with `manifest.txt` (header line, `created`, then `library|audio<TAB>sha256<TAB>size<TAB>path` per file) and `files/<path>`.
+  Each file is hashed, copied, hashed again; the folder is built as `*.dhtmp` and renamed when complete, so an unfinished
+  backup never looks finished. `list_device_backups` lists newest first; `verify_device_backup` re-hashes everything.
+- `restore_device(backup, stick, {force, restore_audio}, result, error)`: refuses when the backup does not verify, when the
+  stick already has a library (`export.pdb`/`exportExt.pdb`/analysis files) unless `force`, and when an audio file on the
+  stick differs from the backup's unless `force`. Files are staged as `*.dhtmp`, hashed, then renamed (audio first,
+  analysis, database last), and everything is hashed again at the end. With `force` only library files of the replaced
+  export that the backup does not contain are removed.
+- `verify_device(stick, report, {check_audio})`: reads the database back with `read_export` and runs `validate_export`,
+  translating each issue into plain language (`DeviceReport::text()` / `to_json()`); never modifies the stick.
+- CLI: `deckhandctl export ... --stems MODE --stem-bits N --stems-inline 1`, `verify-device DIR`, `backup-device DIR BACKUPS
+  [--audio 1]`, `restore-device BACKUP DIR [--force 1]`, `list-device-backups BACKUPS`. Tests: `tests/test_export_device.cpp`.
+
 ## Validator: `validate_export(root, report, options)`
 Reads the stick only. Errors (stable codes in `ValidationReport::issues`): `pdb.header`, `pdb.table_range`,
 `pdb.chain_loop|chain_shared|chain_last|next_range|page_index|page_type`, `pdb.index_page_flag|data_page_flag`,

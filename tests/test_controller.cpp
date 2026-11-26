@@ -713,6 +713,86 @@ out 94 73 color_fx deck=1 effect=crush
     fs::remove_all(dir);
   }
 
+  // ---- per-controller options: jog feel, calibration, soft takeover, LEDs, last measured turn, mapping choice ----
+  {
+    Rig r(flx, "DDJ-FLX4");
+    const std::string name = r.hub->connected().at(0);
+    r.send(0x90, 0x36, 0x7F);  // touch the platter
+    r.send(0xB0, 0x22, 0x43);  // +3 ticks
+    const double plain = r.sink.last().d;
+    CHECK(std::fabs(plain - 3.0 / 720.0) < 1e-9);
+    DeviceOptions o;
+    o.jog_scale = 2.0;
+    r.hub->set_device_options(name, o);
+    r.send(0xB0, 0x22, 0x43);
+    CHECK(std::fabs(r.sink.last().d - 2.0 * plain) < 1e-9);
+    o.ticks_per_rev = 1440;  // a calibration replaces the mapping's 720
+    r.hub->set_device_options(name, o);
+    r.send(0xB0, 0x22, 0x43);
+    CHECK(std::fabs(r.sink.last().d - 2.0 * 3.0 / 1440.0) < 1e-9);
+    r.send(0x90, 0x36, 0x00);  // let go: the turn is remembered for the calibration helper
+    CHECK(r.hub->last_jog_ticks(name) == 9.0 && r.hub->last_jog_ticks("another") == 0.0);
+    CHECK(r.hub->device_options(name).jog_scale == 2.0 && r.hub->device_options("another").jog_scale == 1.0);  // per controller
+    o.jog_scale = 1000;  // out of range values are clamped, never trusted
+    o.ticks_per_rev = -5;
+    r.hub->set_device_options(name, o);
+    CHECK(r.hub->device_options(name).jog_scale == 8.0 && r.hub->device_options(name).ticks_per_rev == 0.0);
+
+    // LEDs off keeps them dark, and back on lights them again
+    r.hub->set_device_options(name, DeviceOptions{});
+    DeckView dv[kMaxDecks];
+    dv[0].loaded = dv[0].playing = true;
+    r.io.sent.clear();
+    r.hub->tick(dv, kMaxDecks, 0.0);
+    CHECK(r.io.has(0x90, 0x0B, 0x7F));
+    DeviceOptions dark;
+    dark.leds = false;
+    r.hub->set_device_options(name, dark);
+    r.io.sent.clear();
+    r.hub->tick(dv, kMaxDecks, 0.1);
+    CHECK(r.io.has(0x90, 0x0B, 0x00) && !r.io.has(0x90, 0x0B, 0x7F));
+    r.hub->set_device_options(name, DeviceOptions{});
+    r.io.sent.clear();
+    r.hub->tick(dv, kMaxDecks, 0.2);
+    CHECK(r.io.has(0x90, 0x0B, 0x7F));
+  }
+  {  // soft takeover per controller: an absolute control far from the engine's value waits until the knob passes it
+    for (int mode : {-1, 0, 1}) {
+      Rig r(make("in abs B0 01 filter deck=1\n", "padtest"), "padtest");
+      DeviceOptions o;
+      o.pickup = mode;
+      r.hub->set_device_options("T", o);
+      DeckView dv[kMaxDecks];
+      dv[0].loaded = true;
+      dv[0].filter = 0.5f;
+      r.hub->tick(dv, kMaxDecks, 0.0);
+      r.send(0xB0, 0x01, 0x7F);  // the knob is at the end, the engine at the middle
+      const bool moved = !r.sink.commands.empty();
+      CHECK(moved == (mode != 1));
+      if (mode == 1) {
+        r.send(0xB0, 0x01, 0x40);  // passes the engine's value: takes over
+        CHECK(!r.sink.commands.empty());
+      }
+    }
+  }
+  {  // two mappings fit one device: the user's choice wins, a reload keeps it and the options
+    Rig r(make("in button 90 01 play deck=1\n", "twin"), "twin");
+    Mapping other = make("in button 90 02 play deck=1\n", "twin");
+    other.name = "Twin B";
+    std::vector<Mapping> both;
+    both.push_back(make("in button 90 01 play deck=1\n", "twin"));
+    both.push_back(other);
+    r.hub->reload_mappings(both);
+    CHECK(r.hub->connected().size() == 1 && r.hub->connected()[0] == "T");  // the first one by default
+    r.hub->prefer_mappings({"Twin B"});
+    r.hub->reload_mappings(both);
+    CHECK(r.hub->connected().size() == 1 && r.hub->connected()[0] == "Twin B");
+    r.sink.commands.clear();
+    r.send(0x90, 0x02, 0x7F);
+    CHECK(!r.sink.commands.empty());
+  }
+  CHECK(std::string(pad_mode_name(3)) == "sampler" && std::string(pad_mode_name(8)) == "stems" && std::string(pad_mode_name(9)).empty());
+
   std::puts("controller ok");
   return 0;
 }

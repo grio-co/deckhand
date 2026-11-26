@@ -453,9 +453,15 @@ PreflightReport preflight_export(const std::vector<ExportTrack>& tracks, const P
   PreflightReport rep;
   rep.profile_id = profile.id;
   for (const ExportTrack& et : tracks) {
+    if (et.stem) continue;  // generated PCM WAV (16/24-bit stereo at a profile rate): nothing to probe
     TrackPreflight t;
     t.track_id = et.id;
     t.path = et.source_path;
+    if (const std::size_t extra = hot_cues_beyond_format(et)) {  // never fails the export: the first eight are written
+      add(t, Verdict::Warning, "cues.not_exported",
+          std::to_string(extra) + " hot cue" + (extra == 1 ? "" : "s") + " in slots 9-16 will not be exported: the stick format carries hot cues 1-8 (A-H).",
+          RuleSource::Documented);
+    }
     try {
       if (!et.source_path.empty()) {
         std::error_code ec;

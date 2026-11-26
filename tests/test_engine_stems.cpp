@@ -148,7 +148,8 @@ void setup(Engine& e, std::unique_ptr<LoadedTrack> t, const World* w) {
   if (!w) return;
   std::string err;
   CHECK(e.stems_attach(0, 5, w->path, err));
-  for (int i = 0; i < 4000 && e.deck(0).stems_state != 2; ++i) {
+  // no deadline to speak of: the background loader has taken many seconds on a loaded machine (only a hung test stops here)
+  for (int i = 0; i < 30000 && e.deck(0).stems_state != 2; ++i) {
     e.render(tmp, 64);
     if (e.deck(0).stems_state == 3) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -497,7 +498,7 @@ int main(int, char** argv) {
     setup(*ref, track_of(w), &w);
     re.load(0, track_of(w));
     auto wait = [&](auto pred) {
-      for (int i = 0; i < 3000; ++i) {
+      for (int i = 0; i < 12000; ++i) {  // up to a minute: waits for the helper process, no timing is asserted
         if (pred(re.deck(0))) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
       }

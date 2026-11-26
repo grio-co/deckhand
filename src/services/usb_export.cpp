@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <map>
 #include <set>
 
@@ -10,9 +12,34 @@
 #include "deckhand/library/palette.hpp"
 #include "deckhand/export/export.hpp"
 #include "deckhand/export/export_preflight.hpp"
+#include "deckhand/export/export_stems.hpp"
 #include "deckhand/log/log.hpp"
 
 namespace deckhand {
+
+std::function<std::string(std::int64_t, const std::string&)> stem_lookup_from_data_dir(const std::string& data_dir) {
+  namespace fs = std::filesystem;
+  std::map<std::int64_t, std::string> keys;
+  std::ifstream in(fs::path(data_dir) / "stems" / "tracks.tsv");
+  std::string line;
+  while (std::getline(in, line)) {
+    std::istringstream ss(line);
+    std::string id, key;
+    if (std::getline(ss, id, '\t') && std::getline(ss, key, '\t') && key.size() == 64) {
+      try {
+        keys[std::stoll(id)] = key;
+      } catch (...) {
+      }
+    }
+  }
+  return [keys, data_dir](std::int64_t id, const std::string&) -> std::string {
+    const auto it = keys.find(id);
+    if (it == keys.end()) return {};
+    const fs::path p = fs::path(data_dir) / "stems" / it->second.substr(0, 2) / (it->second + ".dhstems");
+    std::error_code ec;
+    return fs::is_regular_file(p, ec) ? p.string() : std::string();
+  };
+}
 
 bool export_library_to_usb(Library& lib, const UsbExportRequest& request, UsbExportResult& result, std::string& error,
                            const std::function<bool(int, int, const std::string&)>& progress) {
@@ -165,11 +192,26 @@ bool export_library_to_usb(Library& lib, const UsbExportRequest& request, UsbExp
     options.copy_audio = request.copy_audio;
     options.convert_incompatible = request.convert_incompatible;
     if (!request.player_profile.empty()) options.player_profile = request.player_profile;
+    if (request.stem_mixes != 0 || !request.stem_mixes_by_playlist.empty()) {
+      options.stems.mixes = request.stem_mixes;
+      for (const auto& [id, m] : request.stem_mixes_by_playlist) options.stems.mixes_by_playlist[static_cast<int>(id)] = m;
+      options.stems.bits = request.stem_bits;
+      options.stems.placement = request.stems_inline ? StemPlacement::Inline : StemPlacement::MirrorFolder;
+      if (!request.stems_folder.empty()) options.stems.folder_name = request.stems_folder;
+      if (request.stem_lookup) {
+        options.stems.lookup = [&request](const ExportTrack& t) { return request.stem_lookup(t.id, t.source_path); };
+      }
+    }
     ExportResult report;
     const bool exported = export_usb(tracks, playlists, options, error, report);
     result.report_json = report.report.to_json();
     result.converted = static_cast<int>(report.converted);
     result.remaining_will_not_play = static_cast<int>(report.remaining_will_not_play());
+    result.stem_tracks = static_cast<int>(report.stems.tracks);
+    for (const auto& n : report.stems.no_stems) result.no_stems.push_back(n.title + ": " + n.reason);
+    result.cues_not_exported = static_cast<int>(report.cues_not_exported);
+    result.required_bytes = report.required_bytes;
+    result.available_bytes = report.available_bytes;
     if (!exported) return false;
     result.tracks = static_cast<int>(tracks.size());
     for (const auto& p : playlists) result.playlists += p.is_folder ? 0 : 1;

@@ -113,8 +113,8 @@ in button 90 1E pad_mode deck=1 mode=padfx1
 out 90 1E pad_mode deck=1 mode=padfx1
 in button 90 20 pad_mode deck=1 mode=beatjump
 out 90 20 pad_mode deck=1 mode=beatjump
-in button 90 22 pad_mode deck=1 mode=sampler
-out 90 22 pad_mode deck=1 mode=sampler
+in button 90 22 pad_mode deck=1 mode=sampler alt=stems
+out 90 22 pad_mode deck=1 mode=sampler alt=stems
 in button 90 69 pad_mode deck=1 mode=keyboard
 out 90 69 pad_mode deck=1 mode=keyboard
 in button 90 6B pad_mode deck=1 mode=padfx2
@@ -175,22 +175,22 @@ in button 97 54 padfx deck=1 slot=1 pad=5 effect=vinyl_brake beats=1
 in button 97 55 padfx deck=1 slot=1 pad=6 effect=backspin beats=1
 in button 97 56 padfx deck=1 slot=1 pad=7 effect=echo beats=0.25
 in button 97 57 padfx deck=1 slot=1 pad=8 effect=ping_pong beats=0.25
-in button 97 30 sampler deck=1 slot=1
-in button 97 31 sampler deck=1 slot=2
-in button 97 32 sampler deck=1 slot=3
-in button 97 33 sampler deck=1 slot=4
-in button 97 34 sampler deck=1 slot=5
-in button 97 35 sampler deck=1 slot=6
-in button 97 36 sampler deck=1 slot=7
-in button 97 37 sampler deck=1 slot=8
-in button 98 30 sampler_stop deck=1 slot=1   # SHIFT + pad
-in button 98 31 sampler_stop deck=1 slot=2   # SHIFT + pad
-in button 98 32 sampler_stop deck=1 slot=3   # SHIFT + pad
-in button 98 33 sampler_stop deck=1 slot=4   # SHIFT + pad
-in button 98 34 sampler_stop deck=1 slot=5   # SHIFT + pad
-in button 98 35 sampler_stop deck=1 slot=6   # SHIFT + pad
-in button 98 36 sampler_stop deck=1 slot=7   # SHIFT + pad
-in button 98 37 sampler_stop deck=1 slot=8   # SHIFT + pad
+in button 97 30 sampler deck=1 slot=1 mode=!stems
+in button 97 31 sampler deck=1 slot=2 mode=!stems
+in button 97 32 sampler deck=1 slot=3 mode=!stems
+in button 97 33 sampler deck=1 slot=4 mode=!stems
+in button 97 34 sampler deck=1 slot=5 mode=!stems
+in button 97 35 sampler deck=1 slot=6 mode=!stems
+in button 97 36 sampler deck=1 slot=7 mode=!stems
+in button 97 37 sampler deck=1 slot=8 mode=!stems
+in button 98 30 sampler_stop deck=1 slot=1 mode=!stems   # SHIFT + pad
+in button 98 31 sampler_stop deck=1 slot=2 mode=!stems   # SHIFT + pad
+in button 98 32 sampler_stop deck=1 slot=3 mode=!stems   # SHIFT + pad
+in button 98 33 sampler_stop deck=1 slot=4 mode=!stems   # SHIFT + pad
+in button 98 34 sampler_stop deck=1 slot=5 mode=!stems   # SHIFT + pad
+in button 98 35 sampler_stop deck=1 slot=6 mode=!stems   # SHIFT + pad
+in button 98 36 sampler_stop deck=1 slot=7 mode=!stems   # SHIFT + pad
+in button 98 37 sampler_stop deck=1 slot=8 mode=!stems   # SHIFT + pad
 in button 97 40 keyboard deck=1 slot=1 semitones=0
 in button 97 41 keyboard deck=1 slot=2 semitones=1
 in button 97 42 keyboard deck=1 slot=3 semitones=2
@@ -231,6 +231,31 @@ out 97 34 sampler_playing slot=5 deck=1 mode=sampler
 out 97 35 sampler_playing slot=6 deck=1 mode=sampler
 out 97 36 sampler_playing slot=7 deck=1 mode=sampler
 out 97 37 sampler_playing slot=8 deck=1 mode=sampler
+
+# STEMS (a second press of SAMPLER, then it blinks): the same pad notes as the sampler. Pads 1-4 toggle the mute of
+# vocals / drums / bass / other (lit = audible, dark while the track has no stems); pads 5-8 isolate the same four
+# while held. SHIFT + pad 1..5: reset, acapella, instrumental, drums only, no drums.
+in button 97 30 stem_mute deck=1 stem=vocals mode=stems
+in button 97 31 stem_mute deck=1 stem=drums mode=stems
+in button 97 32 stem_mute deck=1 stem=bass mode=stems
+in button 97 33 stem_mute deck=1 stem=other mode=stems
+in button 97 34 stem_isolate deck=1 stem=vocals mode=stems
+in button 97 35 stem_isolate deck=1 stem=drums mode=stems
+in button 97 36 stem_isolate deck=1 stem=bass mode=stems
+in button 97 37 stem_isolate deck=1 stem=other mode=stems
+in button 98 30 stem_preset deck=1 preset=reset mode=stems   # SHIFT + pad
+in button 98 31 stem_preset deck=1 preset=acapella mode=stems   # SHIFT + pad
+in button 98 32 stem_preset deck=1 preset=instrumental mode=stems   # SHIFT + pad
+in button 98 33 stem_preset deck=1 preset=drums mode=stems   # SHIFT + pad
+in button 98 34 stem_preset deck=1 preset=no_drums mode=stems   # SHIFT + pad
+out 97 30 stem deck=1 stem=vocals mode=stems
+out 97 31 stem deck=1 stem=drums mode=stems
+out 97 32 stem deck=1 stem=bass mode=stems
+out 97 33 stem deck=1 stem=other mode=stems
+out 97 34 stem deck=1 stem=vocals mode=stems
+out 97 35 stem deck=1 stem=drums mode=stems
+out 97 36 stem deck=1 stem=bass mode=stems
+out 97 37 stem deck=1 stem=other mode=stems
 out 97 40 key_shift deck=1 slot=1 mode=keyboard
 out 97 41 key_shift deck=1 slot=2 mode=keyboard
 out 97 42 key_shift deck=1 slot=3 mode=keyboard
@@ -314,8 +339,8 @@ in button 91 1E pad_mode deck=2 mode=padfx1
 out 91 1E pad_mode deck=2 mode=padfx1
 in button 91 20 pad_mode deck=2 mode=beatjump
 out 91 20 pad_mode deck=2 mode=beatjump
-in button 91 22 pad_mode deck=2 mode=sampler
-out 91 22 pad_mode deck=2 mode=sampler
+in button 91 22 pad_mode deck=2 mode=sampler alt=stems
+out 91 22 pad_mode deck=2 mode=sampler alt=stems
 in button 91 69 pad_mode deck=2 mode=keyboard
 out 91 69 pad_mode deck=2 mode=keyboard
 in button 91 6B pad_mode deck=2 mode=padfx2
@@ -376,22 +401,22 @@ in button 99 54 padfx deck=2 slot=1 pad=5 effect=vinyl_brake beats=1
 in button 99 55 padfx deck=2 slot=1 pad=6 effect=backspin beats=1
 in button 99 56 padfx deck=2 slot=1 pad=7 effect=echo beats=0.25
 in button 99 57 padfx deck=2 slot=1 pad=8 effect=ping_pong beats=0.25
-in button 99 30 sampler deck=2 slot=1 offset=8
-in button 99 31 sampler deck=2 slot=2 offset=8
-in button 99 32 sampler deck=2 slot=3 offset=8
-in button 99 33 sampler deck=2 slot=4 offset=8
-in button 99 34 sampler deck=2 slot=5 offset=8
-in button 99 35 sampler deck=2 slot=6 offset=8
-in button 99 36 sampler deck=2 slot=7 offset=8
-in button 99 37 sampler deck=2 slot=8 offset=8
-in button 9A 30 sampler_stop deck=2 slot=1 offset=8   # SHIFT + pad
-in button 9A 31 sampler_stop deck=2 slot=2 offset=8   # SHIFT + pad
-in button 9A 32 sampler_stop deck=2 slot=3 offset=8   # SHIFT + pad
-in button 9A 33 sampler_stop deck=2 slot=4 offset=8   # SHIFT + pad
-in button 9A 34 sampler_stop deck=2 slot=5 offset=8   # SHIFT + pad
-in button 9A 35 sampler_stop deck=2 slot=6 offset=8   # SHIFT + pad
-in button 9A 36 sampler_stop deck=2 slot=7 offset=8   # SHIFT + pad
-in button 9A 37 sampler_stop deck=2 slot=8 offset=8   # SHIFT + pad
+in button 99 30 sampler deck=2 slot=1 offset=8 mode=!stems
+in button 99 31 sampler deck=2 slot=2 offset=8 mode=!stems
+in button 99 32 sampler deck=2 slot=3 offset=8 mode=!stems
+in button 99 33 sampler deck=2 slot=4 offset=8 mode=!stems
+in button 99 34 sampler deck=2 slot=5 offset=8 mode=!stems
+in button 99 35 sampler deck=2 slot=6 offset=8 mode=!stems
+in button 99 36 sampler deck=2 slot=7 offset=8 mode=!stems
+in button 99 37 sampler deck=2 slot=8 offset=8 mode=!stems
+in button 9A 30 sampler_stop deck=2 slot=1 offset=8 mode=!stems   # SHIFT + pad
+in button 9A 31 sampler_stop deck=2 slot=2 offset=8 mode=!stems   # SHIFT + pad
+in button 9A 32 sampler_stop deck=2 slot=3 offset=8 mode=!stems   # SHIFT + pad
+in button 9A 33 sampler_stop deck=2 slot=4 offset=8 mode=!stems   # SHIFT + pad
+in button 9A 34 sampler_stop deck=2 slot=5 offset=8 mode=!stems   # SHIFT + pad
+in button 9A 35 sampler_stop deck=2 slot=6 offset=8 mode=!stems   # SHIFT + pad
+in button 9A 36 sampler_stop deck=2 slot=7 offset=8 mode=!stems   # SHIFT + pad
+in button 9A 37 sampler_stop deck=2 slot=8 offset=8 mode=!stems   # SHIFT + pad
 in button 99 40 keyboard deck=2 slot=1 semitones=0
 in button 99 41 keyboard deck=2 slot=2 semitones=1
 in button 99 42 keyboard deck=2 slot=3 semitones=2
@@ -432,6 +457,31 @@ out 99 34 sampler_playing slot=5 offset=8 deck=2 mode=sampler
 out 99 35 sampler_playing slot=6 offset=8 deck=2 mode=sampler
 out 99 36 sampler_playing slot=7 offset=8 deck=2 mode=sampler
 out 99 37 sampler_playing slot=8 offset=8 deck=2 mode=sampler
+
+# STEMS (a second press of SAMPLER, then it blinks): the same pad notes as the sampler. Pads 1-4 toggle the mute of
+# vocals / drums / bass / other (lit = audible, dark while the track has no stems); pads 5-8 isolate the same four
+# while held. SHIFT + pad 1..5: reset, acapella, instrumental, drums only, no drums.
+in button 99 30 stem_mute deck=2 stem=vocals mode=stems
+in button 99 31 stem_mute deck=2 stem=drums mode=stems
+in button 99 32 stem_mute deck=2 stem=bass mode=stems
+in button 99 33 stem_mute deck=2 stem=other mode=stems
+in button 99 34 stem_isolate deck=2 stem=vocals mode=stems
+in button 99 35 stem_isolate deck=2 stem=drums mode=stems
+in button 99 36 stem_isolate deck=2 stem=bass mode=stems
+in button 99 37 stem_isolate deck=2 stem=other mode=stems
+in button 9A 30 stem_preset deck=2 preset=reset mode=stems   # SHIFT + pad
+in button 9A 31 stem_preset deck=2 preset=acapella mode=stems   # SHIFT + pad
+in button 9A 32 stem_preset deck=2 preset=instrumental mode=stems   # SHIFT + pad
+in button 9A 33 stem_preset deck=2 preset=drums mode=stems   # SHIFT + pad
+in button 9A 34 stem_preset deck=2 preset=no_drums mode=stems   # SHIFT + pad
+out 99 30 stem deck=2 stem=vocals mode=stems
+out 99 31 stem deck=2 stem=drums mode=stems
+out 99 32 stem deck=2 stem=bass mode=stems
+out 99 33 stem deck=2 stem=other mode=stems
+out 99 34 stem deck=2 stem=vocals mode=stems
+out 99 35 stem deck=2 stem=drums mode=stems
+out 99 36 stem deck=2 stem=bass mode=stems
+out 99 37 stem deck=2 stem=other mode=stems
 out 99 40 key_shift deck=2 slot=1 mode=keyboard
 out 99 41 key_shift deck=2 slot=2 mode=keyboard
 out 99 42 key_shift deck=2 slot=3 mode=keyboard

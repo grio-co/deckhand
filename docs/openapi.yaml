@@ -72,8 +72,8 @@ info:
     | `beatjump` | value | beats, -512..512 | Jump by beats |
     | `tempo` | value | -1..1 of the tempo range | Tempo fader |
     | `tempo_range` | value | 0.01..1 (e.g. 0.06 0.10 0.16 1.0) | Tempo fader range |
-    | `hotcue.<1..8>` | button | 1 press, 0 release | Hot cue pad: set if empty, else jump |
-    | `hotcue_clear.<1..8>` | trigger | none | Delete a hot cue |
+    | `hotcue.<1..16>` | button | 1 press, 0 release | Hot cue pad: set if empty, else jump |
+    | `hotcue_clear.<1..16>` | trigger | none | Delete a hot cue |
     | `loop_in` / `loop_out` | trigger | none | Set loop start / end and start looping |
     | `loop` | value | beats 0.03125..64 (default 4) | Toggle a loop |
     | `beatloop` | value | beats 0.03125..64 | Start a loop of this length |
@@ -206,6 +206,8 @@ tags:
   - {name: Library}
   - {name: History}
   - {name: Export}
+  - {name: Lighting, description: "DMX lighting (Art-Net, sACN, serial) driven by the music. Off until enabled."}
+  - {name: Controllers, description: Hardware controllers, their mappings and per-controller settings.}
   - {name: Settings}
   - {name: Tokens}
 
@@ -311,7 +313,7 @@ paths:
           description: Deck control name, with its slot suffix where it takes one.
           schema:
             type: string
-            pattern: '^(play|cue|sync|seek|beatjump|tempo|tempo_range|hotcue\.[1-8]|hotcue_clear\.[1-8]|loop_in|loop_out|loop|beatloop|reloop|loop_scale|cue_call|trim|eq_high|eq_mid|eq_low|filter|fader|pfl|eject|key_lock|key_shift|quantize|slip|reverse|loop_move|loop_exit|color_fx|auto_gain|metronome|grid_(edit|shift|align|first_beat|downbeat|rotate|bpm|set_bpm|scale|tap|add_section|remove_section|lock|reanalyse|undo)|memory_cue_(set|delete)|loop_(save|recall|delete)|cue_set|hotcue_(set|style|loop)\.[1-8]|wave_zoom(_in|_out)?|fx[1-3]\.(select|on|wet|param|time))$'
+            pattern: '^(play|cue|sync|seek|beatjump|tempo|tempo_range|hotcue\.([1-9]|1[0-6])|hotcue_clear\.([1-9]|1[0-6])|loop_in|loop_out|loop|beatloop|reloop|loop_scale|cue_call|trim|eq_high|eq_mid|eq_low|filter|fader|pfl|eject|key_lock|key_shift|key_sync|key_sync_mode|key_match|key_reset|quantize|slip|reverse|loop_move|loop_exit|color_fx|auto_gain|metronome|grid_(edit|shift|align|first_beat|downbeat|rotate|bpm|set_bpm|scale|tap|add_section|remove_section|lock|reanalyse|undo)|memory_cue_(set|delete)|loop_(save|recall|delete)|cue_set|hotcue_(set|style|loop)\.([1-9]|1[0-6])|wave_zoom(_in|_out)?|fx[1-3]\.(select|on|wet|param|time))$'
           examples:
             play: {value: play}
             hotcue: {value: hotcue.3}
@@ -485,7 +487,7 @@ paths:
         Actions: `memory_set` (value = seconds, none = at the playhead; body text and color name it), `memory_delete`
         (body slot = the memory cue's number, none = nearest to the playhead), `memory_style` (slot, text, color),
         `memory_move` (slot, value = seconds), `loop_save` (stores the current loop), `loop_recall` (body slot = the
-        saved loop's number, none = the next one), `loop_delete` (slot), `hot_set` (slot 1..8, value = seconds, none = at
+        saved loop's number, none = the next one), `loop_delete` (slot), `hot_set` (slot 1..16, value = seconds, none = at
         the playhead; quantised when quantise is on), `hot_style` (slot, text, color; color null clears it), `hot_loop`
         (slot; makes the hot cue a loop, again makes it plain), `hot_delete` (slot), `main_set` (value = seconds, none =
         at the playhead). `wave_zoom` (value = seconds visible, 1.5..48), `wave_zoom_in`, `wave_zoom_out` zoom the
@@ -2132,6 +2134,105 @@ paths:
         "404": {$ref: "#/components/responses/NotFound"}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/library/tracks/{id}/suggestions:
+    get:
+      tags: [Library]
+      operationId: getTrackSuggestions
+      summary: What goes well after a track
+      description: "Required scope: `library:read`. Ranked by a transparent score (tempo within the allowed pitch change, also half or double time; key on the wheel; energy from the phrase analysis, the seed's outro against each candidate's intro; shared genre; rating; the pairs the user played back to back before; a small boost for never-played tracks; a penalty for tracks played in this session). Each item carries its breakdown in `factors` (`id`, `points`, `value` 0..1, `detail`, `tag`), so a client can say why. The weights are the settings `suggest.w.tempo`, `key`, `energy`, `genre`, `rating`, `history`, `explore`, `recent` (points); the defaults of the other options come from `suggest.max_pitch`, `suggest.half_double`, `suggest.harmonic_only`, `suggest.exclude_queued`, `suggest.exclude_played`. Deterministic: ties go to the lower track id. Queued tracks are left out unless `exclude_queued=0`."
+      x-scope: library:read
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+        - {name: playlist, in: query, required: false, description: "Only tracks of this playlist.", schema: {type: integer, format: int64}}
+        - {name: max_pitch, in: query, required: false, description: "Largest tempo change in percent (default from the setting suggest.max_pitch, 6).", schema: {type: number, exclusiveMinimum: 0, maximum: 50}}
+        - {name: half_double, in: query, required: false, schema: {type: integer, enum: [0, 1]}}
+        - {name: harmonic_only, in: query, required: false, schema: {type: integer, enum: [0, 1]}}
+        - {name: exclude_queued, in: query, required: false, schema: {type: integer, enum: [0, 1]}}
+        - {name: exclude_played, in: query, required: false, schema: {type: integer, enum: [0, 1]}}
+      responses:
+        "200":
+          description: The seed and the ranked suggestions.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/NextTracks"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/decks/{deck}/suggestions:
+    get:
+      tags: [Decks]
+      operationId: getDeckSuggestions
+      summary: What goes well after the track on a deck
+      description: "Required scope: `read`. Same as `GET /v1/library/tracks/{id}/suggestions` for the track loaded on the deck. `deck` is 1 to 4, or `master` for the deck on air (the playing deck that is loudest at the master). 409 when nothing is loaded there. Ranked by a transparent score (tempo within the allowed pitch change, also half or double time; key on the wheel; energy from the phrase analysis, the seed's outro against each candidate's intro; shared genre; rating; the pairs the user played back to back before; a small boost for never-played tracks; a penalty for tracks played in this session). Each item carries its breakdown in `factors` (`id`, `points`, `value` 0..1, `detail`, `tag`), so a client can say why. The weights are the settings `suggest.w.tempo`, `key`, `energy`, `genre`, `rating`, `history`, `explore`, `recent` (points); the defaults of the other options come from `suggest.max_pitch`, `suggest.half_double`, `suggest.harmonic_only`, `suggest.exclude_queued`, `suggest.exclude_played`. Deterministic: ties go to the lower track id. Queued tracks are left out unless `exclude_queued=0`."
+      x-scope: read
+      parameters:
+        - {name: deck, in: path, required: true, description: "1 to 4, or `master`.", schema: {type: string}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+        - {name: playlist, in: query, required: false, description: "Only tracks of this playlist.", schema: {type: integer, format: int64}}
+        - {name: max_pitch, in: query, required: false, description: "Largest tempo change in percent (default from the setting suggest.max_pitch, 6).", schema: {type: number, exclusiveMinimum: 0, maximum: 50}}
+        - {name: half_double, in: query, required: false, schema: {type: integer, enum: [0, 1]}}
+        - {name: harmonic_only, in: query, required: false, schema: {type: integer, enum: [0, 1]}}
+        - {name: exclude_queued, in: query, required: false, schema: {type: integer, enum: [0, 1]}}
+        - {name: exclude_played, in: query, required: false, schema: {type: integer, enum: [0, 1]}}
+      responses:
+        "200":
+          description: The seed and the ranked suggestions.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/NextTracks"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {description: "No track is loaded on that deck.", content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks/{id}/transitions:
+    get:
+      tags: [Library]
+      operationId: getTrackTransitions
+      summary: Tracks played right after this one
+      description: "Required scope: `library:read`. The transition history: how often each track followed this one in the same play session (counted when a session records consecutive plays; backfilled from the history when the library was upgraded to schema 9), and the pairs saved from preparation mode with their note, most played first."
+      x-scope: library:read
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+      responses:
+        "200":
+          description: The pairs.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/transitions:
+    post:
+      tags: [Library]
+      operationId: saveTransition
+      summary: Save a pair of tracks with a note
+      description: "Required scope: `library:write`. Keeps the pair (`from` then `to`) in the transition history even if it was never played that way; `note` replaces an older note (500 characters at most). An existing pair keeps its play count."
+      x-scope: library:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to]
+              properties:
+                from: {type: integer, format: int64}
+                to: {type: integer, format: int64}
+                note: {type: string, maxLength: 500}
+      responses:
+        "200":
+          description: The saved pair.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/library/tracks/{id}/cue-suggestions:
     get:
       tags: [Library]
@@ -2295,7 +2396,7 @@ paths:
       tags: [Export]
       operationId: exportLibrary
       summary: Export to a removable drive
-      description: "Required scope: `export`. Asynchronous; 202 with an empty body."
+      description: "Required scope: `export`. Asynchronous; 202 with an empty body. The outcome is in `GET /v1/export/report`: `report`, `converted`, `remaining_will_not_play`, `stem_tracks`, `no_stems[]` (tracks without usable stems), `cues_not_exported` (hot cues in slots 9-16: the stick format carries 8, the rest is left out and never fails the export), `required_bytes`, `available_bytes`, `ok`, `error`."
       x-scope: export
       requestBody:
         required: true
@@ -2491,7 +2592,7 @@ paths:
       tags: [Export]
       operationId: getExportReport
       summary: Compatibility report of the last export
-      description: "Required scope: `library:read`. `report`, `converted` (tracks written as 24-bit WAV) and `remaining_will_not_play`. 404 until an export has run."
+      description: "Required scope: `library:read`. `report`, `converted` (tracks written as 24-bit WAV), `remaining_will_not_play`, `stem_tracks`, `no_stems[]`, `cues_not_exported`, `required_bytes`, `available_bytes`, `ok` and `error`. 404 until an export has run."
       x-scope: "library:read"
       responses:
         "200":
@@ -2595,6 +2696,402 @@ paths:
       responses:
         "204": {description: Revoked. Empty body.}
         "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/decks/{deck}/key_sync:
+    post:
+      tags: [Decks]
+      operationId: deckKeySync
+      summary: Key sync on, off or toggle
+      description: "Required scope: `control:deck:{deck}`. Same as the deck control `key_sync`: body value 1 on, 0 off, none toggles: the deck keeps its key fitting the other deck as tempos change (sets key shift and engages key lock). The deck's `key_sync` object shows the result (no key, other deck without key, too far ...)."
+      x-scope: "control:deck:{deck}"
+      parameters:
+        - {$ref: "#/components/parameters/Deck"}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, properties: {value: {type: number}}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/decks/{deck}/key_match:
+    post:
+      tags: [Decks]
+      operationId: deckKeyMatch
+      summary: Key sync once
+      description: "Required scope: `control:deck:{deck}`. Same as the deck control `key_match`: shifts the deck key now to fit the other deck, once. The deck's `key_sync` object shows the result (no key, other deck without key, too far ...)."
+      x-scope: "control:deck:{deck}"
+      parameters:
+        - {$ref: "#/components/parameters/Deck"}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, properties: {value: {type: number}}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/decks/{deck}/key_reset:
+    post:
+      tags: [Decks]
+      operationId: deckKeyReset
+      summary: Reset key sync
+      description: "Required scope: `control:deck:{deck}`. Same as the deck control `key_reset`: key shift back to 0 and key sync off. The deck's `key_sync` object shows the result (no key, other deck without key, too far ...)."
+      x-scope: "control:deck:{deck}"
+      parameters:
+        - {$ref: "#/components/parameters/Deck"}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, properties: {value: {type: number}}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/key_sync/config:
+    get:
+      tags: [Decks]
+      operationId: getKeySyncConfig
+      summary: Key sync behaviour
+      description: "Required scope: `read`. `mode` (0 match the key, 1 any compatible key), `fine` (cents instead of whole semitones), `limit` (largest shift in semitones). Settings keysync.mode / keysync.fine / keysync.limit."
+      x-scope: "read"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+    put:
+      tags: [Decks]
+      operationId: putKeySyncConfig
+      summary: Change key sync behaviour
+      description: "Required scope: `control`. Any of `mode` (0 or 1), `fine` (boolean), `limit` (0..12); applied to every deck at once and kept."
+      x-scope: "control"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, properties: {mode: {type: integer}, fine: {type: boolean}, limit: {type: number}}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/lighting/status:
+    get:
+      tags: [Lighting]
+      operationId: getLightingStatus
+      summary: Lighting status
+      description: "Required scope: `read`. `available` is false in a build without the lighting module. Everything is off until `enabled` AND an output is enabled in the configuration; nothing is sent to the network before that."
+      x-scope: "read"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/lighting/config:
+    get:
+      tags: [Lighting]
+      operationId: getLightingConfig
+      summary: Lighting configuration
+      description: "Required scope: `admin`. The whole configuration (see docs/LIGHTING.md): enabled, refresh_hz, show (master, strobe_enabled, strobe_max_hz, latency_ms, palette ...), outputs (artnet, sacn, serial; each off by default), patch, profiles. 404 in a build without the module."
+      x-scope: "admin"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+    put:
+      tags: [Lighting]
+      operationId: putLightingConfig
+      summary: Change the lighting configuration
+      description: "Required scope: `admin`. A (partial) configuration: objects are merged key by key, lists and values replace. Validated (a bad patch is a 400 and changes nothing), saved to lighting.json and applied. Enabling an output starts sending to the address given."
+      x-scope: "admin"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/lighting/command:
+    post:
+      tags: [Lighting]
+      operationId: lightingCommand
+      summary: Blackout, hold, master, strobe, enable or a manual look
+      description: "Required scope: `control`. {\"action\": \"blackout|hold|enable\", \"value\": 0|1} (none toggles), {\"action\": \"master\", \"value\": 0..1}, {\"action\": \"strobe\", \"enabled\": false} or {\"enabled\": true, \"max_hz\": 6} (capped at 25 and never above a quarter of the refresh rate), {\"action\": \"override\", \"scene\": \"wash|pulse|chase|colour_cycle|build_ramp|calm|blackout\", \"colour\": \"#rrggbb\", \"intensity\": 0..1, \"strobe_hz\": n}, {\"action\": \"release\"}. Returns the status."
+      x-scope: "control"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/lighting/preview:
+    get:
+      tags: [Lighting]
+      operationId: getLightingPreview
+      summary: What the lights would show
+      description: "Required scope: `read`. One entry per fixture (`colour` as #rrggbb, intensity, strobe_hz, pan, tilt) and the rendered universes as hex. Empty while the show is not running."
+      x-scope: "read"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/export/verify_device:
+    post:
+      tags: [Export]
+      operationId: verifyDevice
+      summary: Check an exported stick
+      description: "Required scope: `export`. Reads the stick back with the export parser and checks structure, analysis files and that every audio file exists with the recorded size. `path` is the stick; `check_audio` (default true). Never changes the stick. Returns ok, tracks, playlists, files_checked and problems."
+      x-scope: "export"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, required: [path], properties: {path: {type: string}, check_audio: {type: boolean}}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/export/backup_device:
+    post:
+      tags: [Export]
+      operationId: backupDevice
+      summary: Back up the library folders of a stick
+      description: "Required scope: `export`. Writes a dated, hash-verified copy of the stick library (and with `include_audio` the audio files) into DeckHand data folder, device-backups. Returns the backup folder."
+      x-scope: "export"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, required: [path], properties: {path: {type: string}, include_audio: {type: boolean}}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/export/device_backups:
+    get:
+      tags: [Export]
+      operationId: listDeviceBackups
+      summary: Device backups, newest first
+      description: "Required scope: `export`."
+      x-scope: "export"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {type: object, additionalProperties: true}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/export/restore_device:
+    post:
+      tags: [Export]
+      operationId: restoreDevice
+      summary: Put a device backup back on a stick
+      description: "Required scope: `admin`. Never implicit: `backup` must be a folder listed by GET /v1/export/device_backups and `path` the stick. Refuses (409, nothing written) when the stick already has a library unless `force` is true, and when the backup does not verify. Only the library folders are touched; nothing is formatted."
+      x-scope: "admin"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, required: [path, backup], properties: {path: {type: string}, backup: {type: string}, force: {type: boolean}, restore_audio: {type: boolean}}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/shared-playlists:
+    get:
+      tags: [Library]
+      operationId: listSharedPlaylists
+      summary: Shared playlists in a folder
+      description: "Required scope: `library:read`. Query `folder`: the absolute path of a folder both libraries replicate. Each entry: shared_id, name and the participants."
+      x-scope: "library:read"
+      parameters:
+        - {name: folder, in: query, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: array, items: {type: object, additionalProperties: true}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/playlists/{id}/share:
+    post:
+      tags: [Library]
+      operationId: sharePlaylist
+      summary: Publish a playlist to a shared folder
+      description: "Required scope: `library:write`. Body `folder` (absolute, must exist) and optional `label` (the name the other side sees). Links the playlist; returns shared_id and the summary. See docs/SYNC.md."
+      x-scope: "library:write"
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, required: [folder], properties: {folder: {type: string}, label: {type: string}}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+    delete:
+      tags: [Library]
+      operationId: unsharePlaylist
+      summary: Stop sharing a playlist
+      description: "Required scope: `library:write`. The playlist stays as it is; the files in the folder are left alone."
+      x-scope: "library:write"
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "204":
+          description: OK
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/shared-playlists/{shared_id}/join:
+    post:
+      tags: [Library]
+      operationId: joinSharedPlaylist
+      summary: Subscribe to a shared playlist
+      description: "Required scope: `library:write`. Creates a local playlist (under `parent_id`, default top level) from the shared one. Returns shared_id, playlist_id and the merge summary (sent_added, sent_removed, sent_moved, received, missing: entries whose track is not in this library yet)."
+      x-scope: "library:write"
+      parameters:
+        - {name: shared_id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, required: [folder], properties: {folder: {type: string}, label: {type: string}, parent_id: {type: integer, format: int64}}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/playlists/{id}/shared-sync:
+    post:
+      tags: [Library]
+      operationId: syncSharedPlaylist
+      summary: Merge a shared playlist
+      description: "Required scope: `library:write`. Sends your changes and applies theirs (per entry, last writer wins); call again whenever the folder changed. Returns the merge summary."
+      x-scope: "library:write"
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, required: [folder], properties: {folder: {type: string}, label: {type: string}}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/controllers:
+    get:
+      tags: [Controllers]
+      operationId: listControllers
+      summary: Connected and previously seen controllers
+      description: "Required scope: `read`. For each: connected, its mapping (file, decks, pad modes, alternate pad modes, audio interface match, ticks per revolution) and its per-controller settings (jog_sensitivity, ticks_per_rev, soft_takeover, leds, mapping). The settings are the library settings under `settings_prefix` (PUT /v1/settings/{key}); they apply at the next connection."
+      x-scope: "read"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
         default: {$ref: "#/components/responses/Error"}
 
 components:
@@ -2731,7 +3228,7 @@ components:
       required: [kind, start_ms, label]
       properties:
         kind: {type: string, enum: [hot, loop, memory]}
-        slot: {type: integer, minimum: 1, maximum: 8, description: Hot-cue slot; absent for memory cues.}
+        slot: {type: integer, minimum: 1, maximum: 16, description: Hot-cue slot; absent for memory cues.}
         start_ms: {type: number}
         end_ms: {type: number, description: Loop end; absent unless a loop.}
         label: {type: string}
@@ -2861,6 +3358,12 @@ components:
         smart_playlist_id: {type: integer, format: int64, default: 0, description: Smart playlist to export as an ordinary playlist of the tracks it matches now. Not together with playlist_id.}
         convert_incompatible: {type: boolean, default: false, description: "Write 32-bit and float WAV/AIFF as 24-bit WAV on the stick (the source is never changed). The result is in GET /v1/export/report."}
         player_profile: {type: string, default: club, description: Rule table of the compatibility check. Unknown = 400.}
+        playlist_ids: {type: array, items: {type: integer, format: int64}, description: Several playlists. Not together with playlist_id or smart_playlist_id.}
+        stem_mixes: {description: "Stems as ordinary tracks on the stick: a list of acapella, instrumental, drums, bass, other, or \"all\" (the four stems), or a bit set (1 acapella, 2 instrumental, 4 drums, 8 bass, 16 other). Absent = the export panel's choice; [] = none. Tracks without cached stems are skipped and listed in `no_stems` of the report.", oneOf: [{type: array, items: {type: string}}, {type: string}, {type: integer}]}
+        stem_mixes_by_playlist: {type: object, additionalProperties: true, description: "Playlist id -> mixes (same forms as stem_mixes); overrides stem_mixes inside that playlist."}
+        stem_bits: {type: integer, enum: [16, 24], default: 24, description: Bit depth of the stem tracks.}
+        stems_inline: {type: boolean, default: false, description: "Place each stem track right after its parent in every playlist; false = a \"Stems\" folder mirroring the playlists."}
+        stems_folder: {type: string, default: Stems, description: Name of the mirror folder.}
     PathRequest:
       type: object
       required: [path]
@@ -2917,13 +3420,24 @@ components:
         loop: {$ref: "#/components/schemas/Loop"}
         hot_cues:
           type: array
-          description: Eight slots; null for an empty slot.
+          description: Sixteen slots; null for an empty slot.
           items: {type: [number, "null"]}
-          minItems: 8
-          maxItems: 8
+          minItems: 16
+          maxItems: 16
         level: {type: number, description: Output level meter.}
         key_lock: {type: boolean}
         key_shift: {type: number, description: Semitones.}
+        key_sync:
+          type: object
+          description: "Key sync (POST /v1/decks/{deck}/key_sync). `result` is none, ok, too_far, no_own_key, no_reference_key or leader; `pitch` the semitones the deck sounds above its analysed key."
+          properties:
+            key: {type: [string, "null"], description: "Analysed key of the loaded track in Camelot notation, null when unknown."}
+            follow: {type: boolean}
+            mode: {type: integer, description: "0 match the key, 1 any compatible key."}
+            fine: {type: boolean, description: Lands in cents instead of whole semitones.}
+            limit: {type: number, description: Largest shift in semitones.}
+            result: {type: string}
+            pitch: {type: number}
         quantize: {type: boolean}
         slip: {type: boolean}
         reverse: {type: boolean}
@@ -2993,7 +3507,7 @@ components:
       properties:
         value: {type: number, description: "The amount: milliseconds, BPM, seconds, a factor, 0/1 ... (see the action)."}
         value2: {type: number}
-        slot: {type: integer, minimum: 0, description: "Hot cue slot 1..8, or the 1-based number of a memory cue / saved loop."}
+        slot: {type: integer, minimum: 0, description: "Hot cue slot 1..16, or the 1-based number of a memory cue / saved loop."}
         text: {type: string, maxLength: 80, description: Name of a cue.}
         color: {type: [integer, "null"], minimum: 0, maximum: 16777215, description: "0xRRGGBB as a number; null = the default colour."}
     PrepResult:
@@ -3084,6 +3598,31 @@ components:
           type: array
           items: {$ref: "#/components/schemas/SmartRule"}
         track_count: {type: integer, description: Tracks matching now (list and get only).}
+    NextTracks:
+      type: object
+      description: The seed track and what goes well after it, best first.
+      properties:
+        seed: {type: object, additionalProperties: true, description: "id, title, artist, genre, key, bpm, rating, duration_ms of the track the list follows."}
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              track: {type: object, additionalProperties: true, description: "id, title, artist, genre, key, bpm, rating, duration_ms."}
+              score: {type: number, description: "Sum of the factors' points."}
+              pitch_percent: {type: number, description: "Tempo change the candidate needs to match the seed (negative = slower), after any half or double time."}
+              pair_count: {type: integer, description: "Times the user played this track right after the seed."}
+              reverse_count: {type: integer, description: "Times the other way round."}
+              factors:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: {type: string, enum: [tempo, key, energy, genre, rating, history, explore, recent]}
+                    points: {type: number, description: "Contribution to the score (negative for recent)."}
+                    value: {type: number, description: "The factor on its own, 0..1."}
+                    detail: {type: number, description: "tempo: BPM difference to the matched tempo; energy: candidate intro minus seed outro (0..1 scale); rating: stars; history: times; recent: tracks ago."}
+                    tag: {type: string, description: "tempo: direct, half or double; key: same, adjacent, relative, boost or none; genre: the shared genre; history: forward or reverse."}
     CueSuggestionApply:
       type: object
       description: Options of the apply calls; every field is optional.

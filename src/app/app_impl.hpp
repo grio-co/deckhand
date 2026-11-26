@@ -15,6 +15,7 @@
 #include <functional>
 #include <future>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -24,9 +25,13 @@
 #include "deckhand/app/automix.hpp"
 #include "deckhand/app/play_queue.hpp"
 #include "deckhand/app/capi.h"
+#include "deckhand/app/controller_prefs.hpp"
 #include "deckhand/app/controls.hpp"
 #include "deckhand/app/cue_suggest.hpp"
 #include "deckhand/app/keymap.hpp"
+#include "deckhand/app/lighting_bridge.hpp"
+#include "deckhand/app/next_tracks.hpp"
+#include "deckhand/app/prep_mode.hpp"
 #include "deckhand/app/stems_service.hpp"
 #include "deckhand/app/stream_bridge.hpp"
 #include "deckhand/audio/engine.hpp"
@@ -118,7 +123,7 @@ struct DeckInfo {
 
 struct Job {
   enum Kind { Load, Reattach, AddFile, Import, SaveMainCue, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample, Sync, SyncInfo, RestoreSamples,
-              SaveGrid, SaveMemCues, SaveHotStyle, SaveTrackColor, Reanalyse, PreviewLoad, SuggestCues, SyncCues, StemsReady } kind = Load;
+              SaveGrid, SaveMemCues, SaveHotStyle, SaveTrackColor, Reanalyse, PreviewLoad, SuggestCues, SyncCues, StemsReady, VerifyStick } kind = Load;
   int deck = -1;
   std::int64_t track_id = 0;
   std::string path;
@@ -131,6 +136,7 @@ struct Job {
   std::string text;                   // SaveHotStyle: the name
   int color = -1;                     // SaveHotStyle / SaveTrackColor
   bool flag = false;                  // SaveGrid: lock the grid; PreviewLoad: start playing
+  std::shared_ptr<ApiExportRequest> export_req;  // Export: every option (null = the panel / settings)
 };
 
 struct TreeItem {
@@ -159,7 +165,9 @@ using Rect = skin::Rect;
 constexpr int kUiDecks = 4;  // decks the UI can show (the engine runs kMaxDecks)
 
 constexpr Color kHot[kHotCues] = {rgba(255, 92, 92),  rgba(255, 160, 60), rgba(250, 220, 70), rgba(110, 220, 90),
-                                  rgba(60, 210, 200), rgba(80, 150, 255), rgba(170, 110, 255), rgba(255, 110, 200)};
+                                  rgba(60, 210, 200), rgba(80, 150, 255), rgba(170, 110, 255), rgba(255, 110, 200),
+                                  rgba(255, 140, 120), rgba(255, 200, 120), rgba(210, 230, 110), rgba(130, 235, 160),
+                                  rgba(110, 225, 235), rgba(130, 180, 255), rgba(200, 150, 255), rgba(255, 150, 220)};
 
 struct SkinEntry {
   std::string name, path;  // name = file or folder stem
@@ -251,6 +259,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::string api_keymap_json() override { return keymap_json(); }
   bool api_keymap_set(const std::string& t, std::vector<std::string>& w, std::string& e) override { return keymap_set_user(t, w, e); }
   StemService* api_stems() override { return stems_.get(); }
+  LightingBridge* api_lighting() override { return lighting_.get(); }
   AutomixService* api_automix() override { return automix_.get(); }
   bool api_automix_control(const std::string& name, bool has_value, double value, std::string& error) override {
     return automix_control(name, has_value, value, error);
@@ -318,6 +327,23 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
     post(j);
     return true;
   }
+  bool api_export_ex(const ApiExportRequest& req, std::string& error) override {
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (exporting_) {
+        error = "an export is already running";
+        return false;
+      }
+      exporting_ = true;
+    }
+    Job j;
+    j.kind = Job::Export;
+    j.path = req.destination;
+    j.export_req = std::make_shared<ApiExportRequest>(req);
+    post(j);
+    return true;
+  }
+  std::string api_device_backup_dir() override { return data_dir_ + "/device-backups"; }
   void api_library_changed() override { rows_dirty_ = true; }
   void api_cues_changed(const std::vector<std::int64_t>& track_ids) override {
     for (const std::int64_t id : track_ids) {
@@ -400,7 +426,27 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void load_track(Library& lib, int deck, std::int64_t track_id, bool attach_only = false);
   // Gives the deck the stems of its track when the stem cache has them (setting stems.auto_attach, default on).
   void attach_stems(Library& lib, int deck, std::int64_t track_id);
+  int pad_bank_[kMaxDecks] = {};  // 0: hot cues 1-8, 1: 9-16 (skin pad grids with fewer than 16 pads)
   void setup_engine(const std::vector<std::string>& mapping_folders);
+  // ---- the Controller panel (app_controller.cpp) ----
+  std::vector<std::string> mapping_folders_;
+  std::vector<MappingFileInfo> ctl_files_;
+  std::vector<std::string> ctl_names_, ctl_synced_;
+  std::size_t ctl_connected_count_ = 0;
+  std::atomic<bool> ctl_resync_{false};
+  int ctl_sel_ = 0;
+  ControllerPrefs ctl_prefs_;
+  Field f_ctl_ticks_;
+  bool ctl_measure_ = false;
+  double ctl_measured_ = 0, ctl_measure_poll_ = 0, ctl_last_sync_ = 0;
+  std::string ctl_note_;
+  void controller_reload();
+  void controller_sync(double now);
+  void controller_select(int index);
+  void controller_apply();
+  void draw_controller(const Rect& m);
+  std::string controllers_json(Library& lib);  // called from API threads with the API's own library handle
+  std::string api_controllers_json(Library& lib) override { return controllers_json(lib); }
   void start_signal_watch();
   void stop_signal_watch();
   void start_audio();
@@ -495,7 +541,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   Rect inner_rect() const;
 
   // ---- overlays (app_panels.cpp) ----------------------------------------------------
-  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart, Shortcuts, Tools };
+  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart, Shortcuts, Tools, Suggest, PrepMode, Controller };
   bool overlay_open() const { return panel_ != Panel::None; }
   void open_panel(Panel p);
   void close_panel();
@@ -518,6 +564,23 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void draw_relink(const Rect& m);
   void draw_tools(const Rect& m);  // app_tools.cpp: stem models, trash, edit history, duplicates
   void tools_reload();
+  // ---- suggestions and preparation mode (app_next.cpp) ----
+  void draw_suggest(const Rect& m);
+  void draw_prep_mode(const Rect& m);
+  void draw_prep_badge();
+  bool suggest_key(const std::string& key);
+  bool prep_key(const std::string& key);
+  std::int64_t selected_track_id();
+  std::int64_t next_seed();
+  int free_deck() const;
+  void next_refresh(bool force);
+  void next_load(std::int64_t id);
+  void next_queue(std::int64_t id, bool play_next);
+  void queue_top_suggestion();
+  std::string next_reason(const NextTrack& n);
+  void prep_enter();
+  void prep_leave();
+  void prep_load(int slot, std::int64_t id);
   void draw_export_menu(const Rect& m);
   void draw_add_menu(const Rect& m);
   void draw_cue_edit(const Rect& m);
@@ -602,6 +665,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::unique_ptr<StemService> stems_;  // before api_: the bridge is destroyed first
   std::unique_ptr<ApiBridge> api_;
   std::unique_ptr<StreamBridge> stream_;
+  std::unique_ptr<LightingBridge> lighting_;  // DMX lighting; off until the user enables it
   gfx::DrawList dl_;
 
   std::atomic<bool> quit_{false};
@@ -750,6 +814,19 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   bool import_ok_ = false;
   float width_px_ = 1280, height_px_ = 800, scale_ = 1, inset_[4] = {0, 0, 0, 0};
   bool touch_ = false;
+  NextSettings next_set_;
+  std::vector<NextTrack> next_items_;
+  std::vector<TrackRow> next_rows_;
+  std::int64_t next_seed_ = 0;
+  std::uint64_t next_rev_ = 0;
+  int next_sel_ = 0;
+  bool next_dirty_ = true;
+  std::unique_ptr<PrepMode> prep_;
+  std::string prep_note_;
+  Field f_prep_note_;
+  TrackFacts prep_facts_[2];
+  std::int64_t prep_facts_for_[2] = {0, 0};
+  PhrasePoints prep_mix_[2];
   int tools_tab_ = 0, tools_dup_left_ = 0, tools_dup_confirm_ = -1;
   std::vector<StemModelRow> tools_models_;
   std::vector<DeletedTrack> tools_trash_;
@@ -804,6 +881,8 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::vector<std::string> export_targets_;
   bool export_other_ = false;  // the last entry of the export menu is "Other folder..." (needs choose_folder)
   Field* focus_ = nullptr;  // focused overlay field
+  Field f_light_host_, f_light_universe_;
+  bool light_fields_loaded_ = false;
   Field f_period_, f_port_, f_obs_host_, f_obs_port_, f_obs_source_, f_search_learn_;
   Keymap keymap_;                       // keymap_mutex_
   std::mutex keymap_mutex_;

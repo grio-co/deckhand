@@ -1,4 +1,7 @@
 #include "deckhand/app/api_bridge.hpp"
+#include "deckhand/app/lighting_bridge.hpp"
+#include "deckhand/core/key_math.hpp"
+#include "deckhand/export/export_device.hpp"
 #include "deckhand/app/automix.hpp"
 
 #ifndef DECKHAND_WITH_API
@@ -21,12 +24,14 @@
 #include "deckhand/api/server.hpp"
 #include "deckhand/app/controls.hpp"
 #include "deckhand/app/cue_suggest.hpp"
+#include "deckhand/app/next_tracks.hpp"
 #include "deckhand/library/palette.hpp"
 #include "deckhand/services/track_analysis.hpp"
 #include "deckhand/app/stems_service.hpp"
 #include "deckhand/export/export_preflight.hpp"
 #include "deckhand/import/interchange.hpp"
 #include "deckhand/library/library.hpp"
+#include "deckhand/sync/shared_playlist.hpp"
 #include "deckhand/log/log.hpp"
 
 namespace deckhand {
@@ -477,6 +482,19 @@ struct ApiBridge::Impl {
     j.set("level", static_cast<double>(v.level));
     j.set("key_lock", v.key_lock);
     j.set("key_shift", static_cast<double>(v.key_shift));
+    {  // key sync: see POST /v1/decks/{deck}/key_sync
+      Json ks = Json::object();
+      if (v.key_index >= 0) ks.set("key", keymath::camelot(v.key_index));
+      else ks.set("key", Json());
+      ks.set("follow", v.key_sync_follow != 0);
+      ks.set("mode", static_cast<double>(v.key_sync_mode));
+      ks.set("fine", v.key_sync_fine != 0);
+      ks.set("limit", static_cast<double>(v.key_sync_limit));
+      static const char* const names[] = {"none", "ok", "too_far", "no_own_key", "no_reference_key", "leader"};
+      ks.set("result", std::string(names[v.key_sync_result < 6 ? v.key_sync_result : 0]));
+      ks.set("pitch", static_cast<double>(v.key_pitch));
+      j.set("key_sync", std::move(ks));
+    }
     j.set("quantize", v.quantize);
     j.set("slip", v.slip);
     j.set("reverse", v.reverse);
@@ -581,6 +599,17 @@ struct ApiBridge::Impl {
       int pdeck = 0, pslot = 0;
       std::string paction;
       if (parse_prep_control(name, pdeck, paction, pslot)) return prep_response(pdeck, paction, pslot, body);
+    }
+    {  // lighting controls are the lighting module's
+      std::string action;
+      if (parse_lighting_control(name, action)) {
+        LightingBridge* lb = host.api_lighting();
+        std::string lerror;
+        if (!lb || !lb->control(action, has_value, v, lerror)) return Response::error(409, lerror.empty() ? "lighting is not available" : lerror);
+        Json j = Json::object();
+        j.set("control", name);
+        return Response::ok(std::move(j));
+      }
     }
     {  // automix and queue controls are the application's
       std::string action;
@@ -1250,6 +1279,103 @@ struct ApiBridge::Impl {
       }
       return Response::ok(std::move(j));
     });
+    // ---- what goes well after this track (suggestions) and the pairs the user played back to back ----
+    const auto next_response = [this, svc](std::int64_t seed, const Request& r) {
+      NextSettings ns;
+      std::int64_t playlist = 0;
+      std::size_t limit = 20;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        ns = next_settings(lib);
+      }
+      const auto q = [&](const char* name) -> const std::string* {
+        const auto it = r.query.find(name);
+        return it == r.query.end() ? nullptr : &it->second;
+      };
+      if (const auto* v = q("max_pitch")) {  // percent
+        const double p = std::atof(v->c_str());
+        if (!(p > 0 && p <= 50)) return Response::error(400, "max_pitch is a percentage between 0 and 50");
+        ns.max_pitch = p / 100.0;
+      }
+      if (const auto* v = q("half_double")) ns.half_double = *v == "1";
+      if (const auto* v = q("harmonic_only")) ns.harmonic_only = *v == "1";
+      if (const auto* v = q("exclude_queued")) ns.exclude_queued = *v == "1";
+      if (const auto* v = q("exclude_played")) ns.exclude_played = *v == "1";
+      if (const auto* v = q("playlist")) playlist = std::atoll(v->c_str());
+      if (const auto* v = q("limit")) limit = static_cast<std::size_t>(std::clamp<long long>(std::atoll(v->c_str()), 1, 200));
+      AutomixService* a = svc();
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      if (!lib.track(seed)) return Response::error(404, "no such track");
+      if (playlist > 0) {
+        bool found = false;
+        for (const PlaylistNode& n : lib.playlists())
+          if (n.id == playlist && !n.is_folder) found = true;
+        if (!found) return Response::error(404, "no such playlist");
+      }
+      const NextTrackOptions o = next_options(lib, a ? &a->queue() : nullptr, ns, playlist, limit);
+      return Response::ok(next_tracks_json(lib, seed, lib.suggest(seed, o)));
+    };
+    s.add_route("GET", "/v1/library/tracks/{id}/suggestions", "library:read", [next_response](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such track");
+      return next_response(id, r);
+    });
+    s.add_route("GET", "/v1/decks/{deck}/suggestions", "read", [this, next_response](const Request& r) {
+      int deck = -1;
+      const auto it = r.params.find("deck");
+      if (it != r.params.end() && it->second == "master") {
+        deck = master_deck(host.api_engine());
+        if (deck < 0) return Response::error(409, "no deck has a track loaded");
+      } else {
+        std::int64_t d = 0;
+        if (!int_param(r, "deck", d) || d < 1 || d > kMaxDecks) return Response::error(404, "no such deck");
+        deck = static_cast<int>(d - 1);
+      }
+      const DeckView v = host.api_engine().deck(deck);
+      if (!v.loaded || v.track_id <= 0) return Response::error(409, "no track is loaded on that deck");
+      Response resp = next_response(v.track_id, r);
+      return resp;
+    });
+    s.add_route("GET", "/v1/library/tracks/{id}/transitions", "library:read", [this](const Request& r) {
+      std::int64_t id = 0;
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      if (!int_param(r, "id", id) || !lib.track(id)) return Response::error(404, "no such track");
+      Json items = Json::array();
+      for (const TransitionRow& t : lib.transitions_from(id, 100)) {
+        const auto row = lib.track(t.to_id);
+        if (!row) continue;
+        Json o = Json::object();
+        o.set("to_id", t.to_id);
+        o.set("title", row->title);
+        o.set("artist", row->artist);
+        o.set("count", t.count);
+        o.set("last_played_ms", t.last_ms);
+        o.set("saved", t.saved);
+        if (!t.note.empty()) o.set("note", t.note);
+        items.push_back(std::move(o));
+      }
+      Json j = Json::object();
+      j.set("track_id", id);
+      j.set("items", std::move(items));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/transitions", "library:write", [this](const Request& r) {
+      const std::int64_t from = r.body["from"].as_int(0), to = r.body["to"].as_int(0);
+      if (from <= 0 || to <= 0 || from == to) return Response::error(400, "from and to must be two different tracks");
+      std::string note = r.body["note"].is_string() ? r.body["note"].as_string() : std::string();
+      if (note.size() > 500) note.resize(500);
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      if (!lib.track(from) || !lib.track(to)) return Response::error(404, "no such track");
+      lib.save_transition(from, to, note);
+      const auto t = lib.transition(from, to);
+      Json j = Json::object();
+      j.set("from", from);
+      j.set("to", to);
+      j.set("count", t ? t->count : 0);
+      j.set("note", note);
+      j.set("saved", true);
+      return Response::ok(std::move(j));
+    });
     s.add_route("GET", "/v1/library/tracks/{id}/cue-suggestions", "library:read", [this](const Request& r) {
       std::int64_t id = 0;
       SuggestOptions o;
@@ -1843,6 +1969,46 @@ struct ApiBridge::Impl {
       }
       return Response::ok(stems_json(di));
     });
+    // Key sync (also reachable through the generic deck control route): follow, match once, reset.
+    s.add_route("POST", "/v1/decks/{deck}/key_sync", "control:deck:{deck}",
+                [this](const Request& r) { return control("deck" + r.params.at("deck") + ".key_sync", r.body); });
+    s.add_route("POST", "/v1/decks/{deck}/key_match", "control:deck:{deck}",
+                [this](const Request& r) { return control("deck" + r.params.at("deck") + ".key_match", r.body); });
+    s.add_route("POST", "/v1/decks/{deck}/key_reset", "control:deck:{deck}",
+                [this](const Request& r) { return control("deck" + r.params.at("deck") + ".key_reset", r.body); });
+    // Key sync behaviour for every deck: mode (0 match the key, 1 any compatible key), fine (cents instead of whole
+    // semitones) and limit (largest shift in semitones, 0..12). Stored as settings keysync.mode / .fine / .limit.
+    auto key_sync_config_json = [this]() {
+      KeySyncSettings st;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        st = parse_key_sync_settings(lib.setting("keysync.mode"), lib.setting("keysync.fine"), lib.setting("keysync.limit"));
+      }
+      Json j = Json::object();
+      j.set("mode", st.mode);
+      j.set("fine", st.fine);
+      j.set("limit", st.limit);
+      return j;
+    };
+    s.add_route("GET", "/v1/key_sync/config", "read", [key_sync_config_json](const Request&) { return Response::ok(key_sync_config_json()); });
+    s.add_route("PUT", "/v1/key_sync/config", "control", [this, key_sync_config_json](const Request& r) {
+      const Json& b = r.body;
+      if ((!b["mode"].is_null() && !b["mode"].is_number()) || (!b["fine"].is_null() && !b["fine"].is_bool()) ||
+          (!b["limit"].is_null() && !b["limit"].is_number()))
+        return Response::error(400, "mode and limit are numbers, fine is a boolean");
+      if (b["mode"].is_number() && b["mode"].as_double() != 0 && b["mode"].as_double() != 1) return Response::error(400, "mode is 0 or 1");
+      if (b["limit"].is_number() && (!(b["limit"].as_double() >= 0) || b["limit"].as_double() > 12)) return Response::error(400, "limit is 0..12 semitones");
+      KeySyncSettings st;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (b["mode"].is_number()) lib.set_setting("keysync.mode", b["mode"].as_double() != 0 ? "1" : "0");
+        if (b["fine"].is_bool()) lib.set_setting("keysync.fine", b["fine"].as_bool() ? "1" : "0");
+        if (b["limit"].is_number()) lib.set_setting("keysync.limit", std::to_string(b["limit"].as_double()));
+        st = parse_key_sync_settings(lib.setting("keysync.mode"), lib.setting("keysync.fine"), lib.setting("keysync.limit"));
+      }
+      apply_key_sync_settings(host.api_engine(), st);
+      return Response::ok(key_sync_config_json());
+    });
     // Every deck control: POST /v1/decks/1/play, /v1/decks/2/hotcue.3, /v1/decks/1/seek {"value": 62.5}
     s.add_route("POST", "/v1/decks/{deck}/{control}", "control:deck:{deck}", [this](const Request& r) {
       return control("deck" + r.params.at("deck") + "." + r.params.at("control"), r.body);
@@ -1881,11 +2047,50 @@ struct ApiBridge::Impl {
         j.set("range", c.range);
         j.set("help", c.help);
         double v = 0;
-        if (read_control(host.api_engine(), c.name, v)) j.set("value", v);
+        std::string laction;
+        if (parse_lighting_control(c.name, laction)) {
+          if (host.api_lighting() && host.api_lighting()->read_control(laction, v)) j.set("value", v);
+        } else if (read_control(host.api_engine(), c.name, v)) {
+          j.set("value", v);
+        }
         a.push_back(std::move(j));
       }
       return Response::ok(std::move(a));
     });
+    s.add_route("GET", "/v1/controllers", "read", [this](const Request&) {
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      return Response::ok(Json::parse(host.api_controllers_json(lib)));
+    });
+
+    // ---- lighting (DMX over Art-Net / sACN; off until enabled) ----
+    s.add_route("GET", "/v1/lighting/status", "read", [this](const Request&) {
+      LightingBridge* lb = host.api_lighting();
+      return Response::ok(Json::parse(lb ? lb->status_json() : std::string("{\"available\":false,\"enabled\":false,\"running\":false}")));
+    });
+    s.add_route("GET", "/v1/lighting/config", "admin", [this](const Request&) {
+      LightingBridge* lb = host.api_lighting();
+      if (!lb || !LightingBridge::compiled()) return Response::error(404, "this build has no lighting module");
+      return Response::ok(Json::parse(lb->config_json()));
+    });
+    s.add_route("PUT", "/v1/lighting/config", "admin", [this](const Request& r) {
+      LightingBridge* lb = host.api_lighting();
+      if (!lb || !LightingBridge::compiled()) return Response::error(404, "this build has no lighting module");
+      std::string error;
+      if (!lb->set_config_json(r.body.dump(), error)) return Response::error(400, error);
+      return Response::ok(Json::parse(lb->config_json()));
+    });
+    s.add_route("POST", "/v1/lighting/command", "control", [this](const Request& r) {
+      LightingBridge* lb = host.api_lighting();
+      if (!lb || !LightingBridge::compiled()) return Response::error(404, "this build has no lighting module");
+      std::string error;
+      if (!lb->command_json(r.body.dump(), error)) return Response::error(400, error);
+      return Response::ok(Json::parse(lb->status_json()));
+    });
+    s.add_route("GET", "/v1/lighting/preview", "read", [this](const Request&) {
+      LightingBridge* lb = host.api_lighting();
+      return Response::ok(Json::parse(lb ? lb->preview_json() : std::string("{\"running\":false,\"fixtures\":[],\"universes\":[]}")));
+    });
+
     // Several controls in one request, each optionally scheduled: {"commands": [{"control": "deck1.play", ...}]}
     s.add_route("POST", "/v1/commands", "control", [this](const Request& r) {
       const Json& list = r.body["commands"];
@@ -2405,6 +2610,107 @@ struct ApiBridge::Impl {
       return ok;
     });
     // ---- smart playlists: saved rule sets, evaluated when read ----
+    // ---- shared playlists: one playlist shared with another person's library through a folder both replicate ----
+    // (docs/SYNC.md). `folder` is the replicated folder (absolute); `label` is the name the other side sees.
+    const auto shared_config = [this](const Json& b, const std::string& folder_from_query, sync::SharedConfig& cfg, std::string& error) {
+      cfg.folder = b["folder"].is_string() ? b["folder"].as_string() : folder_from_query;
+      if (cfg.folder.empty() || cfg.folder[0] != '/') {
+        error = "folder must be the absolute path of the shared folder";
+        return false;
+      }
+      std::error_code ec;
+      if (!std::filesystem::is_directory(cfg.folder, ec)) {
+        error = "the shared folder does not exist";
+        return false;
+      }
+      cfg.label = b["label"].is_string() ? b["label"].as_string() : std::string();
+      if (cfg.label.empty()) {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        cfg.label = lib.setting("sync.device_name");
+      }
+      if (cfg.label.empty()) cfg.label = "DeckHand";
+      return true;
+    };
+    const auto shared_result_json = [](const sync::SharedResult& res) {
+      Json j = Json::object();
+      j.set("shared_id", res.shared_id);
+      j.set("playlist_id", static_cast<double>(res.playlist_id));
+      Json sum = Json::object();  // the merge summary
+      sum.set("sent_added", res.added);
+      sum.set("sent_removed", res.removed);
+      sum.set("sent_moved", res.moved);
+      sum.set("received", res.received);
+      sum.set("missing", res.missing);
+      j.set("summary", std::move(sum));
+      return j;
+    };
+    s.add_route("GET", "/v1/library/shared-playlists", "library:read", [this, shared_config](const Request& r) {
+      sync::SharedConfig cfg;
+      std::string error;
+      if (!shared_config(Json::object(), r.query.count("folder") ? r.query.at("folder") : std::string(), cfg, error)) return Response::error(400, error);
+      Json a = Json::array();
+      for (const sync::SharedPlaylistInfo& p : sync::list_shared_playlists(cfg)) {
+        Json j = Json::object();
+        j.set("shared_id", p.shared_id);
+        j.set("name", p.name);
+        Json who = Json::array();
+        for (const std::string& l : p.participants) who.push_back(l);
+        j.set("participants", std::move(who));
+        a.push_back(std::move(j));
+      }
+      return Response::ok(std::move(a));
+    });
+    s.add_route("POST", "/v1/library/playlists/{id}/share", "library:write", [this, shared_config, shared_result_json](const Request& r) {
+      std::int64_t id = 0;
+      sync::SharedConfig cfg;
+      std::string error;
+      if (!int_param(r, "id", id)) return Response::error(400, "bad playlist id");
+      if (!shared_config(r.body, std::string(), cfg, error)) return Response::error(400, error);
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      const sync::SharedResult res = sync::share_playlist(lib, id, cfg);
+      if (!res.ok) return Response::error(409, res.error);
+      return Response::ok(shared_result_json(res));
+    });
+    s.add_route("POST", "/v1/library/shared-playlists/{shared_id}/join", "library:write", [this, shared_config, shared_result_json](const Request& r) {
+      sync::SharedConfig cfg;
+      std::string error;
+      if (!shared_config(r.body, std::string(), cfg, error)) return Response::error(400, error);
+      sync::SharedResult res;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        res = sync::join_shared_playlist(lib, r.params.at("shared_id"), cfg, r.body["parent_id"].as_int(0));
+      }
+      if (!res.ok) return Response::error(409, res.error);
+      host.api_library_changed();
+      return Response::ok(shared_result_json(res));
+    });
+    s.add_route("POST", "/v1/library/playlists/{id}/shared-sync", "library:write", [this, shared_config, shared_result_json](const Request& r) {
+      std::int64_t id = 0;
+      sync::SharedConfig cfg;
+      std::string error;
+      if (!int_param(r, "id", id)) return Response::error(400, "bad playlist id");
+      if (!shared_config(r.body, std::string(), cfg, error)) return Response::error(400, error);
+      sync::SharedResult res;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        res = sync::sync_shared_playlist(lib, id, cfg);
+      }
+      if (!res.ok) return Response::error(409, res.error);
+      if (res.received > 0) host.api_library_changed();
+      return Response::ok(shared_result_json(res));
+    });
+    s.add_route("DELETE", "/v1/library/playlists/{id}/share", "library:write", [this](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(400, "bad playlist id");
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        sync::unlink_shared_playlist(lib, id);  // the playlist stays; the files in the folder are left alone
+      }
+      Response ok;
+      ok.status = 204;
+      return ok;
+    });
+
     s.add_route("GET", "/v1/library/smart-playlists", "library:read", [this](const Request&) {
       Json a = Json::array();
       std::lock_guard<std::mutex> lock(lib_mutex);
@@ -2687,11 +2993,124 @@ struct ApiBridge::Impl {
       if (smart != 0 && plain != 0) return Response::error(400, "give playlist_id or smart_playlist_id, not both");
       const std::string profile = r.body["player_profile"].is_string() ? r.body["player_profile"].as_string() : std::string();
       if (!profile.empty() && !usbexport::find_player_profile(profile)) return Response::error(400, "unknown player profile");
-      if (!host.api_export(dest, smart != 0 ? -smart : plain, error, opt_bool(r.body, "convert_incompatible", false), profile))
-        return Response::error(409, error);
+      ApiExportRequest req;
+      req.destination = dest;
+      req.smart_playlist_id = smart;
+      if (plain != 0) req.playlist_ids.push_back(plain);
+      if (r.body["playlist_ids"].size() > 0) {
+        if (plain != 0 || smart != 0) return Response::error(400, "give playlist_id, playlist_ids or smart_playlist_id, not several");
+        for (std::size_t i = 0; i < r.body["playlist_ids"].size(); ++i) req.playlist_ids.push_back(r.body["playlist_ids"].at(i).as_int(0));
+      }
+      req.player_profile = profile;
+      req.convert_incompatible = opt_bool(r.body, "convert_incompatible", false);
+      // Stems on the stick: stem_mixes = ["acapella", "instrumental", "drums", "bass", "other"] (or a bit set number),
+      // stem_mixes_by_playlist = {"<playlist id>": [...]}, stem_bits 16 | 24, stems_inline, stems_folder.
+      const auto mixes_of = [](const Json& j, unsigned& out) {
+        out = 0;
+        if (j.is_number()) {
+          out = static_cast<unsigned>(j.as_int(0)) & 31u;
+          return true;
+        }
+        if (j.is_string() && j.as_string() == "all") {
+          out = usbexport::kMixesFourStems;
+          return true;
+        }
+        if (!j.is_array()) return j.is_null();
+        for (std::size_t i = 0; i < j.size(); ++i) {
+          const std::string n = j.at(i).as_string();
+          if (n == "acapella") out |= usbexport::kMixAcapella;
+          else if (n == "instrumental") out |= usbexport::kMixInstrumental;
+          else if (n == "drums") out |= usbexport::kMixDrums;
+          else if (n == "bass") out |= usbexport::kMixBass;
+          else if (n == "other") out |= usbexport::kMixOther;
+          else return false;
+        }
+        return true;
+      };
+      if (r.body.contains("stem_mixes") || r.body.contains("stem_mixes_by_playlist")) {
+        req.stems_given = true;
+        if (!mixes_of(r.body["stem_mixes"], req.stem_mixes)) return Response::error(400, "stem_mixes: acapella, instrumental, drums, bass, other, or \"all\"");
+        const Json& by = r.body["stem_mixes_by_playlist"];
+        if (by.is_object()) {
+          for (std::size_t bi = 0; bi < by.size(); ++bi) {
+            unsigned m = 0;
+            const std::int64_t id = std::atoll(by.key_at(bi).c_str());
+            if (id <= 0 || !mixes_of(by.at(bi), m)) return Response::error(400, "stem_mixes_by_playlist: playlist id -> list of mixes");
+            req.stem_mixes_by_playlist[id] = m;
+          }
+        }
+        req.stem_bits = static_cast<int>(r.body["stem_bits"].as_int(24));
+        if (req.stem_bits != 16 && req.stem_bits != 24) return Response::error(400, "stem_bits is 16 or 24");
+        req.stems_inline = opt_bool(r.body, "stems_inline", false);
+        if (r.body["stems_folder"].is_string()) req.stems_folder = r.body["stems_folder"].as_string();
+      }
+      if (!host.api_export_ex(req, error)) return Response::error(409, error);
       Response ok = Response::ok();
       ok.status = 202;
       return ok;
+    });
+
+    // ---- the stick itself: pre-gig check, dated backup of its library, restore (docs/EXPORT.md) ----
+    s.add_route("POST", "/v1/export/verify_device", "export", [this](const Request& r) {
+      const std::string path = r.body["path"].as_string();
+      if (path.empty() || path[0] != '/') return Response::error(400, "path must be the absolute path of the stick");
+      usbexport::VerifyOptions vo;
+      vo.check_audio = opt_bool(r.body, "check_audio", true);
+      usbexport::DeviceReport rep;
+      usbexport::verify_device(path, rep, vo);
+      return Response::ok(Json::parse(rep.to_json()));
+    });
+    s.add_route("POST", "/v1/export/backup_device", "export", [this](const Request& r) {
+      const std::string path = r.body["path"].as_string();
+      if (path.empty() || path[0] != '/') return Response::error(400, "path must be the absolute path of the stick");
+      const std::string dir = host.api_device_backup_dir();
+      if (dir.empty()) return Response::error(404, "device backups are not available");
+      usbexport::BackupOptions bo;
+      bo.include_audio = opt_bool(r.body, "include_audio", false);
+      std::string backup, error;
+      if (!usbexport::backup_device(path, dir, bo, backup, error)) return Response::error(409, error);
+      Json j = Json::object();
+      j.set("backup", backup);
+      return Response::ok(std::move(j));
+    });
+    s.add_route("GET", "/v1/export/device_backups", "export", [this](const Request&) {
+      Json a = Json::array();
+      const std::string dir = host.api_device_backup_dir();
+      if (!dir.empty()) {
+        for (const usbexport::BackupInfo& b : usbexport::list_device_backups(dir)) {
+          Json j = Json::object();
+          j.set("backup", b.path);
+          j.set("name", b.name);
+          j.set("created", b.created);
+          j.set("files", static_cast<double>(b.files));
+          j.set("bytes", static_cast<double>(b.bytes));
+          j.set("has_audio", b.has_audio);
+          j.set("valid", b.valid);
+          a.push_back(std::move(j));
+        }
+      }
+      return Response::ok(std::move(a));
+    });
+    // Writes into the stick: admin scope, a backup folder from the list above, and `force` to replace an existing library.
+    s.add_route("POST", "/v1/export/restore_device", "admin", [this](const Request& r) {
+      const std::string path = r.body["path"].as_string(), backup = r.body["backup"].as_string();
+      if (path.empty() || path[0] != '/' || backup.empty() || backup[0] != '/')
+        return Response::error(400, "path (the stick) and backup (a folder from GET /v1/export/device_backups) are absolute paths");
+      const std::string dir = host.api_device_backup_dir();
+      bool known = false;
+      for (const usbexport::BackupInfo& b : usbexport::list_device_backups(dir)) known = known || b.path == backup;
+      if (!known) return Response::error(404, "no such backup");
+      usbexport::RestoreOptions ro;
+      ro.force = opt_bool(r.body, "force", false);
+      ro.restore_audio = opt_bool(r.body, "restore_audio", true);
+      usbexport::RestoreResult rr;
+      std::string error;
+      if (!usbexport::restore_device(backup, path, ro, rr, error)) return Response::error(409, error);
+      Json j = Json::object();
+      j.set("files", static_cast<double>(rr.files));
+      j.set("bytes", static_cast<double>(rr.bytes));
+      j.set("removed_stale", static_cast<double>(rr.removed_stale));
+      return Response::ok(std::move(j));
     });
 
     // ---- settings (admin). Most take effect at the next start. ----

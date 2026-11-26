@@ -107,6 +107,9 @@ const Named kActions[] = {
     {"master_cue", int(Action::MasterCue)}, {"mic_on", int(Action::MicOn)}, {"mic_level", int(Action::MicLevel)},
     {"mic_eq_low", int(Action::MicEqLow)}, {"mic_eq_high", int(Action::MicEqHigh)},
     {"mic_talkover", int(Action::MicTalkover)},
+    {"key_sync", int(Action::KeySync)}, {"key_match", int(Action::KeyMatch)}, {"key_reset", int(Action::KeyReset)},
+    {"stem_mute", int(Action::StemMute)}, {"stem_solo", int(Action::StemSolo)}, {"stem_isolate", int(Action::StemIsolate)},
+    {"stem_preset", int(Action::StemPreset)}, {"stem_enable", int(Action::StemEnable)},
 };
 const Named kStates[] = {
     {"playing", int(LedState::Playing)}, {"cue", int(LedState::Cue)}, {"sync", int(LedState::Sync)},
@@ -118,9 +121,17 @@ const Named kStates[] = {
     {"key_shift", int(LedState::KeyShift)}, {"modifier", int(LedState::Modifier)}, {"fx_assign", int(LedState::FxAssign)},
     {"master_cue", int(LedState::MasterCue)}, {"color_fx", int(LedState::ColorFx)},
     {"mic_on", int(LedState::MicOn)}, {"mic_talkover", int(LedState::MicTalkover)},
+    {"key_sync", int(LedState::KeySync)}, {"stem", int(LedState::Stem)},
 };
 const Named kModes[] = {{"hotcue", 0}, {"padfx1", 1}, {"beatjump", 2}, {"sampler", 3},
-                        {"keyboard", 4}, {"padfx2", 5}, {"beatloop", 6}, {"keyshift", 7}};
+                        {"keyboard", 4}, {"padfx2", 5}, {"beatloop", 6}, {"keyshift", 7}, {"stems", 8}};
+}  // namespace
+const char* pad_mode_name(int mode) { return mode >= 0 && mode < 9 ? kModes[mode].name : ""; }
+namespace {
+const Named kStemNames[] = {{"vocals", 0}, {"drums", 1}, {"bass", 2}, {"other", 3}, {"1", 0}, {"2", 1}, {"3", 2}, {"4", 3}};
+const Named kStemPresets[] = {{"reset", int(StemPresetId::Reset)}, {"acapella", int(StemPresetId::Acapella)},
+                              {"instrumental", int(StemPresetId::Instrumental)}, {"drums", int(StemPresetId::DrumsOnly)},
+                              {"no_drums", int(StemPresetId::NoDrums)}};
 const Named kInKinds[] = {{"button", int(InKind::Button)}, {"abs", int(InKind::Abs)}, {"abs14", int(InKind::Abs14)},
                           {"rel", int(InKind::Rel)}, {"rel2", int(InKind::Rel2)}};
 const Named kHidKinds[] = {{"button", int(InKind::HidButton)}, {"touch", int(InKind::HidButton)},
@@ -149,7 +160,8 @@ bool lookup(const Named (&table)[N], const std::string& name, int& out) {
 
 // key=value arguments shared by "in" and "out" lines. Decks and slots are 1-based in files.
 struct Args {
-  int deck = 0, slot = 0, mode = -1;
+  int deck = 0, slot = 0, mode = -1, alt = -1, alt_on = -1, stem = -1, preset = -1;
+  bool mode_not = false, alt_blink_set = false, alt_blink = true;
   bool top = false, invert = false, blink = false;
   bool has_deck = false, has_slot = false, has_beats = false, has_dir = false, has_value = false, has_range = false;
   bool hold = false, master_unit = false;
@@ -197,7 +209,15 @@ bool parse_args(const std::vector<std::string>& t, std::size_t from, Args& a, st
     long n = 0;
     if (k == "deck") { a.deck = std::atoi(v.c_str()) - 1; a.has_deck = true; }
     else if (k == "slot") { a.slot = std::atoi(v.c_str()) - 1; a.has_slot = true; }
-    else if (k == "mode") { if (!lookup(kModes, v, a.mode)) { error = "unknown pad mode '" + v + "'"; return false; } }
+    else if (k == "mode") {
+      a.mode_not = !v.empty() && v[0] == '!';
+      if (!lookup(kModes, a.mode_not ? v.substr(1) : v, a.mode)) { error = "unknown pad mode '" + v + "'"; return false; }
+    }
+    else if (k == "alt") { if (!lookup(kModes, v, a.alt)) { error = "unknown pad mode '" + v + "'"; return false; } }
+    else if (k == "alt_on" && hex_int(v, n)) a.alt_on = static_cast<int>(n);
+    else if (k == "alt_blink") { a.alt_blink = v == "1"; a.alt_blink_set = true; }
+    else if (k == "stem") { if (!lookup(kStemNames, v, a.stem)) { error = "unknown stem '" + v + "' (vocals, drums, bass, other)"; return false; } }
+    else if (k == "preset") { if (!lookup(kStemPresets, v, a.preset)) { error = "unknown stem preset '" + v + "'"; return false; } }
     else if (k == "surface") a.top = v == "top";
     else if (k == "invert") a.invert = v == "1";
     else if (k == "blink") a.blink = v == "1";
@@ -498,6 +518,10 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
     r.deck = a.deck;
     r.slot = a.slot;
     r.mode = a.mode;
+    r.mode_not = a.mode_not;
+    r.alt = a.alt;
+    r.stem = a.stem;
+    r.preset = a.preset;
     r.top = a.top;
     r.invert = a.invert;
     r.amount = a.amount;
@@ -511,7 +535,17 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
     r.pad = a.pad;
     r.offset = a.offset;
     if (a.ticks_per_rev > 0) r.ticks_per_rev = a.ticks_per_rev;
-    if (r.action == Action::PadMode && r.mode < 0) { why = "pad_mode needs mode=<name>"; return false; }
+    if (r.action == Action::PadMode && (r.mode < 0 || r.mode_not)) { why = "pad_mode needs mode=<name>"; return false; }
+    if (r.alt >= 0 && (r.action != Action::PadMode || r.alt == r.mode)) { why = "alt= belongs on a pad_mode rule and must name another mode"; return false; }
+    switch (r.action) {
+      case Action::StemMute: case Action::StemSolo: case Action::StemIsolate:
+        if (r.stem < 0) r.stem = r.slot % kStemCount;  // pads 1..4 and 5..8 both address stems 1..4
+        break;
+      case Action::StemPreset:
+        if (r.preset < 0) { why = "stem_preset needs preset=reset|acapella|instrumental|drums|no_drums"; return false; }
+        break;
+      default: break;
+    }
     if (!a.when.empty()) {
       r.when_not = a.when[0] == '!';
       r.when = intern(m, r.when_not ? a.when.substr(1) : a.when);
@@ -575,6 +609,10 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
     r.deck = a.deck;
     r.slot = a.slot;
     r.mode = a.mode;
+    r.mode_not = a.mode_not;
+    r.alt = a.alt;
+    r.alt_on = a.alt_blink_set && !a.alt_blink ? (a.alt_on >= 0 ? a.alt_on : r.on) : a.alt_on;
+    r.stem = a.stem;
     r.blink = a.blink;
     r.amount = a.amount;
     r.value = a.value;
@@ -588,7 +626,9 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
     r.off = !a.min_s.empty() ? (hex_int(a.min_s, lim) ? static_cast<int>(lim) : -1) : a.off;
     const int top = r.hid ? static_cast<int>((1LL << r.hid_field.width()) - 1) : 0xFF;
     if (r.on < 0 || r.off < 0 || r.on > top || r.off > top) { why = "on/off/min/max do not fit " + std::string(r.hid ? "the field" : "a byte"); return false; }
-    if (r.state == LedState::PadMode && r.mode < 0) { why = "pad_mode state needs mode=<name>"; return false; }
+    if (r.state == LedState::PadMode && (r.mode < 0 || r.mode_not)) { why = "pad_mode state needs mode=<name>"; return false; }
+    if (r.alt >= 0 && (r.state != LedState::PadMode || r.alt == r.mode)) { why = "alt= belongs on a pad_mode state and must name another mode"; return false; }
+    if (r.state == LedState::Stem && r.stem < 0) r.stem = r.slot % kStemCount;
     if (r.state == LedState::Modifier) {
       if (a.name.empty()) { why = "modifier state needs name=<name>"; return false; }
       r.modifier = intern(m, a.name);
@@ -966,8 +1006,11 @@ void ControllerHub::midi_devices_changed(const std::vector<std::string>& names) 
     for (Mapping& m : mappings_) {
       if (m.match.empty() || (m.hid && m.generated)) continue;  // HID-only mappings and generated HID ones are not MIDI
       if (m.generated ? m.name != device : low.find(m.match) == std::string::npos) continue;
-      found = &m;
-      break;
+      if (!found) found = &m;
+      if (std::find(preferred_.begin(), preferred_.end(), m.name) != preferred_.end()) {  // the user's choice wins a tie
+        found = &m;
+        break;
+      }
     }
     if (!found) {  // unknown device: an empty mapping so MIDI learn works on it
       Mapping g;
@@ -988,6 +1031,43 @@ void ControllerHub::midi_devices_changed(const std::vector<std::string>& names) 
     }
     active_.push_back(std::move(a));
   }
+}
+
+void ControllerHub::set_device_options(const std::string& mapping_name, const DeviceOptions& o) {
+  DeviceOptions v = o;
+  v.jog_scale = std::isfinite(v.jog_scale) ? std::clamp(v.jog_scale, 0.1, 8.0) : 1.0;
+  v.ticks_per_rev = std::isfinite(v.ticks_per_rev) && v.ticks_per_rev > 0 ? std::clamp(v.ticks_per_rev, 16.0, 100000.0) : 0.0;
+  v.pickup = v.pickup < 0 ? -1 : (v.pickup > 0 ? 1 : 0);
+  std::lock_guard<std::mutex> lock(mutex_);
+  options_[mapping_name] = v;
+}
+
+DeviceOptions ControllerHub::device_options(const std::string& mapping_name) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = options_.find(mapping_name);
+  return it == options_.end() ? DeviceOptions{} : it->second;
+}
+
+double ControllerHub::last_jog_ticks(const std::string& mapping_name) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = last_ticks_.find(mapping_name);
+  return it == last_ticks_.end() ? 0.0 : it->second;
+}
+
+void ControllerHub::prefer_mappings(const std::vector<std::string>& names) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  preferred_ = names;
+}
+
+void ControllerHub::reload_mappings(std::vector<Mapping> mappings) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_.clear();  // Active points into mappings_
+    mappings_.clear();
+    for (Mapping& m : mappings) mappings_.push_back(std::move(m));
+    if (hid_io_) hid_set_matches();
+  }
+  devices_changed();  // re-match everything that is connected
 }
 
 std::vector<std::string> ControllerHub::connected() const {
@@ -1045,7 +1125,7 @@ bool ControllerHub::held(const Active& a, const std::string& name, int deck) con
 }
 
 bool ControllerHub::allowed(const Active& a, const InRule& r) const {
-  if (r.mode >= 0 && r.action != Action::PadMode && a.pad_mode[r.deck] != r.mode) return false;
+  if (r.mode >= 0 && r.action != Action::PadMode && (a.pad_mode[r.deck] == r.mode) == r.mode_not) return false;
   if (r.when >= 0) {
     const bool on = a.held[r.when][0] || a.held[r.when][1 + r.deck];
     if (on == r.when_not) return false;
@@ -1232,6 +1312,7 @@ void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pre
         DH_LOG(Debug, "jog deck %d: %.0f ticks while touched (one full turn should equal ticks_per_rev)",
                r.deck + 1, a.jog_ticks[r.deck]);
       }
+      if (!pressed && a.jog_ticks[r.deck] != 0) last_ticks_[a.map->name] = std::fabs(a.jog_ticks[r.deck]);
       a.jog_ticks[r.deck] = 0;
       break;
     case Action::LoopIn: press(Op::LoopIn); break;
@@ -1259,10 +1340,83 @@ void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pre
     case Action::BrowsePress: if (pressed) sink_.browse_press(); break;
     case Action::Load: if (pressed) sink_.load_selected(r.deck); break;
     case Action::PadMode:
-      if (pressed && a.pad_mode[r.deck] != r.mode) {
-        a.pad_mode[r.deck] = r.mode;
+      if (pressed) {
+        int next = r.mode;  // a second press of a button with alt= swaps between its two modes
+        if (r.alt >= 0 && a.pad_mode[r.deck] == r.mode) next = r.alt;
+        if (a.pad_mode[r.deck] == next) break;
+        a.pad_mode[r.deck] = next;
         for (std::size_t i = 0; i < a.map->in.size(); ++i)  // soft takeover starts over on the new layer
           if (a.map->in[i].mode >= 0) a.engaged[i] = 0, a.last_v[i] = -1.0f;
+      }
+      break;
+    case Action::KeySync:
+      if (r.hold || pressed) {
+        c.i = r.hold ? (pressed ? 1 : 0) : (r.has_value ? (r.value > 0 ? 1 : 0) : -1);
+        dv.key_sync_follow = c.i < 0 ? !dv.key_sync_follow : static_cast<std::uint32_t>(c.i);
+        send(Op::KeyFollow);
+      }
+      break;
+    case Action::KeyMatch: press(Op::KeyMatch); break;
+    case Action::KeyReset:
+      if (pressed) {
+        dv.key_shift = 0;
+        dv.key_sync_follow = 0;
+        send(Op::KeyReset);
+      }
+      break;
+    case Action::StemMute:
+    case Action::StemSolo:
+    case Action::StemIsolate: {
+      const int st = std::max(0, std::min(kStemCount - 1, r.stem));
+      const std::uint32_t bit = 1u << st;
+      const StemField field = r.action == Action::StemMute ? StemField::Mute
+                              : r.action == Action::StemSolo ? StemField::Solo : StemField::Isolate;
+      std::uint32_t& mask = field == StemField::Mute ? dv.stem_mute : field == StemField::Solo ? dv.stem_solo : dv.stem_isolate;
+      const bool momentary = r.hold || (field == StemField::Isolate && !r.has_value);
+      if (!momentary && !pressed) break;
+      float f = -1.0f;
+      if (momentary) f = pressed ? 1.0f : 0.0f;
+      else if (r.has_value) f = r.value > 0 ? 1.0f : 0.0f;
+      if (pressed && dv.stems_state == 2 && !dv.stems_on) {  // acting on a stem means hearing the stems
+        Command e;
+        e.deck = c.deck;
+        e.op = Op::StemEnable;
+        e.i = 1;
+        dv.stems_on = 1;
+        sink_.command(e);
+      }
+      mask = f < 0 ? (mask ^ bit) : (f > 0.5f ? (mask | bit) : (mask & ~bit));
+      c.i = (st << 8) | static_cast<int>(field);
+      c.f = f;
+      send(Op::StemParam);
+      break;
+    }
+    case Action::StemPreset:
+      if (pressed) {
+        if (dv.stems_state == 2 && !dv.stems_on) {
+          Command e;
+          e.deck = c.deck;
+          e.op = Op::StemEnable;
+          e.i = 1;
+          dv.stems_on = 1;
+          sink_.command(e);
+        }
+        dv.stem_mute = dv.stem_solo = dv.stem_isolate = 0;
+        switch (static_cast<StemPresetId>(r.preset)) {
+          case StemPresetId::Acapella: dv.stem_solo = 1; break;
+          case StemPresetId::Instrumental: dv.stem_mute = 1; break;
+          case StemPresetId::DrumsOnly: dv.stem_solo = 2; break;
+          case StemPresetId::NoDrums: dv.stem_mute = 2; break;
+          default: break;
+        }
+        c.i = r.preset;
+        send(Op::StemPreset);
+      }
+      break;
+    case Action::StemEnable:
+      if (pressed) {
+        c.i = r.has_value ? (r.value > 0 ? 1 : 0) : -1;
+        send(Op::StemEnable);
       }
       break;
     case Action::Modifier: {
@@ -1494,7 +1648,9 @@ void ControllerHub::value(Active& a, std::size_t idx, const InRule& r, float v) 
     const float off = v - 0.5f;
     v = std::fabs(off) <= dz ? 0.5f : 0.5f + (off > 0 ? 1.0f : -1.0f) * (std::fabs(off) - dz) / (0.5f - dz) * 0.5f;
   }
-  const bool pickup = r.pickup >= 0 ? r.pickup == 1 : a.map->pickup_default;
+  const auto oi = options_.find(a.map->name);
+  const int dev_pickup = oi != options_.end() ? oi->second.pickup : -1;
+  const bool pickup = r.pickup >= 0 ? r.pickup == 1 : dev_pickup >= 0 ? dev_pickup == 1 : a.map->pickup_default;
   if (pickup && !a.engaged[idx]) {
     float e = 0;
     if (engine_value(r, e)) {
@@ -1556,7 +1712,12 @@ void ControllerHub::delta(Active& a, const InRule& r, int steps) {
       a.jog_ticks[r.deck] += steps;
       c.op = Op::JogTurn;
       c.i = r.top ? 1 : 0;
-      c.d = static_cast<double>(steps) * r.amount / (r.ticks_per_rev > 0 ? r.ticks_per_rev : a.map->ticks_per_rev);
+      {
+        const auto oi = options_.find(a.map->name);
+        const double scale = oi != options_.end() ? oi->second.jog_scale : 1.0;
+        const double own = oi != options_.end() && oi->second.ticks_per_rev > 0 ? oi->second.ticks_per_rev : 0.0;
+        c.d = static_cast<double>(steps) * r.amount * scale / (own > 0 ? own : (r.ticks_per_rev > 0 ? r.ticks_per_rev : a.map->ticks_per_rev));
+      }
       sink_.command(c);
       break;
     case Action::FxSelect: {
@@ -1639,6 +1800,8 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
   for (Active& a : active_) {
     want.clear();
     hwant.clear();
+    const auto oi = options_.find(a.map->name);
+    const bool dark = oi != options_.end() && !oi->second.leds;  // the user switched this controller's LEDs off
     for (const OutRule& r : a.map->out) {
       if (r.hid != a.hid) continue;
       const std::array<int, 6> hkey = {r.hid_field.report, r.hid_field.byte, r.hid_field.size, r.hid_field.lo,
@@ -1647,12 +1810,12 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
       if (r.deck >= deck_count && !deckless) continue;
       const DeckView& d = r.deck < deck_count ? decks[r.deck] : blank;
       const std::uint16_t addr = static_cast<std::uint16_t>(r.status << 8 | r.data1);
-      if (r.mode >= 0 && r.state != LedState::PadMode && a.pad_mode[r.deck] != r.mode) {
+      if (r.mode >= 0 && r.state != LedState::PadMode && (a.pad_mode[r.deck] == r.mode) == r.mode_not) {
         if (r.hid) hwant.emplace(hkey, r.off);  // belongs to another pad mode: dark unless an active rule claims it
         else want.emplace(addr, r.off);
         continue;
       }
-      int byte = 0;
+      int byte = 0, forced = -1;
       if (r.state == LedState::Level) {
         const float v = std::min(1.0f, d.level);
         byte = v < 0.02f ? 0 : r.off + static_cast<int>(std::lround((r.on - r.off) * v));
@@ -1667,7 +1830,20 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
           case LedState::LoopIn: on = d.loop_in >= 0; break;
           case LedState::HotCue: on = d.hot_cue[r.slot] >= 0; break;
           case LedState::Loaded: on = d.loaded; break;
-          case LedState::PadMode: on = a.pad_mode[r.deck] == r.mode; break;
+          case LedState::PadMode:
+            on = a.pad_mode[r.deck] == r.mode;
+            if (!on && r.alt >= 0 && a.pad_mode[r.deck] == r.alt) {  // the second mode of the pair: blinking, or its own level
+              if (r.alt_on >= 0) forced = r.alt_on;
+              else on = blink_on;
+            }
+            break;
+          case LedState::KeySync: on = d.key_sync_follow != 0; break;
+          case LedState::Stem: {
+            const int s = std::max(0, std::min(kStemCount - 1, r.stem));
+            const std::uint32_t bit = 1u << s, any = d.stem_solo | d.stem_isolate;
+            on = d.stems_state == 2 && d.stems_on && (any ? (any & bit) != 0 : (d.stem_mute & bit) == 0);
+            break;
+          }
           case LedState::KeyLock: on = d.key_lock; break;
           case LedState::Quantize: on = d.quantize; break;
           case LedState::Slip: on = d.slip; break;
@@ -1702,8 +1878,9 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
           case LedState::Modifier: on = r.modifier >= 0 && (a.held[r.modifier][0] || a.held[r.modifier][1 + r.deck]); break;
           default: break;
         }
-        byte = on ? r.on : r.off;
+        byte = forced >= 0 ? forced : (on ? r.on : r.off);
       }
+      if (dark) byte = r.state == LedState::Level ? 0 : r.off;
       if (r.hid) hwant[hkey] = byte;
       else want[addr] = byte;
     }
@@ -1783,8 +1960,8 @@ std::vector<LearnChoice> learn_choices(int decks) {
     return t;
   };
   decks = std::max(1, std::min(kMaxDecks, decks));
-  static const char* kPadModes[] = {"hotcue", "padfx1", "beatjump", "sampler", "keyboard", "padfx2", "beatloop", "keyshift"};
-  static const char* kPadNames[] = {"Hot cue", "Pad FX 1", "Beat jump", "Sampler", "Keyboard", "Pad FX 2", "Beat loop", "Key shift"};
+  static const char* kPadModes[] = {"hotcue", "padfx1", "beatjump", "sampler", "keyboard", "padfx2", "beatloop", "keyshift", "stems"};
+  static const char* kPadNames[] = {"Hot cue", "Pad FX 1", "Beat jump", "Sampler", "Keyboard", "Pad FX 2", "Beat loop", "Key shift", "Stems"};
   static const double kLoops[] = {0.25, 0.5, 1, 2, 4, 8, 16, 32};
   static const double kJumps[] = {1, 2, 4, 8, 16};
   for (int d = 1; d <= decks; ++d) {
@@ -1811,7 +1988,26 @@ std::vector<LearnChoice> learn_choices(int decks) {
       add(g, "Beat jump back " + num(b), "beatjump beats=-" + num(b) + dk);
       add(g, "Beat jump forward " + num(b), "beatjump beats=" + num(b) + dk);
     }
-    for (int m = 0; m < 8; ++m) add(g, std::string("Pad mode: ") + kPadNames[m], std::string("pad_mode mode=") + kPadModes[m] + dk);
+    for (int m = 0; m < 9; ++m) add(g, std::string("Pad mode: ") + kPadNames[m], std::string("pad_mode mode=") + kPadModes[m] + dk);
+    // Key group: sync (follow), match now, reset, shift up / down
+    const std::string kg = "Key", dn = "Deck " + std::to_string(d) + ": ";
+    add(kg, dn + "Key sync (follow)", "key_sync" + dk);
+    add(kg, dn + "Key match now", "key_match" + dk);
+    add(kg, dn + "Key reset", "key_reset" + dk);
+    add(kg, dn + "Key shift up", "key_shift dir=1" + dk);
+    add(kg, dn + "Key shift down", "key_shift dir=-1" + dk);
+    // Stems group
+    const std::string sg = "Stems";
+    static const char* kStemLabels[] = {"vocals", "drums", "bass", "other"};
+    for (int st = 0; st < 4; ++st) {
+      add(sg, dn + "Mute " + kStemLabels[st], std::string("stem_mute stem=") + kStemLabels[st] + dk);
+      add(sg, dn + "Isolate " + kStemLabels[st] + " (hold)", std::string("stem_isolate stem=") + kStemLabels[st] + dk);
+    }
+    add(sg, dn + "Stems reset", "stem_preset preset=reset" + dk);
+    add(sg, dn + "Acapella", "stem_preset preset=acapella" + dk);
+    add(sg, dn + "Instrumental", "stem_preset preset=instrumental" + dk);
+    add(sg, dn + "Drums only", "stem_preset preset=drums" + dk);
+    add(sg, dn + "Stems on/off", "stem_enable" + dk);
   }
   const struct { const char* label; const char* act; } mixer[] = {
       {"Crossfader", "crossfader"}, {"Headphone mix", "head_mix"}, {"Headphone level", "head_level"},

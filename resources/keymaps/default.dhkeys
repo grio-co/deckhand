@@ -252,8 +252,13 @@ bind mod+z ui.undo_edit context=browser
 bind mod+e ui.queue_add desc="Add the selected tracks to the end of the play queue"
 bind mod+shift+e ui.queue_play_next desc="Play the selected tracks next"
 bind mod+shift+a automix.run desc="Start or stop automix"
+bind mod+shift+c ui.controller desc="Open or close the connected controller's panel (mapping, jog and LED settings)"
 bind mod+shift+k automix.pause desc="Pause or resume automix"
 bind mod+shift+n automix.skip desc="Automix: start the next transition now, on the next bar"
+# ---- suggestions and preparation
+bind f9 ui.suggestions desc="What goes well after the track on air"
+bind mod+shift+y ui.queue_suggestion desc="Play the top suggestion next"
+bind f10 ui.prep desc="Preparation mode: two headphone players on decks 3 and 4"
 # ---- mixer
 bind mod+left mixer.crossfader 0 desc="Crossfader fully left"
 bind mod+right mixer.crossfader 1 desc="Crossfader fully right"
@@ -271,3 +276,25 @@ bind f7 ui.skin_next
 bind f8 ui.cheat_sheet
 bind mod+b ui.window.browser
 bind escape ui.close_panel
+
+# ---- key sync (mod+alt, home row: deck 1 left hand, deck 2 right hand; add shift for decks 3 and 4)
+bind mod+alt+a deck1.key_sync desc="Deck 1: key sync on / off (follows the other deck's key as tempos change)"
+bind mod+alt+s deck1.key_match desc="Deck 1: match the other deck's key once"
+bind mod+alt+f deck1.key_reset desc="Deck 1: key shift back to 0, key sync off"
+bind mod+alt+z ui.key_shift.1 -1 desc="Deck 1: key down one semitone"
+bind mod+alt+x ui.key_shift.1 1 desc="Deck 1: key up one semitone"
+bind mod+alt+semicolon deck2.key_sync desc="Deck 2: key sync on / off (follows the other deck's key as tempos change)"
+bind mod+alt+l deck2.key_match desc="Deck 2: match the other deck's key once"
+bind mod+alt+j deck2.key_reset desc="Deck 2: key shift back to 0, key sync off"
+bind mod+alt+comma ui.key_shift.2 -1 desc="Deck 2: key down one semitone"
+bind mod+alt+period ui.key_shift.2 1 desc="Deck 2: key up one semitone"
+bind mod+alt+shift+a deck3.key_sync desc="Deck 3: key sync on / off (follows the other deck's key as tempos change)"
+bind mod+alt+shift+s deck3.key_match desc="Deck 3: match the other deck's key once"
+bind mod+alt+shift+f deck3.key_reset desc="Deck 3: key shift back to 0, key sync off"
+bind mod+alt+shift+z ui.key_shift.3 -1 desc="Deck 3: key down one semitone"
+bind mod+alt+shift+x ui.key_shift.3 1 desc="Deck 3: key up one semitone"
+bind mod+alt+shift+semicolon deck4.key_sync desc="Deck 4: key sync on / off (follows the other deck's key as tempos change)"
+bind mod+alt+shift+l deck4.key_match desc="Deck 4: match the other deck's key once"
+bind mod+alt+shift+j deck4.key_reset desc="Deck 4: key shift back to 0, key sync off"
+bind mod+alt+shift+comma ui.key_shift.4 -1 desc="Deck 4: key down one semitone"
+bind mod+alt+shift+period ui.key_shift.4 1 desc="Deck 4: key up one semitone"

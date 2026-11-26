@@ -6,6 +6,28 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Controller settings: click the controller's name in the status row (or Cmd/Ctrl+Shift+C) to open
+  a panel for that device: mapping in use with a chooser, decks, pad modes, jog sensitivity and a
+  ticks-per-turn calibration helper, soft takeover, LED feedback, Learn, reload mapping, and a jump
+  to the audio settings. Settings are stored per controller. `GET /v1/controllers`. Tested with
+  fake MIDI only; deck side (1/2 vs 3/4), jog touch and per-knob behaviour are not settable yet.
+- Key sync: match a deck's key to the master or to a compatible key, per deck, with a status line
+  and shortcuts (Cmd+Alt chords); REST routes and `keysync.*` settings. Engine protocol 7. Unheard.
+- 16 hot cues per track, with a BANK button for 9-16. USB export still writes the first eight;
+  the rest are reported by the export check (`cues.not_exported`), never dropped silently.
+- Controllers: alternate pad modes and a stems pad mode (DDJ-FLX4: second press of SAMPLER).
+- Track suggestions: what to play next from tempo, key, genre, energy and what you have mixed
+  before (library schema 9 keeps transition counts). Panel, routes and shortcuts.
+- Preparation mode: two extra players on decks 3/4 that are heard only in the headphones (the
+  engine guarantees silence on the master), for trying a mix without touching the main output.
+- Shared playlists through the sync folder; play history that arrives by sync updates the
+  transition counts.
+- USB export: stems on the stick (optional), and backup, verify and restore of an exported
+  device library (`deckhandctl` and REST; restore needs admin scope and an explicit folder).
+- Lighting (off by default): a show engine driven by beats, phrases and energy of the deck on
+  air, with Art-Net, sACN and serial DMX outputs, `.dhfix` fixture profiles and safety limits;
+  "Lights" tab in the Tools panel ([docs/LIGHTING.md](docs/LIGHTING.md)). Never run against a
+  real fixture or node.
 - Pre-listen: replacing a playing preview fades the old one out instead of cutting it off.
 - Tests for the library-to-USB export step.
 - Skull skin (`skull`): a shaped, transparent skull with the decks in the eye sockets, one waveform
@@ -173,6 +195,9 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 - Tests for the library, analysis, API, export, effects, scheduling, languages, skins and streaming.
 
 ### Fixed
+- Engine helper: if the helper misses the start-up wait and the app falls back to in-process
+  audio, the late helper now exits by itself instead of staying attached to the controller; the
+  status line says the engine is starting while the app waits.
 - Tempos within 0.05 of a whole number were rounded, drifting about 20 ms over six minutes
   (174.02 BPM); they now snap only when the drift stays under 3 ms.
 - Windows: minimum window size no longer exceeds the screen at high display scaling; the

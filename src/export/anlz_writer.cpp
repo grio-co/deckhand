@@ -271,7 +271,10 @@ AnlzFiles build_anlz(const ExportTrack& t, const std::string& audio_db_path, std
                      const ExportOptions& opt) {
   const std::vector<WaveSample> detail = detail_waveform(t);
   std::vector<const ExportCue*> mem, hot;
-  for (const auto& c : t.cues) (c.hot ? hot : mem).push_back(&c);
+  for (const auto& c : t.cues) {
+    if (c.hot && c.slot > 8) continue;  // the format carries hot cues 1-8 (A-H); the rest is reported, not written
+    (c.hot ? hot : mem).push_back(&c);
+  }
   auto by_time = [](const ExportCue* a, const ExportCue* b) { return a->time_ms < b->time_ms; };
   std::stable_sort(mem.begin(), mem.end(), by_time);
   std::stable_sort(hot.begin(), hot.end(), [](const ExportCue* a, const ExportCue* b) { return a->slot < b->slot; });

@@ -103,6 +103,8 @@ bool App::choose_folder(const std::string& title, std::string& out) {
 }
 
 void App::begin_export_menu() {
+  sv_["export.stems"] = lib_->setting("export.stems", "0");
+  sv_["export.stems_inline"] = lib_->setting("export.stems_inline", "0");
   export_targets_.clear();
   export_other_ = platform_.choose_folder != nullptr;
   bool listed = false;
@@ -164,7 +166,7 @@ void App::open_panel(Panel p) {
       output_devices_ = engine_->devices();
       input_devices_ = engine_->input_devices();
       for (const auto& kv : std::vector<std::pair<const char*, const char*>>{{"api.enabled", "1"}, {"api.port", "7373"}, {"stream.files", "0"},
-                                                                          {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"preview.master", "0"}, {"stems.auto_attach", "1"}, {"browser.key_musical", "0"}, {"ui.show_phrases", "1"}, {"obs.host", "127.0.0.1"},
+                                                                          {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"preview.master", "0"}, {"stems.auto_attach", "1"}, {"keysync.mode", "0"}, {"keysync.fine", "0"}, {"browser.key_musical", "0"}, {"ui.show_phrases", "1"}, {"obs.host", "127.0.0.1"},
                                                                           {"obs.port", "4455"}, {"obs.text_source", ""}, {"sync.folder", ""}})
         sv_[kv.first] = lib_->setting(kv.first, kv.second);
       sv_["sync.device_name"] = lib_->setting("sync.device_name", host_name());
@@ -182,6 +184,14 @@ void App::open_panel(Panel p) {
     }
     case Panel::Export: begin_export_menu(); break;
     case Panel::Tools: tools_reload(); break;
+    case Panel::Controller: controller_reload(); break;
+    case Panel::Suggest:
+      next_set_ = next_settings(*lib_);
+      next_dirty_ = true;
+      next_sel_ = 0;
+      panel_scroll_ = 0;
+      break;
+    case Panel::PrepMode: prep_note_.clear(); break;
     case Panel::Shortcuts:
       keys_ui_ = KeysUi();
       key_release_all();
@@ -202,6 +212,8 @@ void App::open_panel(Panel p) {
         if (g == "Mixer") return T("learn.group_mixer");
         if (g == "Master effect") return T("learn.group_master_fx");
         if (g == "Sampler") return T("learn.group_sampler");
+        if (g == "Key") return T("learn.group_key");
+        if (g == "Stems") return T("learn.group_stems");
         return g;
       };
       for (const LearnChoice& c : learn_choices(kUiDecks)) {
@@ -281,12 +293,15 @@ Rect App::panel_size(float w, float h, std::string& title) {
     case Panel::Columns: m = {0, 0, std::min(400.0f, w - 24), std::min(496.0f, h - 24)}; title = T("browser.columns_title"); break;
     case Panel::Smart: m = {0, 0, std::min(720.0f, w - 24), std::min(470.0f, h - 24)}; title = T("smart.title"); break;
     case Panel::Tools: m = {0, 0, std::min(640.0f, w - 24), std::min(480.0f, h - 24)}; title = T("tools.title"); break;
+    case Panel::Suggest: m = {0, 0, std::min(760.0f, w - 24), std::min(540.0f, h - 24)}; title = T("suggest.title"); break;
+    case Panel::PrepMode: m = {0, 0, std::min(780.0f, w - 24), std::min(560.0f, h - 24)}; title = T("prep.title"); break;
+    case Panel::Controller: m = {0, 0, std::min(680.0f, w - 24), std::min(580.0f, h - 24)}; title = T("controller.title"); break;
     case Panel::Shortcuts: m = {0, 0, std::min(700.0f, w - 24), std::min(580.0f, h - 24)}; title = T("keys.title"); break;
     case Panel::CueEdit:
       m = {0, 0, std::min(430.0f, w - 24), std::min(250.0f, h - 24)};
       title = cue_edit_slot_ >= 0 ? T("cue.edit_hot", {{"slot", cue_edit_slot_ + 1}}) : T("cue.edit_memory");
       break;
-    case Panel::Export: m = {0, 0, std::min(440.0f, w - 16), 38 + 26 * static_cast<float>(export_targets_.size() + (export_other_ ? 1 : 0))}; title = T("export.title", {{"what", export_what_()}}); break;
+    case Panel::Export: m = {0, 0, std::min(440.0f, w - 16), 38 + 26 * static_cast<float>(export_targets_.size() + (export_other_ ? 1 : 0)) + 62}; title = T("export.title", {{"what", export_what_()}}); break;
     default: break;
   }
   if (panel_ == Panel::AddTo) {
@@ -325,6 +340,9 @@ void App::draw_panel_body(const Rect& m, const std::string& title) {
   else if (panel_ == Panel::Relink) draw_relink(m);
   else if (panel_ == Panel::Shortcuts) draw_shortcuts(m);
   else if (panel_ == Panel::Tools) draw_tools(m);
+  else if (panel_ == Panel::Suggest) draw_suggest(m);
+  else if (panel_ == Panel::PrepMode) draw_prep_mode(m);
+  else if (panel_ == Panel::Controller) draw_controller(m);
 }
 
 void App::draw_overlays() {
@@ -334,6 +352,7 @@ void App::draw_overlays() {
     ov_.clicks = 0;
     panel_fresh_ = false;
   }
+  draw_prep_badge();
   if (panel_ == Panel::None) return;
   const float w = width_px_ / scale_, h = height_px_ / scale_;
   const bool popup = panel_ == Panel::Export || panel_ == Panel::AddTo;
@@ -372,8 +391,18 @@ void App::draw_export_menu(const Rect& m) {
   for (std::size_t i = 0; i < export_targets_.size(); ++i) {
     const Rect row{m.x + 6, m.y + 38 + 26 * static_cast<float>(i), m.w - 12, 24};
     if (row.contains(ov_.x, ov_.y)) dl_.rrect(row.x, row.y, row.w, row.h, 4, with_alpha(theme_.accent, 90));
-    dl_.text(row.x + 8, row.y + 5, skin_->fit(export_targets_[i], 12, 0, row.w - 16), 12, theme_.text, Align::Left, row.w - 16);
-    if (ov_.pressed && row.contains(ov_.x, ov_.y)) {
+    dl_.text(row.x + 8, row.y + 5, skin_->fit(export_targets_[i], 12, 0, row.w - 80), 12, theme_.text, Align::Left, row.w - 80);
+    const Rect check{row.x + row.w - 64, row.y + 1, 60, 22};  // "Check": the pre-gig check of the stick that is already there
+    if (ui_button(check, T("export.check"), false)) {
+      Job j;
+      j.kind = Job::VerifyStick;
+      j.path = export_targets_[i];
+      post(j);
+      set_status(T("status.stick_checking"));
+      close_panel();
+      return;
+    }
+    if (ov_.pressed && row.contains(ov_.x, ov_.y) && !check.contains(ov_.x, ov_.y)) {
       Job j;
       j.kind = Job::Export;
       j.path = export_targets_[i];
@@ -381,6 +410,21 @@ void App::draw_export_menu(const Rect& m) {
       post(j);
       close_panel();
       return;
+    }
+  }
+  {  // stems on the stick: off / acapella + instrumental / all four; inline or in a Stems folder
+    const float oy = m.y + 38 + 26 * static_cast<float>(export_targets_.size() + (export_other_ ? 1 : 0)) + 4;
+    const std::string mode = sv_["export.stems"] == "1" || sv_["export.stems"] == "2" ? sv_["export.stems"] : "0";
+    if (ui_button({m.x + 6, oy, m.w - 12, 24}, T("export.stems_" + mode), mode != "0")) {
+      sv_["export.stems"] = mode == "0" ? "1" : mode == "1" ? "2" : "0";
+      save_setting("export.stems", sv_["export.stems"]);
+    }
+    if (mode != "0") {
+      const bool inl = sv_["export.stems_inline"] == "1";
+      if (ui_toggle({m.x + 6, oy + 28, m.w - 12, 24}, T("export.stems_inline"), inl)) {
+        sv_["export.stems_inline"] = inl ? "0" : "1";
+        save_setting("export.stems_inline", sv_["export.stems_inline"]);
+      }
     }
   }
   if (export_other_) {  // pick any folder
@@ -577,6 +621,15 @@ void App::draw_settings(const Rect& m) {
       save_setting("stems.auto_attach", sv_["stems.auto_attach"]);
     }
     y += line;
+    for (const char* k : {"keysync.mode", "keysync.fine"}) {
+      const bool on = sv_[k] == "1";
+      if (ui_toggle({x, y, rw, 24}, T(std::string("settings.") + (k[8] == 'm' ? "keysync_compatible" : "keysync_fine")), on)) {
+        sv_[k] = on ? "0" : "1";
+        save_setting(k, sv_[k]);
+        apply_key_sync_settings(*engine_, parse_key_sync_settings(sv_["keysync.mode"], sv_["keysync.fine"], lib_->setting("keysync.limit")));
+      }
+      y += line;
+    }
     const bool musical = sv_["browser.key_musical"] == "1";
     if (ui_toggle({x, y, rw, 24}, T("settings.key_musical"), musical)) {
       sv_["browser.key_musical"] = musical ? "0" : "1";

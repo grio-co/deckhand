@@ -30,6 +30,11 @@ std::vector<std::string> wrap(gfx::DrawList& dl, const std::string& text, float 
   return lines;
 }
 
+std::string trim(const std::string& s) {
+  const auto a = s.find_first_not_of(" \t");
+  return a == std::string::npos ? std::string() : s.substr(a, s.find_last_not_of(" \t") - a + 1);
+}
+
 std::string human_bytes(std::uint64_t b) {
   char buf[32];
   if (b >= (1ull << 30)) std::snprintf(buf, sizeof buf, "%.1f GB", static_cast<double>(b) / (1ull << 30));
@@ -47,6 +52,7 @@ void App::tools_reload() {
       break;
     case 1: tools_trash_ = lib_->deleted_tracks(); break;
     case 2: tools_edits_ = lib_->recent_edits(40); break;
+    case 5: light_fields_loaded_ = false; break;
     case 3: {
       const HashProgress hp = lib_->hash_pending(50);  // bounded work per visit
       tools_dup_left_ = hp.remaining;
@@ -63,9 +69,9 @@ void App::draw_tools(const Rect& m) {
   const ui::Theme& th = theme_;
   const float x = m.x + 20, rw = m.w - 40;
   float y = m.y + 46;
-  const char* tabs[] = {"tools.tab_stems", "tools.tab_trash", "tools.tab_history", "tools.tab_dups", "tools.tab_queue"};
-  const float tw = (rw - 24) / 5;
-  for (int i = 0; i < 5; ++i) {
+  const char* tabs[] = {"tools.tab_stems", "tools.tab_trash", "tools.tab_history", "tools.tab_dups", "tools.tab_queue", "tools.tab_lighting"};
+  const float tw = (rw - 30) / 6;
+  for (int i = 0; i < 6; ++i) {
     if (ui_button({x + i * (tw + 6), y, tw, 26}, T(tabs[i]), tools_tab_ == i) && tools_tab_ != i) {
       tools_tab_ = i;
       tools_reload();
@@ -124,8 +130,23 @@ void App::draw_tools(const Rect& m) {
     } else {
       if (tools_models_.empty()) empty();
       for (const StemModelRow& r : tools_models_) {
+        // A recipe combines installed models: list them, and offer the install only when they are all there.
+        std::string needs;
+        bool needs_met = true;
+        for (const std::string& id : r.entry.requires_ids) {
+          std::string name = id;
+          bool have = false;
+          for (const StemModelRow& o : tools_models_)
+            if (o.entry.id == id) {
+              name = o.entry.name;
+              have = o.installed && o.usable;
+            }
+          if (!have) needs_met = false;
+          needs += (needs.empty() ? "" : ", ") + name;
+        }
         const std::string sub = r.installed ? T("tools.installed", {{"size", human_bytes(r.installed_bytes)}})
-                                            : T("tools.download", {{"size", human_bytes(r.entry.total_bytes())}});
+                                : !r.entry.requires_ids.empty() ? T("tools.requires", {{"names", needs}})
+                                : T("tools.download", {{"size", human_bytes(r.entry.total_bytes())}});
         dl_.text(lx, cy + 1, skin_->fit(r.entry.name, 12, 1, lw), 12, th.text, Align::Left, lw, 1);
         dl_.text(lx, cy + 17, skin_->fit(sub, 10, 0, lw), 10, th.dim, Align::Left, lw);
         const Rect b{x + rw - bw, cy + 3, bw, 26};
@@ -137,6 +158,8 @@ void App::draw_tools(const Rect& m) {
           }
         } else if (in.state == "running" && in.id == r.entry.id) {
           if (ui_button(b, T("tools.installing", {{"percent", static_cast<int>(in.progress * 100)}}), true) && stems_) stems_->cancel_install();
+        } else if (!needs_met) {
+          dl_.text(b.x, b.y + 6, skin_->fit(T("tools.needs_models"), 11, 0, bw), 11, th.dim, Align::Left, bw);
         } else if (r.entry.install_supported && avail && in.state != "running") {
           if (ui_button(b, T("tools.install"), false)) tools_licence_id_ = r.entry.id;
         } else {
@@ -223,6 +246,65 @@ void App::draw_tools(const Rect& m) {
         else if (ui_button({bx0 + 2 * (small + 4), cy + 3, small, 26}, "x", false, th.warn)) changed = queue_->remove(up[i].id);
         if (changed) break;
         cy += row_h;
+      }
+    }
+  } else if (tools_tab_ == 5) {
+    // Lighting: everything is off until enabled here; nothing is sent to the network without an output switched on.
+    const LightingBridge::UiState ls = lighting_ ? lighting_->ui_state() : LightingBridge::UiState{};
+    if (!ls.available) {
+      dl_.text(lx, cy + 4, skin_->fit(T("light.unavailable"), 12, 0, rw), 12, th.dim, Align::Left, rw);
+      cy += row_h;
+    } else {
+      std::string err;
+      const auto cmd = [&](const char* action, bool has, double v) {
+        if (!lighting_->control(action, has, v, err)) status_note_ = err;
+      };
+      if (ui_toggle({lx, cy, rw, 24}, T("light.enable"), ls.enabled)) cmd("enable", true, ls.enabled ? 0 : 1);
+      cy += 28;
+      float bx = lx;
+      if (ui_button({bx, cy, 100, 26}, T("light.blackout"), ls.blackout, th.warn)) cmd("blackout", true, ls.blackout ? 0 : 1);
+      bx += 106;
+      if (ui_button({bx, cy, 100, 26}, T("light.hold"), ls.hold)) cmd("hold", true, ls.hold ? 0 : 1);
+      bx += 106;
+      if (ui_button({bx, cy, 150, 26}, T("light.no_strobes"), !ls.strobes, th.good)) cmd("strobe", true, ls.strobes ? 0 : 1);
+      cy += 34;
+      dl_.text(lx, cy + 5, T("light.master", {{"percent", static_cast<int>(std::lround(ls.master * 100))}}), 12, th.text);
+      if (ui_button({lx + 150, cy, 30, 26}, "-", false)) cmd("master", true, std::max(0.0, ls.master - 0.1));
+      if (ui_button({lx + 186, cy, 30, 26}, "+", false)) cmd("master", true, std::min(1.0, ls.master + 0.1));
+      cy += 36;
+      if (!light_fields_loaded_) {
+        f_light_host_.text = ls.artnet_host;
+        f_light_universe_.text = std::to_string(ls.artnet_first_universe);
+        light_fields_loaded_ = true;
+      }
+      dl_.text(lx, cy, T("light.outputs_hint"), 11, th.dim, Align::Left, rw);
+      cy += 20;
+      dl_.text(lx, cy + 5, T("light.host"), 12, th.dim);
+      ui_field({lx + 90, cy, 180, 24}, f_light_host_, "192.168.1.50");
+      dl_.text(lx + 284, cy + 5, T("light.universe"), 12, th.dim);
+      ui_field({lx + 360, cy, 60, 24}, f_light_universe_, "0");
+      cy += 32;
+      const int universe = std::clamp(std::atoi(f_light_universe_.text.c_str()), 0, 32000);
+      const std::string host = trim(f_light_host_.text);
+      const auto output = [&](const char* which, const char* label, bool on) {
+        if (ui_toggle({lx, cy, rw, 24}, T(label), on)) {
+          if (!lighting_->set_output(which, !on, host, universe, host.empty(), err)) status_note_ = err;
+        }
+        cy += 28;
+      };
+      output("artnet", "light.artnet", ls.artnet);
+      output("sacn", "light.sacn", ls.sacn);
+      dl_.text(lx, cy, skin_->fit(T("light.sacn_note"), 11, 0, rw), 11, th.dim, Align::Left, rw);
+      cy += 24;
+      if (ls.swatches.empty()) {
+        dl_.text(lx, cy + 4, T(ls.running ? "light.no_fixtures" : "light.preview_off"), 11, th.dim, Align::Left, rw);
+        cy += 28;
+      } else {
+        for (std::size_t i = 0; i < ls.swatches.size(); ++i) {
+          const unsigned c = ls.swatches[i];
+          dl_.rrect(lx + static_cast<float>(i) * 30, cy, 26, 26, 4, rgba(static_cast<int>((c >> 16) & 255), static_cast<int>((c >> 8) & 255), static_cast<int>(c & 255)));
+        }
+        cy += 34;
       }
     }
   } else {

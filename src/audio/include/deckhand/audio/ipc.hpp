@@ -25,6 +25,9 @@
 
 namespace deckhand::ipc {
 
+// 7: 16 hot cue slots (kHotCues 8 -> 16: DeckView, track block header), key sync (TrackKey / KeyMatch / KeyFollow / KeyReset /
+//    KeySyncConfig ops, DeckView key_* fields, BlockHeader::key_index), CueOnly op + DeckView::cue_only (a deck that never
+//    reaches the master; added before protocol 7 shipped, so no further bump).
 // 6: stem playback (StemParam / StemEnable / StemPreset / StemDetach ops, DeckView stem fields, kReqStemsAttach).
 // 5: effect chains (kReqFxChain request, ops FxChainSwap / FxUnitSet / FxChainSet stay engine-internal, new EffectKind
 //    values, Command::chain). The snapshot structs and the command ring layout are unchanged.
@@ -33,7 +36,7 @@ namespace deckhand::ipc {
 // 2: microphone channel (Mic* ops, MixerView fields, InputInfo snapshot, input requests, include-mic flags).
 // Bump whenever a wire layout or the meaning of a request changes: a UI that finds an engine with another version
 // asks it to quit and starts a fresh one (RemoteEngine::establish), and the segment's fingerprint covers the sizes.
-constexpr std::uint32_t kProtocolVersion = 6;
+constexpr std::uint32_t kProtocolVersion = 7;
 constexpr int kBlockSlots = 64;  // track / sample blocks in flight at once
 
 // What the OS hands out for a file or socket: a descriptor on POSIX, a HANDLE / SOCKET on Windows (-1 = none).
@@ -484,6 +487,8 @@ struct BlockHeader {
   float gain = 1.0f;
   std::uint32_t path_len = 0;
   std::uint32_t sealed = 0;
+  std::int32_t key_index = -1;  // track: analysed key (protocol 7), -1 unknown
+  std::int32_t pad2 = 0;
   char path[512] = {};
 };
 
@@ -550,6 +555,8 @@ enum Req : std::uint8_t {
   kReqSetTrackMeta,    // u8 deck, i64 track id, f64 bpm, u32 n grid, (f64 frame, f64 bpm, i32 bar_beat)..., u32 n cues, f64... -> u8 ok
   kReqFxChain,         // u8 verb, u8 target, i32 id, i32 pos, u8 kind, i32 field, f64 value, str text -> u8 ok, i32 id, str error, str text, chain info
   kReqStemsAttach,     // u8 deck, i64 track id, str path (.dhstems) -> u8 ok, str error   (loads in the background)
+  kReqHubDevice,       // u8 verb: 0 options (str mapping, f64 jog scale, f64 ticks per rev, i32 pickup, u8 leds) -> u8 ok;
+                       //   1 jog ticks (str mapping) -> f64; 2 reload the mappings -> u8 ok; 3 prefer (u16 n, str...) -> u8 ok
 };
 
 class Wr {

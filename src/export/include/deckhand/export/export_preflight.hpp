@@ -54,6 +54,16 @@ const std::vector<PlayerProfile>& player_profiles();
 const PlayerProfile* find_player_profile(const std::string& id);  // nullptr if unknown
 const PlayerProfile& default_player_profile();                     // "club"
 
+// Hot cues the stick format cannot hold: it carries 8 (A-H), DeckHand decks have 16. Hot cues in slots 9-16 are left
+// out of the export (never an error); the preflight reports them as "cues.not_exported" and the result counts them.
+constexpr int kExportHotCues = 8;
+inline std::size_t hot_cues_beyond_format(const ExportTrack& t) {
+  std::size_t n = 0;
+  for (const ExportCue& c : t.cues)
+    if (c.hot && c.slot > kExportHotCues) ++n;
+  return n;
+}
+
 // ---- report -------------------------------------------------------------------------------------------------
 
 struct PreflightIssue {
@@ -119,6 +129,12 @@ bool convert_to_pcm24_wav(const std::string& source, const FormatInfo& f, const 
 struct ExportResult {
   PreflightReport report;  // computed before anything was written; tracks[i].converted is set afterwards
   std::size_t converted = 0;
+  StemReport stems;                 // filled when ExportOptions::stems is enabled
+  // Free-space check (always done): bytes the export needs (estimate, upper bound) and what the destination has.
+  // Filled before anything is written, also when the export then fails for lack of space.
+  std::uint64_t required_bytes = 0, available_bytes = 0;
+  // Hot cues in slots 9-16 that were left out (the stick format carries 8), and the tracks they belong to.
+  std::size_t cues_not_exported = 0, tracks_with_cues_not_exported = 0;
   // Tracks still marked will-not-play after the export (not converted: option off or not convertible).
   std::size_t remaining_will_not_play() const;
 };

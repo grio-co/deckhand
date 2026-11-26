@@ -408,10 +408,10 @@ void test_commands_and_wire() {
   CHECK(!validate_command(w, c));
   w = WireCommand{};
   w.op = static_cast<std::uint8_t>(Op::HotCueSetAt);
-  w.i = 8;
+  w.i = kHotCues;
   w.d = 1000;
   CHECK(!validate_command(w, c));
-  w.i = 7;
+  w.i = kHotCues - 1;
   CHECK(validate_command(w, c) && c.op == Op::HotCueSetAt);
   w.d = -1;
   CHECK(validate_command(w, c));
@@ -467,9 +467,9 @@ void test_commands_and_wire() {
   CHECK(validate_command(w, c));
   w = WireCommand{};
   w.op = static_cast<std::uint8_t>(Op::HotCueDown);
-  w.i = 8;
+  w.i = kHotCues;
   CHECK(!validate_command(w, c));
-  w.i = 7;
+  w.i = kHotCues - 1;
   CHECK(validate_command(w, c));
   w = WireCommand{};
   w.op = static_cast<std::uint8_t>(Op::FxEnable);

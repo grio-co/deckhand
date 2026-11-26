@@ -170,6 +170,10 @@ bool App::key_event(std::uint32_t physical, std::uint32_t character, std::uint32
     else if (!c.key.empty() && !repeat) keys_commit_capture(c);
     return true;
   }
+  if (down && !text_has_keyboard() && ev.mods == 0 && (panel_ == Panel::Suggest || panel_ == Panel::PrepMode)) {
+    const KeyChord c = Keymap::chord_of(ev);  // the panel's own keys (listed at its foot)
+    if (panel_ == Panel::Suggest ? suggest_key(c.key) : prep_key(c.key)) return true;
+  }
   const KeyFocus focus = text_has_keyboard() ? KeyFocus::Text : panel_ != Panel::None ? KeyFocus::Panel : KeyFocus::Browser;
   std::vector<KeyCall> calls;
   bool taken;
@@ -200,6 +204,10 @@ void App::run_key_call(const KeyCall& c) {
   std::string action, error;
   if (parse_automix_control(c.control, action)) {
     if (!automix_control(action, c.has_value, c.value, error) && !error.empty()) status_note_ = error;
+    return;
+  }
+  if (parse_lighting_control(c.control, action)) {
+    if (!lighting_ || !lighting_->control(action, c.has_value, c.value, error)) status_note_ = error.empty() ? std::string("lighting is not available") : error;
     return;
   }
   if (parse_prep_control(c.control, deck, action, slot)) {
@@ -331,9 +339,20 @@ void App::do_ui_action(const std::string& name, bool has_value, double value) {
     action("compatible");
   } else if (n == "settings") {
     action("settings");
+  } else if (n == "controller") {
+    if (panel_ == Panel::Controller) close_panel();
+    else open_panel(Panel::Controller);
   } else if (n == "shortcuts") {
     if (panel_ == Panel::Shortcuts) close_panel();
     else open_panel(Panel::Shortcuts);
+  } else if (n == "suggestions") {
+    if (panel_ == Panel::Suggest) close_panel();
+    else open_panel(Panel::Suggest);
+  } else if (n == "prep") {
+    if (panel_ == Panel::PrepMode) close_panel();
+    else open_panel(Panel::PrepMode);
+  } else if (n == "queue_suggestion") {
+    queue_top_suggestion();
   } else if (n == "sampler") {
     action("sampler");
   } else if (n == "learn") {
@@ -361,6 +380,11 @@ void App::do_ui_action(const std::string& name, bool has_value, double value) {
       c.i = 0;  // the side of the platter: pitch bend
       engine_->send(c);
     }
+  } else if (trailing_number(n, "key_shift.", deck)) {
+    const std::string ctl = "deck" + std::to_string(deck) + ".key_shift";
+    double cur = 0;
+    std::string error;
+    if (has_value && read_control(*engine_, ctl, cur)) apply_control(*engine_, ctl, true, std::clamp(cur + value, -12.0, 12.0), error);
   } else if (trailing_number(n, "tempo_step.", deck)) {
     const std::string ctl = "deck" + std::to_string(deck) + ".tempo";
     double cur = 0;

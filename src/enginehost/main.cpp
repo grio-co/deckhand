@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <list>
 #include <mutex>
 #include <thread>
@@ -70,6 +71,9 @@ struct Options {
   std::string data_dir, resource_dir;
   bool null_audio = false, no_midi = false, probe = false;
   int log_level = 2;
+  // Leave by itself when no UI attached within this many seconds of starting and nothing is loaded, playing or recorded
+  // (0 = never). A UI passes it when it starts the helper, so a helper that came up after the UI gave up does not linger.
+  int exit_unattached_s = 0;
 };
 
 std::string lower(std::string s) {
@@ -124,6 +128,7 @@ class Host final : public ControlSink {
   void publish_input();
   void publish_hub();
   void hub_tick();
+  void leave_if_abandoned(std::uint64_t now);
   bool open_device(OutputConfig cfg, std::string& error);
   void audio_recheck();
   void shutdown(int fade_ms);
@@ -148,6 +153,8 @@ class Host final : public ControlSink {
 
   DeckMeta meta_[kMaxDecks];  // service thread only
   std::atomic<bool> ui_alive_{false}, stream_on_{false};
+  std::uint64_t start_ns_ = 0;
+  std::atomic<bool> attached_once_{false};  // some UI attached since this engine started (crash survival: then it never leaves by itself)
   std::atomic<bool> quit_{false}, service_stop_{false}, server_stop_{false}, recheck_{false}, reset_request_{false};
   std::atomic<int> quit_fade_ms_{120};
   std::atomic<std::uint32_t> reset_acks_{0};
@@ -179,6 +186,7 @@ bool Host::init(std::string& error) {
   sh_->hdr.session_id.store(now_ns() ^ (static_cast<std::uint64_t>(current_pid()) << 40) ^ 0x9E3779B97F4A7C15ull);
   sh_->hdr.engine_pid.store(current_pid());
   sh_->hdr.engine_start_ns.store(now_ns());
+  start_ns_ = now_ns();
   sh_->hdr.engine_state.store(kStarting);
   publish_device();
   if (!listener_.listen(names_.socket, error)) return false;
@@ -452,7 +460,7 @@ void Host::hub_tick() {
 }
 
 void Host::service_main() {
-  std::uint64_t last_pub = 0, last_hub = 0, last_hubpub = 0, last_gc = 0;
+  std::uint64_t last_pub = 0, last_hub = 0, last_hubpub = 0, last_gc = 0, last_idle = 0;
   constexpr std::uint64_t ms = 1000000ull;
   while (!service_stop_) {
     const std::uint64_t t = now_ns();
@@ -480,8 +488,41 @@ void Host::service_main() {
     const bool alive = ui != 0 && t - sh_->hdr.ui_heartbeat_ns.load(std::memory_order_relaxed) < 3000 * ms;
     if (alive != ui_alive_.exchange(alive))
       DH_LOG(Info, alive ? "UI attached (pid %u)" : "UI heartbeat lost (pid %u): audio and controllers keep running", ui);
+    if (t - last_idle >= 250 * ms) {
+      last_idle = t;
+      leave_if_abandoned(t);
+    }
     if (n == 0) std::this_thread::sleep_for(std::chrono::microseconds(500));
   }
+}
+
+// A helper nobody ever attached to, with nothing to look after, leaves when it is told to (the UI that started it gave
+// up waiting and writes <data dir>/deckhand-engine.abandon holding this process's id) or after --exit-unattached seconds.
+// One that a UI attached to once is never touched: audio and controllers must survive a UI that crashed or restarts.
+void Host::leave_if_abandoned(std::uint64_t now) {
+  if (attached_once_.load() || quit_.load()) return;
+  const std::filesystem::path file = std::filesystem::u8path(opt_.data_dir) / "deckhand-engine.abandon";
+  bool told = false;
+  {
+    std::ifstream f(file, std::ios::binary);  // closed before the file is removed below
+    char text[32] = {};
+    f.read(text, sizeof text - 1);
+    const std::streamsize got = f.gcount();
+    told = got > 0 && static_cast<std::uint32_t>(std::strtoul(text, nullptr, 10)) == current_pid();
+  }
+  const bool timed_out = opt_.exit_unattached_s > 0 && now - start_ns_ >= static_cast<std::uint64_t>(opt_.exit_unattached_s) * 1000000000ull;
+  if (!told && !timed_out) return;
+  for (int i = 0; i < kMaxDecks; ++i) {
+    const DeckView v = engine_.deck(i);
+    if (v.loaded || v.playing) return;
+  }
+  const RecorderStatus rs = engine_.recorder_status();
+  if (rs.open || rs.recording || stream_on_.load()) return;
+  DH_LOG(Info, "no UI attached (%s) and nothing to look after: leaving", told ? "told to leave" : "timed out");
+  std::error_code ec;
+  if (told) std::filesystem::remove(file, ec);
+  quit_fade_ms_ = 0;
+  quit_ = true;
 }
 
 // ---- audio device -----------------------------------------------------------------------------------------------------
@@ -597,6 +638,7 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
       reset_request_ = true;
       for (int i = 0; i < 250 && reset_acks_.load() == acks; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
       sh_->hdr.ui_pid.store(pid);
+      attached_once_ = true;
       sh_->hdr.ui_heartbeat_ns.store(t);
       out.u8(1), out.str(""), out.u32(epoch);
       DH_LOG(Info, "UI pid %u attached (epoch %u)", pid, epoch);
@@ -845,6 +887,40 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
       }
       publish_hub();
       return;
+    case kReqHubDevice: {
+      const std::uint8_t verb = rd.u8();
+      std::lock_guard<std::mutex> lock(hub_mutex_);
+      if (verb == 0) {
+        DeviceOptions o;
+        const std::string name = rd.str();
+        o.jog_scale = rd.f64();
+        o.ticks_per_rev = rd.f64();
+        o.pickup = rd.i32();
+        o.leds = rd.u8() != 0;
+        const bool ok = hub_ && rd.ok() && !name.empty();
+        if (ok) hub_->set_device_options(name, o);
+        out.u8(ok ? 1 : 0);
+      } else if (verb == 1) {
+        const std::string name = rd.str();
+        out.f64(hub_ && rd.ok() ? hub_->last_jog_ticks(name) : 0.0);
+      } else if (verb == 2) {
+        std::vector<std::string> folders;
+        if (!opt_.resource_dir.empty()) folders.push_back(opt_.resource_dir + "/controllers");
+        folders.push_back(opt_.data_dir + "/controllers");
+        if (hub_) hub_->reload_mappings(load_mappings(folders));
+        out.u8(hub_ ? 1 : 0);
+      } else if (verb == 3) {
+        std::vector<std::string> names;
+        const std::uint16_t n = rd.u16();
+        for (std::uint16_t i = 0; i < n && i < 64 && rd.ok(); ++i) names.push_back(rd.str());
+        if (hub_ && rd.ok()) hub_->prefer_mappings(names);
+        out.u8(hub_ && rd.ok() ? 1 : 0);
+      } else {
+        out.u8(0);
+      }
+      publish_hub();
+      return;
+    }
     case kReqHubLearnCommit: {
       bool ok = false;
       if (hub_) {
@@ -879,12 +955,13 @@ bool parse_args(int argc, char** argv, Options& o) {
     else if (a == "--log-level") o.log_level = std::atoi(value().c_str());
     else if (a == "--null-audio") o.null_audio = true;
     else if (a == "--no-midi") o.no_midi = true;
+    else if (a == "--exit-unattached") o.exit_unattached_s = std::max(0, std::atoi(value().c_str()));
     else if (a == "--probe") o.probe = true;
     else if (a == "--version") {
       std::printf("deckhand-engine protocol %u\n", kProtocolVersion);
       std::exit(0);
     } else {
-      std::fprintf(stderr, "usage: deckhand-engine --data-dir DIR [--resources DIR] [--log-level N] [--null-audio] [--no-midi] [--probe]\n");
+      std::fprintf(stderr, "usage: deckhand-engine --data-dir DIR [--resources DIR] [--log-level N] [--null-audio] [--no-midi] [--exit-unattached SECONDS] [--probe]\n");
       return false;
     }
   }

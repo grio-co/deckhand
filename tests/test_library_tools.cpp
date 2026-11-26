@@ -206,7 +206,7 @@ static void test_duplicates_and_merge() {
   Stmt fm3(lib.db(), "UPDATE tracks SET bitrate=192 WHERE id = ?1");
   fm3.bind(1, t3);
   fm3.run();
-  CHECK(count(lib, "SELECT max(version) FROM schema_version") == 8 && kLibrarySchemaVersion == 8);
+  CHECK(count(lib, "SELECT max(version) FROM schema_version") == 9 && kLibrarySchemaVersion == 9);
 
   CHECK(lib.find_duplicates().size() == 1);  // likely only: no hashes yet
   HashProgress hp = lib.hash_pending(50);

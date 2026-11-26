@@ -14,6 +14,7 @@
 #include <chrono>
 #include <thread>
 
+#include "deckhand/core/key_math.hpp"
 #include "deckhand/core/spsc.hpp"
 #include "deckhand/log/log.hpp"
 #include "dsp.hpp"
@@ -230,6 +231,12 @@ struct Deck {
   // key lock, quantise, slip, reverse, auto-gain, colour effect
   bool keylock = false, quantize = false, slip = false, slip_on = false, reverse = false;
   float key_shift = 0;
+  // key sync
+  int key_index = -1;         // analysed key of the loaded track
+  bool ks_follow = false, ks_fine = false, ks_forced_kl = false;
+  bool cue_only = false;  // Op::CueOnly: nothing of this deck reaches the master
+  int ks_mode = 0, ks_cand = -1, ks_target = -1, ks_result = 0;
+  float ks_limit = 2.0f;
   double slip_pos = 0;
   int hold_slot = -1;         // hot cue held while playing (slip excursion)
   // metronome: a click on each grid beat while the deck plays forward
@@ -577,6 +584,53 @@ struct Engine::Impl {
     }
     return best;
   }
+  // ---- key sync (audio thread) ----
+  // Semitones a deck sounds above its analysed key: the shift while key-locked, else what its tempo does to the pitch.
+  double deck_pitch(const Deck& d, int di) const {
+    return d.keylock ? static_cast<double>(d.key_shift) : keymath::tempo_to_semitones(effective_tempo(d, di));
+  }
+  int key_ref_deck(int di) const {
+    const int o = sync_master(di);
+    if (o >= 0) return o;
+    int best = -1;
+    for (int k = 0; k < kMaxDecks; ++k)
+      if (k != di && decks[k].trk && (best < 0 || (decks[k].playing && !decks[best].playing))) best = k;
+    return best;
+  }
+  void key_sync_eval(Deck& d, int di, bool one_shot) {
+    using namespace keymath;
+    SyncParams p;
+    p.own_key = d.trk ? d.key_index : -1;
+    p.mode = d.ks_mode ? SyncMode::Compatible : SyncMode::Match;
+    p.fine = d.ks_fine;
+    p.limit = d.ks_limit;
+    p.prefer = one_shot ? -1 : d.ks_cand;
+    const int o = d.trk ? key_ref_deck(di) : -1;
+    if (o >= 0) {
+      const Deck& od = decks[o];
+      if (!one_shot && od.ks_follow && di < o) {  // two decks following each other: the lower one leads, the other follows it
+        d.ks_result = static_cast<int>(SyncResult::Leader);
+        return;
+      }
+      p.ref_key = od.key_index;
+      p.ref_pitch = deck_pitch(od, o);
+    }
+    p.own_pitch = 0;  // key sync always runs key-locked, so the own tempo does not move the pitch
+    const SyncSolution s = solve_sync(p);
+    d.ks_result = static_cast<int>(s.result);
+    if (s.result != SyncResult::Ok) return;
+    if (!one_shot && d.keylock && d.ks_cand >= 0 && hold_current(d.key_shift, s, d.ks_fine)) {
+      d.ks_target = s.target_key;
+      return;
+    }
+    if (!d.keylock) {
+      d.keylock = true;
+      d.ks_forced_kl = true;
+    }
+    d.key_shift = static_cast<float>(s.shift);
+    d.ks_cand = s.candidate;
+    d.ks_target = s.target_key;
+  }
   double effective_tempo(const Deck& d, int di) const {
     const double mine = bpm_at(d);
     if (d.sync && mine > 0) {
@@ -728,6 +782,9 @@ struct Engine::Impl {
         if (d.trk) garbage.push(d.trk);  // freed later, off the audio thread
         stems_reset(d, di);
         d.trk = c.track;
+        d.key_index = c.track ? c.track->key_index : -1;
+        d.ks_cand = d.ks_target = -1;
+        d.ks_result = 0;
         d.playing = d.preview = d.touching = d.loop_active = false;
         d.loop_in = d.loop_out = -1;
         d.speed = 0;
@@ -771,6 +828,9 @@ struct Engine::Impl {
         garbage.push(d.trk);
         stems_reset(d, di);
         d.trk = nullptr;
+        d.key_index = -1;
+        d.ks_cand = d.ks_target = -1;
+        d.ks_result = 0;
         d.playing = d.preview = d.loop_active = false;
         break;
       case Op::PlayToggle:
@@ -954,8 +1014,50 @@ struct Engine::Impl {
     const int di = c.deck;
     Deck* dp = di < kMaxDecks ? &decks[di] : nullptr;
     switch (c.op) {
-      case Op::KeyLock: if (dp) dp->keylock = flag(dp->keylock, c.i); return true;
-      case Op::KeyShift: if (dp) dp->key_shift = std::clamp(c.f, -12.0f, 12.0f); return true;
+      case Op::KeyLock:
+        if (dp) {
+          dp->keylock = flag(dp->keylock, c.i);
+          dp->ks_forced_kl = false;
+          if (!dp->keylock) dp->ks_follow = false;  // a shift only sounds with key lock
+        }
+        return true;
+      case Op::KeyShift:
+        if (dp) {
+          dp->key_shift = std::clamp(c.f, -12.0f, 12.0f);
+          dp->ks_follow = false;  // a hand on the shift ends following
+        }
+        return true;
+      case Op::TrackKey: if (dp) dp->key_index = keymath::valid(c.i) ? c.i : -1; return true;
+      case Op::KeyMatch: if (dp) key_sync_eval(*dp, di, true); return true;
+      case Op::KeyFollow:
+        if (dp) {
+          dp->ks_follow = flag(dp->ks_follow, c.i);
+          dp->ks_cand = -1;
+          if (dp->ks_follow) key_sync_eval(*dp, di, true);
+        }
+        return true;
+      case Op::KeyReset:
+        if (dp) {
+          dp->ks_follow = false;
+          dp->key_shift = 0;
+          if (dp->ks_forced_kl) dp->keylock = false;
+          dp->ks_forced_kl = false;
+          dp->ks_cand = dp->ks_target = -1;
+          dp->ks_result = 0;
+        }
+        return true;
+      case Op::CueOnly:
+        if (dp) dp->cue_only = flag(dp->cue_only, c.i);
+        return true;
+      case Op::KeySyncConfig:
+        if (dp) {
+          dp->ks_mode = (c.i & 0xFF) ? 1 : 0;
+          dp->ks_fine = ((c.i >> 8) & 1) != 0;
+          dp->ks_limit = std::clamp(c.f, 0.0f, 12.0f);
+          dp->ks_cand = -1;
+          if (dp->ks_follow) key_sync_eval(*dp, di, true);
+        }
+        return true;
       case Op::Quantize: if (dp) dp->quantize = flag(dp->quantize, c.i); return true;
       case Op::Slip:
         if (dp) {
@@ -1162,6 +1264,7 @@ struct Engine::Impl {
         nt->track_id = d.trk->track_id;
         nt->path.swap(d.trk->path);  // no allocation; the old track is garbage now
         nt->cue_point = d.trk->cue_point;
+        nt->key_index = d.trk->key_index;
         for (int i = 0; i < kHotCues; ++i) {
           nt->hot_cue[i] = d.trk->hot_cue[i];
           nt->hot_loop_end[i] = d.trk->hot_loop_end[i];
@@ -1501,6 +1604,7 @@ struct Engine::Impl {
 
     d.bpm_now = bpm_at(d);
     d.tempo_mult = effective_tempo(d, di);
+    if (d.ks_follow) key_sync_eval(d, di, false);
     const double bend = std::clamp(d.bend * kBendPerRev, -0.6, 0.6);
     d.bend *= std::exp(-block_dt / kBendDecay);
     if (std::fabs(d.bend) < 1e-5) d.bend = 0;
@@ -1859,7 +1963,8 @@ struct Engine::Impl {
         std::memset(buf, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));  // let effect tails ring out
         const FxCtx cx = make_ctx(d, fxb[di], n);
         chains[di].run(buf, n, cx, fx_garbage);
-        for (int i = 0; i < n * 2; ++i) master[i] += buf[i] * d.fader * d.fader;
+        if (!d.cue_only)
+          for (int i = 0; i < n * 2; ++i) master[i] += buf[i] * d.fader * d.fader;
         continue;
       }
       render_deck(d, di, buf, n);
@@ -1877,7 +1982,7 @@ struct Engine::Impl {
       process_channel(d, di, buf, n, cx);
       chains[di].run(buf, n, cx, fx_garbage);
       const float xf = (di % 2 == 0) ? std::min(1.0f, 2.0f * (1.0f - crossfader)) : std::min(1.0f, 2.0f * crossfader);
-      const float gm1 = d.fader * d.fader * xf, gm0 = d.g_master_prev;
+      const float gm1 = d.cue_only ? 0.0f : d.fader * d.fader * xf, gm0 = d.cue_only ? 0.0f : d.g_master_prev;  // cue-only: silent from the first sample
       const float gc1 = d.pfl ? 1.0f : 0.0f, gc0 = d.g_cue_prev;
       d.g_master_prev = gm1;
       d.g_cue_prev = gc1;
@@ -2076,6 +2181,15 @@ struct Engine::Impl {
       v.slip_position = d.slip_on ? d.slip_pos : -1;
       v.reverse = d.reverse;
       v.key_shift = d.key_shift;
+      v.key_index = d.trk ? d.key_index : -1;
+      v.key_sync_target = d.ks_target;
+      v.key_sync_result = static_cast<std::uint32_t>(d.ks_result);
+      v.key_sync_follow = d.ks_follow ? 1 : 0;
+      v.key_sync_mode = d.ks_mode;
+      v.key_sync_fine = d.ks_fine ? 1 : 0;
+      v.key_sync_limit = d.ks_limit;
+      v.key_pitch = static_cast<float>(deck_pitch(d, di));
+      v.cue_only = d.cue_only ? 1 : 0;
       v.auto_gain_db = d.autogain_db;
       v.color_fx = d.color;
       chains[di].view_slots(v.fx);
@@ -3220,6 +3334,47 @@ void IEngine::stem_preset(int deck, StemPresetId p) {
   c.op = Op::StemPreset;
   c.deck = static_cast<std::uint8_t>(deck);
   c.i = static_cast<int>(p);
+  send(c);
+}
+void IEngine::set_track_key(int deck, int key_index) {
+  Command c;
+  c.op = Op::TrackKey;
+  c.deck = static_cast<std::uint8_t>(deck);
+  c.i = key_index;
+  send(c);
+}
+void IEngine::key_match(int deck) {
+  Command c;
+  c.op = Op::KeyMatch;
+  c.deck = static_cast<std::uint8_t>(deck);
+  send(c);
+}
+void IEngine::key_follow(int deck, int on) {
+  Command c;
+  c.op = Op::KeyFollow;
+  c.deck = static_cast<std::uint8_t>(deck);
+  c.i = on;
+  send(c);
+}
+void IEngine::cue_only(int deck, int on) {
+  Command c;
+  c.op = Op::CueOnly;
+  c.deck = static_cast<std::uint8_t>(deck);
+  c.i = on;
+  send(c);
+}
+void IEngine::key_reset(int deck) {
+  Command c;
+  c.op = Op::KeyReset;
+  c.deck = static_cast<std::uint8_t>(deck);
+  send(c);
+}
+void IEngine::key_sync_config(int deck, int mode, bool fine, double limit_semitones) {
+  Command c;
+  c.op = Op::KeySyncConfig;
+  c.deck = static_cast<std::uint8_t>(deck);
+  c.i = (mode ? 1 : 0) | (fine ? 0x100 : 0);
+  c.f = static_cast<float>(limit_semitones);
   send(c);
 }
 void IEngine::stems_enable(int deck, int on) {

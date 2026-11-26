@@ -48,6 +48,9 @@ const char* App::panel_role(Panel p) {
     case Panel::Smart: return "smart";
     case Panel::Shortcuts: return "shortcuts";
     case Panel::Tools: return "tools";
+    case Panel::Suggest: return "suggest";
+    case Panel::PrepMode: return "prep";
+    case Panel::Controller: return "controller";
     case Panel::None: break;
   }
   return "";
@@ -338,6 +341,7 @@ void App::sync_panel_window() {
 // ---- the multi-window frame ---------------------------------------------------------------------------------------------
 void App::begin_frame(double) {
   prepare_frame();
+  controller_sync(now_seconds());
   serve_debug_requests();
   sync_windows();
   place_modules();

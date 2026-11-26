@@ -51,7 +51,7 @@ Expected for each: pads act as described, and the mode button lights. Report whi
    pad 5 is 0. Report if the labelled mode buttons do not match the order above.
 
 ## 4. Shift layer
-- Hold SHIFT and press pads in modes other than HOT CUE: nothing should happen (except SAMPLER stop).
+- Hold SHIFT and press pads in modes other than HOT CUE: nothing should happen (except SAMPLER stop, and the STEMS presets in section 7).
 - Report any SHIFT combination that does something unexpected.
 
 ## 5. Effects section
@@ -78,6 +78,24 @@ PLAY and CUE, SYNC, headphone CUE, hot cue pads, beat loop and beat jump pads, m
 (while an effect is on), sampler pads (while playing), keyboard / key shift pads, IN / OUT, level
 meters, track-loaded lights, MASTER CUE and SMART CFX (both guessed notes). Not driven: FX ON/OFF (the
 list describes blink / lit only in a note), SMART FADER. Report each LED that stays dark, stays lit, or is the wrong colour.
+
+## 7. Stems pad mode (second press of SAMPLER)
+Needs a track with stems on the deck (stems made and playing, see docs/STEMS.md). The mode shares the SAMPLER
+button and the SAMPLER pad notes, so nothing existing moved. Try both decks.
+1. Press SAMPLER once: sampler mode as before (pads play samples; SHIFT + pad stops). Press SAMPLER again: the
+   SAMPLER light now **blinks** = STEMS mode. Press it a third time: back to the sampler, light steady.
+   Report if the light does not blink (the unit may ignore the LED while its own mode is SAMPLER; say what it does).
+2. STEMS, pads 1-4: mute / unmute vocals, drums, bass, other (toggle). Lit pad = that stem is audible; a muted
+   stem's pad goes dark. With a track without stems all eight pads are dark.
+3. STEMS, pads 5-8: the same four stems, hold to isolate (only that stem plays while held; on release it returns).
+   The pad light follows what is audible.
+4. SHIFT + pad 1..5: reset, acapella (vocals only), instrumental (no vocals), drums only, no drums.
+   SHIFT + pad 6..8 do nothing; SHIFT + pad in STEMS never stops a sampler slot.
+5. If stems are attached but the deck plays the original mix, pressing a stem pad switches the stems on first.
+6. Press HOT CUE, then SAMPLER: sampler (not stems). The other pad modes behave as before (spot-check KEY SHIFT:
+   pad 1..8 still sets -4..+3).
+Report: whether SAMPLER's second press registers (watch the log for "pad mode"), which pads did not act, and the LED
+behaviour in each step.
 
 ## Please report
 The log file (`deckhand.log`), and for anything wrong: what you did, what happened, what you expected.

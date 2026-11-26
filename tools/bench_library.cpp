@@ -24,4 +24,18 @@ int main(int,char**argv){
    best([&]{lib.tracks(0,"",SortKey::Default);}), best([&]{lib.tracks(0,"",SortKey::Title);}),
    best([&]{lib.tracks(0,"",SortKey::Bpm);}), best([&]{lib.tracks(0,"",SortKey::Artist,true);}),
    best([&]{lib.tracks(0,"title 99",SortKey::Default);}), best([&]{lib.tracks(0,"zzz",SortKey::Default);}));
+  // Suggestions: seed = a 120 BPM track; candidates come from the tempo ranges (direct, half and double time).
+  {
+    const auto seed = lib.track_id_for_path("/music/d20/f20.mp3");  // i = 20 -> 100 BPM; also try a mid-range seed below
+    const auto seed2 = lib.track_id_for_path("/music/d40/f40.mp3");   // i = 40 -> 120 BPM
+    NextTrackOptions o;
+    o.weights = lib.suggest_weights();
+    std::size_t n1 = 0, n2 = 0;
+    const double a = best([&]{ n1 = lib.suggest(*seed, o).size(); });
+    const double b = best([&]{ n2 = lib.suggest(*seed2, o).size(); });
+    o.limit = 0;
+    std::size_t all = 0;
+    const double c = best([&]{ all = lib.suggest(*seed2, o).size(); });
+    printf("suggest top20 (100 BPM seed) %.1f ms | (120 BPM seed) %.1f ms | scoring all %zu candidates %.1f ms (%zu / %zu results)\n", a, b, all, c, n1, n2);
+  }
 }

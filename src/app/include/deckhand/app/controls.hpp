@@ -29,6 +29,10 @@ bool parse_prep_control(std::string_view name, int& deck, std::string& action, i
 // (apply_control refuses them); `action` is the part after "automix.".
 bool parse_automix_control(std::string_view name, std::string& action);
 
+// Lighting controls (lighting.blackout, .hold, .master, .strobe, .enable): carried out by the application's lighting
+// module (apply_control refuses them). `action` is the part after "lighting.".
+bool parse_lighting_control(std::string_view name, std::string& action);
+
 // Applies a control. has_value = false means "press" for triggers/buttons and "toggle" for toggles.
 // Returns false and sets error when the name or value is not valid.
 bool apply_control(IEngine& engine, std::string_view name, bool has_value, double value, std::string& error);
@@ -52,6 +56,17 @@ bool apply_chain_control(IEngine& engine, std::string_view name, bool has_value,
 // "deck1".."deck4", "master" ("mixer"), "mic", "sampler", "deck2.stem3" / "deck2stem3" -> engine target. False when unknown.
 bool parse_fx_target(std::string_view text, int& target);
 std::string fx_target_name(int target);  // inverse of parse_fx_target ("deck1", "master", "mic", "sampler", "deck2.stem3")
+
+// ---- key sync settings (settings keysync.mode / keysync.fine / keysync.limit) -------------------------------------------
+struct KeySyncSettings {
+  int mode = 0;         // 0 match the key, 1 any compatible key
+  bool fine = false;    // land in cents instead of whole semitones
+  double limit = 2.0;   // largest shift in semitones, 0..12
+};
+// From the stored strings (empty / invalid -> the default). Always returns a valid value.
+KeySyncSettings parse_key_sync_settings(const std::string& mode, const std::string& fine, const std::string& limit);
+// Sends the settings to one deck (deck >= 0) or to every deck (-1).
+void apply_key_sync_settings(IEngine& engine, const KeySyncSettings& st, int deck = -1);
 
 // Current value of a control as shown by the engine (for skins and API reads). Returns false if
 // the control has no readable state.

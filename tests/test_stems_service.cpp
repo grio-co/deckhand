@@ -54,6 +54,15 @@ int main() {
   }
   CHECK(svc.install("demucs-htdemucs", false, error) == StemService::Result::NeedLicence);
 
+  // A recipe combines installed models: with its parts missing the install is refused (409), naming what is missing.
+  const auto recipe_rows = svc.models();
+  const StemModelRow* recipe = find_row(recipe_rows, "recipe-roformer-demucs");
+  CHECK(recipe && recipe->entry.kind == "recipe" && recipe->entry.files.empty() && recipe->entry.requires_ids.size() == 2);
+  error.clear();
+  CHECK(svc.install("recipe-roformer-demucs", true, error) == StemService::Result::Refused);
+  CHECK(error.find("melband-roformer-vocals") != std::string::npos && error.find("demucs-htdemucs") != std::string::npos);
+  CHECK(!find_row(svc.models(), "recipe-roformer-demucs")->installed);
+
   std::mutex m;
   std::condition_variable cv;
   bool finished = false;

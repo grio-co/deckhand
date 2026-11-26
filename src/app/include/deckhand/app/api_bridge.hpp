@@ -1,6 +1,7 @@
 #pragma once
 // Exposes the application over the REST + WebSocket API (see docs/API.md).
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -11,6 +12,8 @@ namespace deckhand {
 
 class StemService;
 class AutomixService;
+class LightingBridge;
+class Library;
 
 // Arguments of a track-preparation action (grid editing, cues, loops). Which fields an action reads is in docs/API.md.
 struct PrepArgs {
@@ -23,6 +26,21 @@ struct PrepArgs {
   std::string text;
 };
 
+// An export request with every option (POST /v1/export). Fields left at their defaults take the application's settings.
+struct ApiExportRequest {
+  std::string destination;
+  std::vector<std::int64_t> playlist_ids;  // empty = every playlist
+  std::int64_t smart_playlist_id = 0;
+  bool convert_incompatible = false;
+  std::string player_profile;
+  bool stems_given = false;                // false: stem options come from the application's settings (export.stems ...)
+  unsigned stem_mixes = 0;                 // usbexport::StemMix bits: 1 acapella, 2 instrumental, 4 drums, 8 bass, 16 other
+  std::map<std::int64_t, unsigned> stem_mixes_by_playlist;
+  int stem_bits = 24;
+  bool stems_inline = false;
+  std::string stems_folder;
+};
+
 // What the bridge needs from the application. Methods are called from API threads.
 class ApiHost {
  public:
@@ -33,6 +51,13 @@ class ApiHost {
   // convert_incompatible / player_profile: the export's compatibility fix and rule table (profile empty = default).
   virtual bool api_export(const std::string& destination, std::int64_t playlist_id, std::string& error,
                           bool convert_incompatible, const std::string& player_profile) = 0;
+  // The same with every option (stems, several playlists). The default forwards to api_export.
+  virtual bool api_export_ex(const ApiExportRequest& request, std::string& error) {
+    return api_export(request.destination, request.smart_playlist_id != 0 ? -request.smart_playlist_id : (request.playlist_ids.empty() ? 0 : request.playlist_ids.front()), error,
+                      request.convert_incompatible, request.player_profile);
+  }
+  // Where device backups are kept (<data folder>/device-backups).
+  virtual std::string api_device_backup_dir() { return {}; }
   // The compatibility report of the last export as JSON ({"report", "converted", "remaining_will_not_play"}), or empty.
   virtual std::string api_export_report() { return {}; }
   virtual void api_library_changed() = 0;
@@ -68,6 +93,10 @@ class ApiHost {
     error = "automix is not available";
     return false;
   }
+  // The lighting module's application side; null when the host has none. A build without the module returns a stub.
+  virtual LightingBridge* api_lighting() { return nullptr; }
+  // The connected and previously seen controllers with their mapping and per-controller settings, as JSON text.
+  virtual std::string api_controllers_json(Library& lib) { (void)lib; return "{\"controllers\":[]}"; }
   virtual std::string api_status() = 0;
   virtual std::string api_audio_device() = 0;
   // Debug (admin scope): the windows the UI has (JSON array) and what a click at (x, y) of a window would do (JSON object).

@@ -15,7 +15,7 @@
 namespace deckhand {
 
 constexpr int kMaxDecks = 4;
-constexpr int kHotCues = 8;
+constexpr int kHotCues = 16;  // hot cue slots per deck (protocol 7: was 8)
 constexpr int kFxSlots = 3;       // assignable effect slots per channel and on the master bus
 constexpr int kSamplerSlots = 16;
 constexpr int kFxMaster = 4;      // `deck` value that addresses the master effect bus in Fx commands
@@ -46,6 +46,7 @@ struct LoadedTrack {
   double hot_cue[kHotCues];
   double hot_loop_end[kHotCues];
   double cue_point = 0;
+  int key_index = -1;               // analysed key (0..11 major C..B, 12..23 minor C..B), -1 = unknown; used by key sync
   LoadedTrack() {
     for (int i = 0; i < kHotCues; ++i) hot_cue[i] = hot_loop_end[i] = -1;
   }
@@ -151,6 +152,14 @@ enum class Op : std::uint8_t {
   StemPreset,      // deck, i = StemPresetId
   StemDetach,      // deck: drop the stems of the loaded track (a click-free crossfade back to the original)
   StemAttach,      // internal pointer command (Command::stems, built by IEngine::stems_attach)
+  // ---- key sync (protocol 7) ----
+  TrackKey,        // deck, i = analysed key of the loaded track (0..23, -1 unknown); overrides LoadedTrack::key_index
+  KeyMatch,        // deck: one-shot, shift this deck's key (with key lock) to fit the reference deck now
+  KeyFollow,       // deck, i = 1 follow (re-evaluates as tempos / keys change), 0 off, -1 toggle
+  KeyReset,        // deck: follow off, shift back to 0 (key lock returns to what it was before key sync set it)
+  KeySyncConfig,   // deck, i = mode (0 match, 1 compatible) | fine (bit 8: cents instead of whole semitones), f = limit in semitones (0..12)
+  // ---- appended after protocol 7 was cut (same protocol: a new op value and one DeckView field) ----
+  CueOnly,         // deck, i = 1 headphones only (nothing of this deck reaches the master, whatever the fader or crossfader do), 0 normal, -1 toggle
   Count,           // number of ops; not a command
 };
 
@@ -376,7 +385,7 @@ struct DeckView {
   double tempo_range = 0.06;
   double bpm = 0;           // effective BPM at the current tempo
   double cue = 0, loop_in = -1, loop_out = -1;
-  double hot_cue[kHotCues] = {-1, -1, -1, -1, -1, -1, -1, -1};
+  double hot_cue[kHotCues] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
   float level = 0;          // pre-fader peak, 0..1
   float trim = 0.5f, eq_high = 0.5f, eq_mid = 0.5f, eq_low = 0.5f, filter = 0.5f, fader = 1.0f;
   // appended
@@ -388,7 +397,7 @@ struct DeckView {
   double slip_position = -1;    // shadow playhead (frames) while slip_active
   FxSlotView fx[kFxSlots];
   // appended (protocol 3)
-  double hot_cue_end[kHotCues] = {-1, -1, -1, -1, -1, -1, -1, -1};  // hot loop ends, -1 = plain cue
+  double hot_cue_end[kHotCues] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};  // hot loop ends, -1 = plain cue
   std::uint32_t meta_rev = 0;   // counts grid / memory-cue replacements of the loaded track
   std::uint32_t metronome = 0;  // 1 = the deck's click is on
   // appended (protocol 6): stems
@@ -400,6 +409,17 @@ struct DeckView {
   float stem_meter[kStemCount] = {0, 0, 0, 0};  // post-gain peak, 0..1
   float stems_mix = 0;            // current blend, 0 = original .. 1 = stems
   std::int64_t stems_track_id = 0;
+  // appended (protocol 7): key sync
+  std::int32_t key_index = -1;        // analysed key of the loaded track, -1 unknown
+  std::int32_t key_sync_target = -1;  // key index the deck is nominally in after the last key sync, -1 none
+  std::uint32_t key_sync_result = 0;  // keymath::SyncResult: 0 none, 1 ok, 2 too far, 3 no own key, 4 no reference key, 5 leader
+  std::uint32_t key_sync_follow = 0;  // 1 = following the reference deck's key
+  std::uint32_t key_sync_mode = 0;    // 0 match, 1 compatible
+  std::uint32_t key_sync_fine = 0;    // 1 = lands in cents
+  float key_sync_limit = 2.0f;        // largest shift in semitones
+  float key_pitch = 0;                // semitones the deck currently sounds above / below its analysed key (shift, or tempo when not key-locked)
+  std::uint32_t cue_only = 0;         // 1 = the deck is headphones only (Op::CueOnly): silent on the master
+  std::uint32_t cue_only_pad = 0;
 };
 
 // The pre-listen player (IEngine::preview()).
@@ -567,6 +587,18 @@ class IEngine {
   void stem_set(int deck, int stem, StemField field, double value);  // value < 0 on a boolean field toggles it
   void stem_preset(int deck, StemPresetId p);
   void stems_enable(int deck, int on);  // 1 / 0 / -1 toggle
+
+  // ---- key sync (protocol 7) ----
+  // Shifts a deck's key (key shift, which engages key lock) so it fits the reference deck (the one it tempo-syncs to: the
+  // playing other deck) at both decks' current tempi. See deckhand/core/key_math.hpp and DeckView::key_sync_*.
+  void set_track_key(int deck, int key_index);   // after an analysis finishes for the loaded track
+  void key_match(int deck);                      // one-shot
+  void key_follow(int deck, int on);             // 1 / 0 / -1 toggle
+  void key_reset(int deck);
+  // Headphones only: while on, nothing of this deck reaches the master (and so no recording or stream), whatever its
+  // fader or the crossfader do; the headphone cue (PFL) is untouched. Used by preparation mode. 1 on, 0 off, -1 toggle.
+  void cue_only(int deck, int on);
+  void key_sync_config(int deck, int mode, bool fine, double limit_semitones);  // mode: 0 match, 1 compatible
 
   // Convenience wrappers over fx_chain_edit.
   int fx_insert(int target, EffectKind kind, int pos = -1, bool on = false);  // unit id, 0 on failure

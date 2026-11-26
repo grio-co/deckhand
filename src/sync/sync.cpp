@@ -1801,6 +1801,7 @@ struct SyncEngine::Impl {
 
   void materialize_history(const Maps& maps) {
     IdMap sm = load_map('S'), hm = load_map('H');
+    bool played_changed = false;  // new rows or changed play times: the transition counts follow
     for (const auto& [eid, e] : st.ent[State::idx('S')]) {
       (void)e;
       if (sm.e2l.count(eid)) continue;
@@ -1831,7 +1832,11 @@ struct SyncEngine::Impl {
       i.bind(3, st.text('H', eid, "deck")).bind(4, started && started->v.t == Val::Int ? started->v.i : 0).bind(5, played);
       i.run();
       map_put(hm, 'H', db.last_insert_id(), eid);
+      played_changed = true;
     }
+    // Which track follows which comes from the history, so plays that arrive through sync count for the suggestions too.
+    // The rebuild is idempotent and keeps saved transitions and notes.
+    if (played_changed) lib.rebuild_transitions();
   }
 
   // ---- public operations ------------------------------------------------------------------------------------------

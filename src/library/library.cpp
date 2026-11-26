@@ -315,6 +315,29 @@ void Library::migrate() {
     tx.commit();
     DH_LOG(Info, "library migrated to schema %d (phrases)", 8);
   }
+  if (version < 9) {
+    // Suggestions: energy summary next to the phrase data, the transition history, indexes for the tempo / key pre-filter.
+    Transaction tx(db_);
+    for (const char* column : {"energy_avg", "energy_intro", "energy_outro"})
+      if (!has_column(db_, "track_phrases", column)) db_.exec(std::string("ALTER TABLE track_phrases ADD COLUMN ") + column + " REAL;");
+    db_.exec(
+        "CREATE TABLE IF NOT EXISTS transitions ("
+        " from_id INTEGER NOT NULL, to_id INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 0, last_ms INTEGER NOT NULL DEFAULT 0,"
+        " note TEXT, saved INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(from_id, to_id)) WITHOUT ROWID;"
+        "CREATE INDEX IF NOT EXISTS idx_transitions_to ON transitions(to_id);"
+        "CREATE INDEX IF NOT EXISTS idx_tracks_bpm ON tracks(bpm);"
+        "CREATE INDEX IF NOT EXISTS idx_tracks_key ON tracks(key);");
+    {
+      std::vector<std::int64_t> ids;
+      Stmt s(db_, "SELECT track_id FROM track_phrases WHERE energy_avg IS NULL");
+      while (s.step()) ids.push_back(s.i64(0));
+      for (const std::int64_t id : ids) energy_summary(id);
+    }
+    rebuild_transitions();
+    db_.exec("UPDATE schema_version SET version = 9;");
+    tx.commit();
+    DH_LOG(Info, "library migrated to schema %d (suggestions, transition history)", 9);
+  }
   {
     // Substring search index (FTS5 trigram, case-insensitive) kept in step with `tracks` by triggers. Optional: an
     // SQLite build without FTS5 keeps working with the LIKE scan. Tried on every start until it exists.
@@ -771,8 +794,8 @@ void Library::set_phrases(std::int64_t track_id, const StoredPhrases& p) {
   OptionalTx tx(db_);
   clear_phrases(track_id);
   {
-    Stmt u(db_, "INSERT INTO track_phrases(track_id, version, gridded, time_based, origin_ms, pickup_ms, bar_ms, total_bars, bar_starts, bar_energy)"
-                " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)");
+    Stmt u(db_, "INSERT INTO track_phrases(track_id, version, gridded, time_based, origin_ms, pickup_ms, bar_ms, total_bars, bar_starts, bar_energy,"
+                " energy_avg, energy_intro, energy_outro) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)");
     u.bind(1, track_id);
     u.bind(2, static_cast<std::int64_t>(p.version));
     u.bind(3, static_cast<std::int64_t>(p.gridded ? 1 : 0));
@@ -784,6 +807,8 @@ void Library::set_phrases(std::int64_t track_id, const StoredPhrases& p) {
     u.bind(9, std::string_view(join_numbers(p.bar_starts_ms, "%.2f")));
     std::vector<double> e(p.bar_energy.begin(), p.bar_energy.end());
     u.bind(10, std::string_view(join_numbers(e, "%.3f")));
+    if (const auto en = energy_of_phrases(p)) u.bind(11, en->avg).bind(12, en->intro).bind(13, en->outro);
+    else u.bind_null(11).bind_null(12).bind_null(13);
     u.run();
   }
   std::int64_t idx = 0;
@@ -1436,8 +1461,12 @@ std::int64_t Library::add_history(std::int64_t session_id, std::int64_t track_id
                                   std::int64_t started_at_ms) {
   Stmt i(db_, "INSERT INTO history(session_id, track_id, deck, started_at, played_ms) VALUES (?1, ?2, ?3, ?4, 0)");
   i.bind(1, session_id).bind(2, track_id).bind(3, deck).bind(4, started_at_ms);
+  OptionalTx tx(db_);
   i.run();
-  return db_.last_insert_id();
+  const std::int64_t id = db_.last_insert_id();
+  if (track_id > 0) record_transition(session_id, track_id, started_at_ms);
+  tx.commit();
+  return id;
 }
 
 void Library::set_history_played(std::int64_t history_id, std::int64_t played_ms) {

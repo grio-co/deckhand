@@ -276,6 +276,7 @@ void test_one_way_all_entities() {
   const auto sess = a.lib->begin_history_session();
   const auto h = a.lib->add_history(sess, t2, "A", 1'699'999'000'000);
   a.lib->set_history_played(h, 31000);
+  a.lib->add_history(sess, t1, "B", 1'699'999'200'000);  // t2 -> t1: a transition that must reach the other device
   a.lib->set_setting("ui.language", "de");
   a.lib->set_setting("obs.password", "hunter2");
   a.lib->set_setting("api.token", "abc");
@@ -296,6 +297,11 @@ void test_one_way_all_entities() {
   CHECK(b.lib->beatgrid(tid(b, 1)).size() == 2 && b.lib->gain_db(tid(b, 1)).value_or(0) == -3.5);
   CHECK(b.lib->track(tid(b, 1))->title == "One" && b.lib->track(tid(b, 1))->rating == 4);
   CHECK(a.eng->devices().size() == 2);
+  {  // plays that arrive through sync count for the transition suggestions
+    const auto at = a.lib->transition(tid(a, 2), tid(a, 1)), bt = b.lib->transition(tid(b, 2), tid(b, 1));
+    CHECK(at && at->count == 1 && bt && bt->count == 1);
+    CHECK(!b.lib->transition(tid(b, 1), tid(b, 2)));
+  }
 
   // The audio files are not synced: B's rows are "missing" until the files appear, then relink by content.
   CHECK(b.eng->status().tracks_missing == 3);

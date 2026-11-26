@@ -19,6 +19,8 @@
 #include "deckhand/library/library.hpp"
 #include "deckhand/midi/controller.hpp"
 #include "deckhand/log/log.hpp"
+#include "deckhand/export/export_device.hpp"
+#include "deckhand/export/export_stems.hpp"
 #include "deckhand/services/usb_export.hpp"
 
 using namespace deckhand;
@@ -64,6 +66,11 @@ int usage() {
                "  playlists  [--data DIR]\n"
                "  list       [--playlist ID] [--search TEXT] [--data DIR]\n"
                "  export DIR [--playlist ID] [--no-copy 1] [--convert 1] [--profile ID] [--data DIR]   write a club-player USB export\n"
+               "         [--stems off|acapella+instrumental|all|LIST] [--stem-bits 16|24] [--stems-inline 1] [--stems-folder NAME]   stems as extra tracks\n"
+               "  verify-device DIR [--no-audio 1]   pre-gig check of an exported stick\n"
+               "  backup-device DIR BACKUPS [--audio 1]   dated, verified backup of the stick's library (and audio)\n"
+               "  restore-device BACKUP DIR [--force 1] [--no-audio 1]   put a backup back (refuses over an existing library)\n"
+               "  list-device-backups BACKUPS\n"
                "  export-xml FILE [--playlist ID]     write the library as DJ library XML (collection, grids, cues, playlists)\n"
                "  import-xml FILE [--dry-run 1] [--overwrite-metadata 1] [--overwrite-cues 1] [--overwrite-grid 1] [--no-merge 1]\n"
                "  export-m3u8 FILE|DIR [--playlist ID] [--relative 1]   one playlist to a file, or (no --playlist) all into a folder\n"
@@ -110,6 +117,45 @@ int main(int argc, char** argv) {
       std::printf("%04x:%04x  usage %04x/%04x  %s%s%s\n", d.vid, d.pid, d.usage_page, d.usage, d.product.c_str(),
                   d.manufacturer.empty() ? "" : "  by ", d.manufacturer.c_str());
     }
+    return 0;
+  }
+  if (cmd == "verify-device" && argc >= 3) {
+    usbexport::DeviceReport rep;
+    usbexport::VerifyOptions vo;
+    vo.check_audio = !std::atoi(arg_value(argc, argv, "--no-audio", "0"));
+    usbexport::verify_device(argv[2], rep, vo);
+    std::printf("%s", rep.text().c_str());
+    return rep.ok ? 0 : 1;
+  }
+  if (cmd == "backup-device" && argc >= 4) {
+    usbexport::BackupOptions bo;
+    bo.include_audio = std::atoi(arg_value(argc, argv, "--audio", "0")) != 0;
+    std::string path, error;
+    if (!usbexport::backup_device(argv[2], argv[3], bo, path, error)) {
+      std::fprintf(stderr, "error: %s\n", error.c_str());
+      return 1;
+    }
+    std::printf("backup written to %s\n", path.c_str());
+    return 0;
+  }
+  if (cmd == "list-device-backups" && argc >= 3) {
+    for (const auto& b : usbexport::list_device_backups(argv[2]))
+      std::printf("%s  %s  %zu files, %llu bytes%s%s\n", b.name.c_str(), b.created.c_str(), b.files,
+                  static_cast<unsigned long long>(b.bytes), b.has_audio ? ", with audio" : "", b.valid ? "" : "  (unfinished or damaged)");
+    return 0;
+  }
+  if (cmd == "restore-device" && argc >= 4) {
+    usbexport::RestoreOptions ro;
+    ro.force = std::atoi(arg_value(argc, argv, "--force", "0")) != 0;
+    ro.restore_audio = !std::atoi(arg_value(argc, argv, "--no-audio", "0"));
+    usbexport::RestoreResult rr;
+    std::string error;
+    if (!usbexport::restore_device(argv[2], argv[3], ro, rr, error)) {
+      std::fprintf(stderr, "error: %s\n", error.c_str());
+      return 1;
+    }
+    std::printf("restored %zu files (%llu bytes)%s\n", rr.files, static_cast<unsigned long long>(rr.bytes),
+                rr.removed_stale ? "; stale library files of the old export were removed" : "");
     return 0;
   }
   if (cmd == "play" && argc >= 3) {
@@ -266,6 +312,17 @@ int main(int argc, char** argv) {
       req.copy_audio = !std::atoi(arg_value(argc, argv, "--no-copy", "0"));
       req.convert_incompatible = std::atoi(arg_value(argc, argv, "--convert", "0")) != 0;
       req.player_profile = arg_value(argc, argv, "--profile", "");
+      {
+        std::string stem_error;
+        if (!usbexport::parse_stem_mixes(arg_value(argc, argv, "--stems", "off"), req.stem_mixes, stem_error)) {
+          std::fprintf(stderr, "error: %s\n", stem_error.c_str());
+          return 1;
+        }
+        req.stem_bits = std::atoi(arg_value(argc, argv, "--stem-bits", "24"));
+        req.stems_inline = std::atoi(arg_value(argc, argv, "--stems-inline", "0")) != 0;
+        req.stems_folder = arg_value(argc, argv, "--stems-folder", "Stems");
+        if (req.stem_mixes) req.stem_lookup = stem_lookup_from_data_dir(data);
+      }
       UsbExportResult res;
       std::string error;
       if (!export_library_to_usb(lib, req, res, error)) {
@@ -275,6 +332,10 @@ int main(int argc, char** argv) {
       std::printf("exported %d tracks, %d playlists; %d files missing\n", res.tracks, res.playlists, res.missing_files);
       for (const auto& m : res.missing) std::printf("  missing: %s\n", m.c_str());
       if (res.converted) std::printf("%d tracks written as 24-bit WAV\n", res.converted);
+      if (req.stem_mixes) {
+        std::printf("%d stem tracks on the stick\n", res.stem_tracks);
+        for (const auto& n : res.no_stems) std::printf("  no stems: %s\n", n.c_str());
+      }
       if (res.remaining_will_not_play) std::printf("warning: %d tracks a club player will not play (see docs/EXPORT.md)\n", res.remaining_will_not_play);
     } else if (cmd == "duplicates") {
       const std::string mode = arg_value(argc, argv, "--mode", "all");

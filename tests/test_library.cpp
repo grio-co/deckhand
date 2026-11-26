@@ -33,7 +33,7 @@ static void test_backups() {
 #ifdef DECKHAND_VENDORED_SQLITE
     CHECK(lib.search_indexed());
 #endif
-    CHECK(s.step() && s.i64(0) == kLibrarySchemaVersion && kLibrarySchemaVersion == 8);
+    CHECK(s.step() && s.i64(0) == kLibrarySchemaVersion && kLibrarySchemaVersion == 9);
     Stmt cols(lib.db(), "SELECT count(*) FROM pragma_table_info('tracks') WHERE name IN ('file_size', 'content_hash')");
     CHECK(cols.step() && cols.i64(0) == 2);  // schema 6: duplicate finder columns
     Stmt auto7(lib.db(), "SELECT (SELECT count(*) FROM pragma_table_info('tracks') WHERE name = 'last_sound_ms'),"
@@ -41,7 +41,7 @@ static void test_backups() {
                          " (SELECT count(*) FROM pragma_table_info('play_queue_history'))");
     CHECK(auto7.step() && auto7.i64(0) == 1 && auto7.i64(1) == 6 && auto7.i64(2) == 10 && auto7.i64(3) == 4);  // schema 7: automix, play queue
     Stmt ph8(lib.db(), "SELECT (SELECT count(*) FROM pragma_table_info('track_phrases')), (SELECT count(*) FROM pragma_table_info('phrase_sections'))");
-    CHECK(ph8.step() && ph8.i64(0) == 10 && ph8.i64(1) == 14);  // schema 8: phrases
+    CHECK(ph8.step() && ph8.i64(0) == 13 && ph8.i64(1) == 14);  // schema 8: phrases
     if (!lib.search_indexed()) std::puts("note: this SQLite build has no FTS5; search index tests run on the fallback");
   }
   CHECK(library_backups(db).empty());  // a new library needs no copy
@@ -445,9 +445,9 @@ static void test_phrases_storage() {
     lib.db().exec("DROP TABLE track_phrases; DROP TABLE phrase_sections; UPDATE schema_version SET version = 7;");
   }
   {
-    Library lib(path);  // migrates 7 -> 8
+    Library lib(path);  // migrates 7 -> 9
     Stmt s(lib.db(), "SELECT max(version) FROM schema_version");
-    CHECK(s.step() && s.i64(0) == 8);
+    CHECK(s.step() && s.i64(0) == kLibrarySchemaVersion);
     CHECK(!lib.phrases(id).has_value());  // tracks analysed before get phrases on their next analysis
     lib.set_phrases(id, StoredPhrases{});
     CHECK(lib.phrases(id).has_value());

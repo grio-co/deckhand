@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "deckhand/library/db.hpp"
+#include "deckhand/library/suggest.hpp"
 
 namespace deckhand {
 
@@ -60,6 +61,10 @@ struct StoredPhrases {
 
 // Per-track mixing points and the same fields as per-queue-entry overrides. Every field is optional: unset = automatic
 // (mix-in: main cue, else load cue; mix-out: N bars before the last audible sound; length and type: the global setting).
+// Mean energy of the whole track and of its first and last 16 bars (0..1) from stored phrase data: the per-bar energy
+// when there is some, else the section energies (1..10). Empty when the analysis found nothing to measure.
+std::optional<EnergySummary> energy_of_phrases(const StoredPhrases& p);
+
 struct AutomixPoints {
   std::optional<double> mix_in_ms;           // where the track starts playing when it is mixed in
   std::optional<double> mix_out_ms;          // where the track has been mixed out completely (the transition ends here)
@@ -276,6 +281,15 @@ struct HistorySession {
   int entries = 0;
 };
 
+// How often (and in which order) the user has played two tracks back to back; fed from the play history.
+struct TransitionRow {
+  std::int64_t from_id = 0, to_id = 0;
+  int count = 0;
+  std::int64_t last_ms = 0;  // 0 = never played that way (only saved)
+  std::string note;          // set when the pair was saved from the preparation panel
+  bool saved = false;
+};
+
 struct NewTrack {
   std::string path;  // absolute
   std::string title, artist, album, genre, key, comment;
@@ -455,6 +469,22 @@ class Library {
   std::vector<HistoryEntry> history(std::int64_t session_id);
 
   // Small key/value store for application settings.
+  // ---- transition history and suggestions (suggest.cpp) ----
+  // Called by add_history(): counts previous-track -> this-track of the same session. 0 when nothing was counted.
+  int record_transition(std::int64_t session_id, std::int64_t track_id, std::int64_t at_ms);
+  // Recounts every pair from the play history (the one-time backfill of schema 9; also a repair).
+  void rebuild_transitions();
+  void add_transition(std::int64_t from_id, std::int64_t to_id, int count = 1, std::int64_t at_ms = 0);
+  std::optional<TransitionRow> transition(std::int64_t from_id, std::int64_t to_id);
+  std::vector<TransitionRow> transitions_from(std::int64_t from_id, std::size_t limit = 50);
+  // Saves a pair from the preparation panel (kept even when never played that way); the note replaces an older one.
+  void save_transition(std::int64_t from_id, std::int64_t to_id, const std::string& note);
+  // Energy of the track (0..1) from its stored phrase analysis; computed and stored when the row has none yet.
+  std::optional<EnergySummary> energy_summary(std::int64_t track_id);
+  // Ranked suggestions for what to play after `seed_id`. Deterministic: ties go to the lower track id.
+  std::vector<NextTrack> suggest(std::int64_t seed_id, const NextTrackOptions& options = {});
+  NextTrackWeights suggest_weights();  // the defaults with the settings "suggest.w.*" applied
+
   std::string setting(const std::string& key, const std::string& fallback = {});
   void set_setting(const std::string& key, const std::string& value);
 

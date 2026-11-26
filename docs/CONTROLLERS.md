@@ -32,6 +32,7 @@ numbers, not real devices).
 Transport and mixer: `play cue sync tempo_range seek_start jog_touch jog tempo loop_in loop_out
 loop_toggle reloop cue_call beatloop beatjump hotcue hotcue_clear trim eq_high eq_mid eq_low filter
 fader crossfader head_mix head_level master_level pfl browse browse_press load pad_mode ignore`.
+Key sync and stems: `key_sync key_match key_reset stem_mute stem_solo stem_isolate stem_preset stem_enable` (see below).
 
 | Action | Input | What it does |
 |---|---|---|
@@ -55,6 +56,17 @@ fader crossfader head_mix head_level master_level pfl browse browse_press load p
 | `mic_level` `mic_eq_low` `mic_eq_high` | abs | microphone level and its two EQ bands (0..1; 0.5 = flat) |
 | `modifier` | button | holds the modifier `name=<name>` (global, or only for `deck=N`) |
 | `keyboard` `keyshift` `padfx` | pad button | see pad modes |
+| `key_sync` | button | key sync follow on/off (the deck's key is kept matching the other deck as tempos change; sets the key shift and engages key lock); toggle, `value=1\|0` sets, `hold=1` = on while held |
+| `key_match` | button | key sync once: shift the key now to fit the other deck |
+| `key_reset` | button | key shift back to 0 and key sync off |
+| `stem_mute` `stem_solo` | pad / button | `stem=vocals\|drums\|bass\|other` (default: pad number mod 4): toggle; `value=1\|0` sets; `hold=1` momentary |
+| `stem_isolate` | pad / button | same, momentary (on while held) unless `value=` is given |
+| `stem_preset` | pad / button | `preset=reset\|acapella\|instrumental\|drums\|no_drums` |
+| `stem_enable` | button | play the stems / the original mix (toggle, `value=1\|0` sets) |
+
+Key sync (`key_sync`, `key_match`) uses the deck's tempo-synced partner (else the other loaded deck) as the reference. The
+match mode, the limit (default +-2 semitones) and fine (cents) landing are engine settings (`deckN.key_sync` controls and
+`IEngine::key_sync_config`), not mapping arguments. Stem actions press the stems on first when they are attached but off.
 
 Effect slots: `slot=1..3`, and `unit=deck` (default, the rule's `deck=`), `unit=master` (the master bus),
 or an effect unit that follows an assignment (see Effect units): `unit=assigned` (= unit 1) or `unit=N`. Effect names: `none echo ping_pong spiral reverb flanger phaser low_cut_echo filter_sweep roll
@@ -62,13 +74,13 @@ transform pitch crusher vinyl_brake backspin`.
 
 ## Arguments
 `deck=N`, `slot=N`, `beats=X`, `dir=-1|1`, `scale=X`, `surface=top|side` (jog), `invert=1`,
-`mode=hotcue|padfx1|beatjump|sampler|keyboard|padfx2|beatloop|keyshift`, `semitones=X` / `value=X`,
+`mode=hotcue|padfx1|beatjump|sampler|keyboard|padfx2|beatloop|keyshift|stems` (`mode=!name` = every mode but that one), `alt=<mode>` (pad_mode rules: the mode a second press selects), `stem=`, `preset=`, `alt_on=XX alt_blink=0|1` (pad_mode LEDs), `semitones=X` / `value=X`,
 `lo=X hi=X`, `effect=<name>`, `unit=deck|master|assigned|1..4`, `target=deck1..deck4|master` (fx_assign), `hold=1`, `offset=N` (sampler slot offset),
 `pad=N` (pad number, for `padfx` defaults), `name=<modifier>`, `when=<modifier>` or
 `when=!<modifier>`, `pickup=0|1`, `deadzone=X` (0..0.45).
 
 Output states: `playing cue sync pfl loop loop_in hotcue loaded pad_mode level key_lock quantize slip
-reverse fx_on sampler_playing loop_beats key_shift modifier fx_assign master_cue color_fx mic_on mic_talkover`, with `blink=1`, `on=XX off=XX`, and for
+reverse fx_on sampler_playing loop_beats key_shift modifier fx_assign master_cue color_fx mic_on mic_talkover key_sync stem`, with `blink=1`, `on=XX off=XX`, and for
 `level` meters `min=XX max=XX`.
 - `fx_on slot=N [unit=master] [effect=<name>]`: lit while that slot is on (and runs that effect).
 - `sampler_playing slot=N [offset=N]`: lit while the sampler slot plays (needs the sampler views, see
@@ -107,13 +119,34 @@ released after a mode change still sends its release to the rule that got the pr
 
 | Mode | Action on the pad | Per-pad arguments (defaults) |
 |---|---|---|
-| `hotcue` | `hotcue` / `hotcue_clear` | `slot=` |
+| `hotcue` | `hotcue` / `hotcue_clear` | `slot=` (1..16; a deck has 16 hot cue slots, a mapping uses as many pads as it has) |
 | `beatloop` | `beatloop` | `beats=` (0.25, 0.5, 1, 2, 4, 8, 16, 32 by pad) |
 | `beatjump` | `beatjump` | `beats=` signed (-1, +1, -2, +2, -4, +4, -8, +8 by pad) |
 | `sampler` | `sampler` | `slot=` + `offset=` (a different bank per deck); shift held = stop |
 | `keyboard` | `keyboard` | `semitones=` (pad number - 1): sets the key shift, then plays the hot cue pressed last; release lets go of it |
 | `keyshift` | `keyshift` | `semitones=` (pad number - 5): sets the key shift |
 | `padfx1` `padfx2` | `padfx` | `effect=` (by pad: echo ping_pong roll transform flanger phaser vinyl_brake backspin), `beats=` (the effect's default), `slot=` (effect slot, default 1), `unit=`, `pad=` |
+
+### Pad-mode pairs and the stems mode
+A `pad_mode` button can carry a second mode: `in button 90 22 pad_mode deck=1 mode=sampler alt=stems`. The first press
+selects `sampler`; pressed again while it is active it selects `stems`; again, back to `sampler`. Pressing it from any
+other mode starts at the main mode. The LED rule takes the same `alt=`: `out 90 22 pad_mode deck=1 mode=sampler alt=stems`
+is lit in the main mode and **blinks** in the alternate (or shows level `alt_on=XX` steadily). A controller that has a
+separate SHIFT message for the mode button needs no extension: a second `pad_mode ... mode=stems when=shift` rule.
+`mode=!stems` on a rule means "in every pad mode except stems", so a rule that always worked (no `mode=`) can step aside
+for the alternate mode that reuses its notes. Mappings without `alt=` / `mode=!` are unchanged.
+
+`stems` mode (pad N is `slot=N`; the stem defaults to the pad number modulo 4):
+
+| Pads | Action |
+|---|---|
+| 1-4 | `stem_mute` vocals, drums, bass, other (toggle) |
+| 5-8 | `stem_isolate` the same four (while held) |
+| SHIFT + 1..5 | `stem_preset` reset, acapella, instrumental, drums only, no drums |
+
+LED `stem stem=<name>` (`mode=stems`): lit while the stem is audible (stems attached and playing, not muted, and solo / isolate
+respected); dark when the track has no stems. The shipped DDJ-FLX4 mapping puts stems on the SAMPLER button's second press
+and the sampler's own pad notes (docs/TESTING-FLX4.md section 7); no note or CC number was added.
 
 `padfx` is momentary: on press it selects the effect and its beats on the slot and enables it; on release
 it disables it, so release effects (vinyl brake, backspin) act while held. Pad LEDs are normal `out` rules
@@ -262,3 +295,29 @@ feeds the master effect state, sampler level, master BPM and sampler slot states
   with simulated reports only.
 - The mic actions send engine commands only in a build whose `engine.hpp` defines `DECKHAND_ENGINE_HAS_MIC`;
   without it they parse and do nothing.
+
+## Per-controller settings and the Controller panel
+Click the controller's name in the status row (or press `Cmd+Shift+C` / `Ctrl+Shift+C`, control `ui.controller`) to open
+the panel of that device: connection, the mapping file in use and the decks it controls, pad modes (a button that has an
+alternate mode, such as sampler / stems, is listed), the audio interface it asks for with a shortcut that makes it the
+output device, "Learn a control...", "Reload mapping" (re-reads the `.dhmap` files and re-matches connected devices) and, when
+several mappings fit one device, a chooser. Settings are stored per controller (library settings
+`controller.<name>.jog_scale`, `.ticks_per_rev`, `.pickup`, `.leds`, `.mapping`; `GET /v1/controllers`) and handed to the
+hub, live, also when it runs in the engine process:
+
+* jog sensitivity: every jog turn is multiplied (0.25 to 4);
+* jog ticks per turn: replaces the mapping's `ticks_per_rev`; "Measure a full turn" shows the ticks of the last
+  touch-and-turn so one exact revolution calibrates it;
+* soft takeover for knobs and faders: as the mapping says, on, or off;
+* LED feedback: off keeps the controller's LEDs dark.
+
+Not available in the panel (the hub has no such setting): a deck side switch (1/2 versus 3/4), jog touch behaviour,
+per-knob behaviour of master / headphone level. A mapping file cannot be revealed in the file manager from the core (no
+platform hook): its path is shown.
+
+## Key sync, stems pad mode (application side)
+`deckN.key_sync` (follow), `deckN.key_match` (once), `deckN.key_reset`, `deckN.key_sync_mode` (0 match, 1 any compatible key)
+and the shortcuts `Cmd+Alt+A/S/F` (deck 1) and `Cmd+Alt+;/L/J` (deck 2; add Shift for decks 3 and 4) drive the engine's key
+sync; the track's key reaches the engine when the track loads (`LoadedTrack::key_index`). The default skin shows a KEY SYNC
+and a MATCH button with a status line under each deck. The stems pad mode is the `stems` pad mode of a mapping (see above):
+the FLX4 mapping puts it behind a second press of the sampler mode button.

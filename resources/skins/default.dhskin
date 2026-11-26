@@ -91,7 +91,9 @@ template topbar dummy {
 template statusbar dummy {
   row h=18 gap=8 pad=8,0 {
     label bind="app.status" font=ui color=dim
-    label bind="app.controller" font=ui color=dim w=240 text_align=right
+    button bind="app.controller.open" tooltip="@app.controller_hint" font=ui color=dim w=240 text_align=right {
+      state hover { color=text }
+    }
     label bind="app.audio" font=ui color=dim w=300 text_align=right
   }
 }
@@ -208,12 +210,23 @@ template deck n color {
           use tog bind="deck[${n}].key_shift.plus" label="@deck.key_up" on=accent
           use tog bind="deck[${n}].key_shift.reset" label="@deck.key_reset" on=accent
         }
+        row h=22 gap=3 {
+          use tog bind="deck[${n}].key_sync" label="@deck.key_sync" on=good
+          use tog bind="deck[${n}].key_match" label="@deck.key_match" on=accent
+          label bind="deck[${n}].key_sync.status" font=small color=dim text_align=left
+        }
         use fxrow n=${n} s=1 color=${color}
         use fxrow n=${n} s=2 color=${color}
         use fxrow n=${n} s=3 color=${color}
       }
     }
-    pads bind="deck[${n}].pads" cols=4 rows=2 h=40 bg=panel2 radius=r color=${color}
+    row h=40 gap=3 {
+      pads bind="deck[${n}].pads" cols=4 rows=2 bg=panel2 radius=r color=${color}
+      column w=44 gap=0 {
+        use tog bind="deck[${n}].pads.bank" label="@deck.pad_bank" on=accent
+        label bind="deck[${n}].pads.bank.label" font=small color=dim text_align=center
+      }
+    }
   }
 }
 
@@ -287,10 +300,21 @@ template deck_small n color {
           use tog bind="deck[${n}].stem.bass.active" label="@deck.stem_bass" on=good
           use tog bind="deck[${n}].stem.other.active" label="@deck.stem_other" on=good
         }
+        row h=22 gap=3 {
+          use tog bind="deck[${n}].key_sync" label="@deck.key_sync" on=good
+          use tog bind="deck[${n}].key_match" label="@deck.key_match" on=accent
+          label bind="deck[${n}].key_sync.status" font=small color=dim text_align=left
+        }
         label bind="deck[${n}].time" font=small color=text text_align=right
       }
     }
-    pads bind="deck[${n}].pads" cols=4 rows=2 h=34 bg=panel2 radius=r color=${color}
+    row h=34 gap=3 {
+      pads bind="deck[${n}].pads" cols=4 rows=2 bg=panel2 radius=r color=${color}
+      column w=44 gap=0 {
+        use tog bind="deck[${n}].pads.bank" label="@deck.pad_bank" on=accent
+        label bind="deck[${n}].pads.bank.label" font=small color=dim text_align=center
+      }
+    }
   }
 }
 

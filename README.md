@@ -34,6 +34,9 @@ full control API.
 - Structure: phrase sections on the waveform and cue suggestions.
 - Stems: offline four-stem separation with a built-in engine and a cache (you install a model
   yourself; none ships). Not yet playable on the decks.
+- Key sync, 16 hot cues, track suggestions and a headphones-only preparation mode.
+- Controller settings per device: click the controller's name in the status row.
+- Lighting: beat- and phrase-driven DMX over Art-Net, sACN or serial (off by default; untested on fixtures).
 - Keyboard: customisable shortcuts with two-handed defaults ([docs/SHORTCUTS.md](docs/SHORTCUTS.md)).
 - Decks: MP3, AAC, FLAC, WAV, AIFF; scrolling three-band waveforms with beat grid; cue, hot cues,
   loops, beat jump, tempo, beat sync, scratch and nudge; key lock and key shift; quantise; slip;

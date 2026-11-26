@@ -79,6 +79,10 @@ Besides the engine's control table the keymap can call these application actions
 |---|---|---|
 | `Mod+E` | Add the selected tracks to the end of the play queue | `ui.queue_add` |
 | `Mod+Shift+E` | Play the selected tracks next | `ui.queue_play_next` |
+| `Mod+Shift+C` | Open or close the connected controller's panel (mapping, jog and LED settings) | `ui.controller` |
+| `F9` | What goes well after the track on air | `ui.suggestions` |
+| `Mod+Shift+Y` | Play the top suggestion next | `ui.queue_suggestion` |
+| `F10` | Preparation mode: two headphone players on decks 3 and 4 | `ui.prep` |
 | `Mod+,` | Open or close the settings | `ui.settings` |
 | `F1` | Open or close the keyboard shortcuts | `ui.shortcuts` |
 | `F2` | Open or close the sampler | `ui.sampler` |
@@ -177,6 +181,11 @@ Besides the engine's control table the keymap can call these application actions
 | `Mod+Alt+E` | Deck 1: vocals only | `deck1.stems.acapella` |
 | `Mod+Alt+R` | Deck 1: everything except the vocals | `deck1.stems.instrumental` |
 | `Mod+Alt+5` | Deck 1: all stems back on | `deck1.stems.reset` |
+| `Mod+Alt+A` | Deck 1: key sync on / off (follows the other deck's key as tempos change) | `deck1.key_sync` |
+| `Mod+Alt+S` | Deck 1: match the other deck's key once | `deck1.key_match` |
+| `Mod+Alt+F` | Deck 1: key shift back to 0, key sync off | `deck1.key_reset` |
+| `Mod+Alt+Z` | Deck 1: key down one semitone | `ui.key_shift.1 -1` |
+| `Mod+Alt+X` | Deck 1: key up one semitone | `ui.key_shift.1 1` |
 
 ### Deck 2
 
@@ -231,6 +240,11 @@ Besides the engine's control table the keymap can call these application actions
 | `Mod+Alt+O` | Deck 2: vocals only | `deck2.stems.acapella` |
 | `Mod+Alt+P` | Deck 2: everything except the vocals | `deck2.stems.instrumental` |
 | `Mod+Alt+6` | Deck 2: all stems back on | `deck2.stems.reset` |
+| `Mod+Alt+;` | Deck 2: key sync on / off (follows the other deck's key as tempos change) | `deck2.key_sync` |
+| `Mod+Alt+L` | Deck 2: match the other deck's key once | `deck2.key_match` |
+| `Mod+Alt+J` | Deck 2: key shift back to 0, key sync off | `deck2.key_reset` |
+| `Mod+Alt+,` | Deck 2: key down one semitone | `ui.key_shift.2 -1` |
+| `Mod+Alt+.` | Deck 2: key up one semitone | `ui.key_shift.2 1` |
 
 ### Mixer
 

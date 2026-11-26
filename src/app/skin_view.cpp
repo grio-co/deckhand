@@ -151,6 +151,10 @@ Target map_binding(std::string_view n) {
       t.special = Special::SetValue;
       return t;
     }
+    if (k == "pads.bank") return action("pad_bank", d);
+    if (k == "pads.bank.label") return info("pad_bank", d);
+    if (k == "key_sync" || k == "key_match") return control(dn + "." + k, d);
+    if (k == "key_sync.status") return info("key_sync_status", d);
     if (s[1].name == "fx" && s[1].idx >= 0 && s.size() == 3) {
       const int slot = s[1].idx;
       const std::string fx = dn + ".fx" + std::to_string(slot + 1) + ".";
@@ -241,6 +245,7 @@ Target map_binding(std::string_view n) {
   }
 
   if (g == "app" && s.size() == 3 && s[1].name == "window" && s[2].idx < 0) return info("window:" + s[2].name);  // true while that module window is shown
+  if (g == "app" && s.size() == 3 && s[1].name == "controller" && s[2].name == "open") return action("controller_open");  // the controller's name: click opens its panel
   if (g == "app" && s.size() == 2) {
     const std::string& k = s[1].name;
     for (const char* a : {"import", "rec", "export", "language", "skin", "layout", "settings", "sampler", "learn"})

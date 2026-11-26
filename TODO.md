@@ -80,22 +80,22 @@ Library and discovery
 - [ ] Vocal position detection on the waveform (falls out of stems)
 - [~] Cue suggestions from phrases and the user's habits (free slots only, undoable; suggested cues
       currently feed back into the habit summary)
-- [ ] Track suggestions from the library by tempo, key, genre, energy and play history
-- [~] Two-player audition for set preparation (preview player exists; add a second player, EQ, crossfader)
+- [~] Track suggestions from the library by tempo, key, genre, energy and play history (unseen on screen)
+- [~] Two-player audition for set preparation: preparation mode on decks 3/4, headphones only (unheard)
 - [~] Browser: column view, filters and smart playlists exist; add layout presets, a second browser
       pane, recursive folder view, automatic relocation of missing files
-- [ ] Shared (collaborative) playlists through the sync folder
+- [~] Shared (collaborative) playlists through the sync folder (API; no menu entry yet)
 - [x] Metadata safety: edit history, undo, restorable trash (API and CLI; no trash or history screen yet)
 - [x] Library import/export through the common DJ library XML and M3U8 (untested against other applications' files)
 - [ ] Streaming services and promo pools: each needs a partner agreement and account; pick services
       with the owner before any work
 - [x] USB export for club players (offline-verified; hardware test pending)
 - [x] Export compatibility check and on-stick 24-bit conversion (rule table unverified against hardware; no panel for the report yet)
-- [ ] SD card export, and backup/restore of an exported device library
+- [~] Backup, verify and restore of an exported device library (API and CLI; untested on a real stick); SD card export
 
 Performance
 - [x] Four decks, beat sync, key shift/lock, quantise, slip, loops, sampler, effect slots, colour effects
-- [ ] Key sync (match keys automatically); 16 hot cue slots per track (check current count)
+- [~] Key sync and 16 hot cue slots (unheard, unseen; USB export writes the first eight cues and reports the rest)
 - [~] Stems: offline separation with a disk cache (in progress); then per-deck stem playback,
       mute/solo/FX per stem, stem pads on controllers
 - [ ] Linked mix points: tie a cue in one track to a cue in another for a timed hand-over
@@ -107,7 +107,7 @@ Performance
 
 Visuals, lighting, recording
 - [ ] Video decks: mix video files, stills and camera input in step with the audio
-- [ ] Lighting: DMX output (Art-Net / sACN / USB DMX) driven by beats and phrases
+- [~] Lighting: DMX output (Art-Net / sACN / serial) driven by beats and phrases (off by default; no real fixture or node tried)
 - [x] Mix recording
 - [ ] Record from an analogue input (vinyl) with track splitting; export an edited track
 
@@ -124,8 +124,8 @@ Gaps in the incumbent that DeckHand should close (owner's list, 2026-11-26)
       cache, queue, installer and catalogue exist; no model ships (user installs from the authors'
       host). Stem playback on the decks with per-stem mute/solo/level/effects exists (unheard;
       42 MB of memory per minute per deck). The RoFormer vocal model and the RoFormer + Demucs recipe run (slower than
-      real time; unheard). Still to do: a stems pad
-      mode for controllers, stems on the USB stick
+      real time; unheard). A stems pad mode for
+      controllers and stems on the USB stick exist (untested on hardware)
 - [~] Fluid beat grid: drifting tempo, live drummers and tempo jumps become as many sections as
       needed (within ~10 ms on synthetic tests); untested on real recordings
 - [x] Cues follow the grid (API; the in-app confirm is still a status line only)
@@ -146,6 +146,10 @@ Beyond the list
       OBS integration; portable mode; no account, no subscription
 
 ## Known limits of the current build
+- If the engine helper misses its start-up limit (60 s), the app falls back to in-process audio
+  and the late helper exits by itself; the wait shows only in the status line and the log.
+- Controller panel: deck side (1/2 vs 3/4), jog touch behaviour and per-knob behaviour are not
+  settable; the mapping file's path is shown but cannot be revealed in the file manager.
 - The engine logs "UI heartbeat lost / UI attached" in pairs many times a minute while the Mac is
   under heavy load (seen in a build from before these changes too); audio is unaffected, but the
   detection threshold and the log volume need attention.

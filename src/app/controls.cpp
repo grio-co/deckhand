@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace deckhand {
@@ -17,7 +18,7 @@ struct Def {
   double lo, hi;
   const char* range;
   const char* help;
-  bool slot = false;  // name ends in .<slot 1..8>
+  bool slot = false;  // name ends in .<slot 1..16>
 };
 
 // Order matters only for listing. Op values are the engine's own.
@@ -48,6 +49,10 @@ const Def kDeck[] = {
     {"eject", Kind::Trigger, Op::Eject, 0, 1, "none", "Unload the track (refused while playing)"},
     {"key_lock", Kind::Toggle, Op::KeyLock, 0, 1, "0 off, 1 on, none = toggle", "Keep the pitch when the tempo changes"},
     {"key_shift", Kind::Value, Op::KeyShift, -12, 12, "semitones", "Transpose the track"},
+    {"key_sync", Kind::Toggle, Op::KeyFollow, 0, 1, "0 off, 1 on, none = toggle", "Key sync: keep this deck's key matching the other deck as tempos change (sets key shift, engages key lock)"},
+    {"key_sync_mode", Kind::Value, Op::KeySyncConfig, 0, 1, "0 match the key, 1 any compatible key (keeps the fine / limit settings)", "Key sync mode"},
+    {"key_match", Kind::Trigger, Op::KeyMatch, 0, 1, "none", "Key sync once: shift this deck's key to fit the other deck now"},
+    {"key_reset", Kind::Trigger, Op::KeyReset, 0, 1, "none", "Key shift back to 0 and key sync off"},
     {"quantize", Kind::Toggle, Op::Quantize, 0, 1, "0 off, 1 on, none = toggle", "Snap cues, loops and jumps to the beat grid"},
     {"slip", Kind::Toggle, Op::Slip, 0, 1, "0 off, 1 on, none = toggle", "Slip mode: resume where the track would have been"},
     {"reverse", Kind::Toggle, Op::Reverse, 0, 1, "0 off, 1 on, none = toggle", "Play backwards"},
@@ -218,7 +223,7 @@ bool parse(std::string_view name, Parsed& p, std::string& error) {
       return false;
     }
     if (d.slot && (!parse_int(slot_text, p.slot) || p.slot < 1 || p.slot > kHotCues)) {
-      error = "slot must be 1..8";
+      error = "slot must be 1..16";
       return false;
     }
     --p.slot;
@@ -266,6 +271,19 @@ const PrepDef kPrep[] = {
     {"wave_zoom", "wave.zoom", "seconds of track visible in the scrolling waveform, 1.5..48", "Zoom the scrolling waveform"},
     {"wave_zoom_in", "wave.zoom_in", "none", "Zoom the scrolling waveform in"},
     {"wave_zoom_out", "wave.zoom_out", "none", "Zoom the scrolling waveform out"},
+};
+
+struct LightingDef {
+  const char* name;
+  const char* range;
+  const char* help;
+};
+const LightingDef kLighting[] = {
+    {"blackout", "0 off, 1 on, none = toggle", "Lights out at once (the show carries on underneath)"},
+    {"hold", "0 off, 1 on, none = toggle", "Freeze the current look (strobe stops)"},
+    {"master", "0..1", "Master dimmer of the lighting"},
+    {"strobe", "0 no strobes, 1 allowed, none = toggle", "Allow strobing (0 removes every strobe: for photosensitive audiences)"},
+    {"enable", "0 off, 1 on, none = toggle", "Run the lighting show (outputs still need to be enabled in the lighting settings)"},
 };
 
 struct AutomixDef {
@@ -397,6 +415,17 @@ bool parse_automix_control(std::string_view name, std::string& action) {
   return false;
 }
 
+bool parse_lighting_control(std::string_view name, std::string& action) {
+  if (name.substr(0, 9) != "lighting.") return false;
+  const std::string_view rest = name.substr(9);
+  for (const LightingDef& d : kLighting)
+    if (rest == d.name) {
+      action = d.name;
+      return true;
+    }
+  return false;
+}
+
 bool parse_prep_control(std::string_view name, int& deck, std::string& action, int& slot) {
   const auto dot = name.find('.');
   if (dot == std::string_view::npos || name.substr(0, 4) != "deck" || !parse_int(name.substr(4, dot - 4), deck) || deck < 1 || deck > kMaxDecks) return false;
@@ -443,6 +472,8 @@ std::vector<ControlInfo> list_controls() {
   }
   for (const AutomixDef& d : kAutomix)
     out.push_back({std::string("automix.") + d.name, std::strcmp(d.range, "none") != 0 ? "value" : "trigger", d.range, d.help});
+  for (const LightingDef& d : kLighting)
+    out.push_back({std::string("lighting.") + d.name, std::strcmp(d.range, "0..1") == 0 ? "value" : "toggle", d.range, d.help});
   for (const Def& d : kMixer) out.push_back({std::string("mixer.") + d.name, kind_name(d.kind), d.range, d.help});
   for (int unit = 1; unit <= kMaxDecks + 1; ++unit) {
     const std::string group = unit <= kMaxDecks ? "deck" + std::to_string(unit) : std::string("mixer");
@@ -616,6 +647,9 @@ bool build_control(const IEngine& engine, std::string_view name, bool has_value,
         c.i = value < 0 ? -1 : 1;
       } else if (d.op == Op::ColorFx) {
         c.i = static_cast<int>(std::lround(value));
+      } else if (d.op == Op::KeySyncConfig) {  // mode only: fine and the limit stay as they are
+        c.i = static_cast<int>(std::lround(value)) | (view.key_sync_fine ? 0x100 : 0);
+        c.f = view.key_sync_limit;
       } else {
         c.f = static_cast<float>(value);
       }
@@ -642,6 +676,13 @@ bool apply_control(IEngine& engine, std::string_view name, bool has_value, doubl
       return false;
     }
   }
+  {
+    std::string action;
+    if (parse_lighting_control(name, action)) {
+      error = "this control drives the lighting module and is carried out by the application, not the engine";
+      return false;
+    }
+  }
   if (is_chain_control(name)) {
     std::string out;
     return apply_chain_control(engine, name, has_value, value, std::string(), out, error);
@@ -650,6 +691,23 @@ bool apply_control(IEngine& engine, std::string_view name, bool has_value, doubl
   if (!build_control(engine, name, has_value, value, commands, error)) return false;
   for (const Command& c : commands) engine.send(c);
   return true;
+}
+
+KeySyncSettings parse_key_sync_settings(const std::string& mode, const std::string& fine, const std::string& limit) {
+  KeySyncSettings st;
+  st.mode = mode == "1" ? 1 : 0;
+  st.fine = fine == "1";
+  if (!limit.empty()) {
+    char* end = nullptr;
+    const double v = std::strtod(limit.c_str(), &end);
+    if (end != limit.c_str() && std::isfinite(v)) st.limit = std::clamp(v, 0.0, 12.0);
+  }
+  return st;
+}
+
+void apply_key_sync_settings(IEngine& engine, const KeySyncSettings& st, int deck) {
+  for (int d = 0; d < kMaxDecks; ++d)
+    if (deck < 0 || d == deck) engine.key_sync_config(d, st.mode, st.fine, st.limit);
 }
 
 bool read_control(const IEngine& engine, std::string_view name, double& value) {
@@ -748,6 +806,8 @@ bool read_control(const IEngine& engine, std::string_view name, double& value) {
     case Op::Pfl: value = v.pfl; return true;
     case Op::KeyLock: value = v.key_lock; return true;
     case Op::KeyShift: value = v.key_shift; return true;
+    case Op::KeyFollow: value = v.key_sync_follow; return true;
+    case Op::KeySyncConfig: value = v.key_sync_mode; return true;
     case Op::Quantize: value = v.quantize; return true;
     case Op::Slip: value = v.slip; return true;
     case Op::Reverse: value = v.reverse; return true;

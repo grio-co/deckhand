@@ -57,6 +57,9 @@ void App::setup_automix() {
         return load_failed_[deck] == id ? LoadState::Failed : LoadState::Pending;
       });
   automix_ = std::make_unique<AutomixService>(*amx_host_, *queue_, amx_lib_.get());
+  prep_ = std::make_unique<PrepMode>(*amx_host_);
+  prep_->set_blocker([this]() -> std::string { return automix_ && automix_->status().running ? T("prep.refused_automix") : std::string(); });
+  next_set_ = next_settings(*lib_);
 }
 
 bool App::automix_control(const std::string& action, bool has_value, double value, std::string& error) {
@@ -67,6 +70,10 @@ bool App::automix_control(const std::string& action, bool has_value, double valu
   const AutomixStatus st = automix_->status();
   if (action == "run") return automix_control(has_value ? (value > 0.5 ? "start" : "stop") : (st.running ? "stop" : "start"), false, 0, error);
   if (action == "start") {
+    if (prep_ && prep_->active()) {
+      error = T("prep.refused_prep_on");
+      return false;
+    }
     if (!automix_->start(error)) return false;
     status_note_ = T("automix.on");
   } else if (action == "stop") {

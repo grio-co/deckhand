@@ -305,6 +305,37 @@ int main() {
     CHECK(first_sound(so, 2, 0, 2205) < 0);
   }
 
+  // ---- cue-only: a deck that never reaches the master, whatever the faders do ------------------------------------
+  {
+    Engine e;
+    e.configure_offline(44100, 4);
+    e.load(2, sine_track(30, 120));
+    run(e, 512);
+    e.send(cmd(Op::Pfl, 2, 0, 1));
+    e.send(cmd(Op::Fader, 2, 1.0f));
+    e.cue_only(2, 1);
+    e.send(cmd(Op::PlayToggle, 2));
+    CHECK(run(e, 256).size() > 0);  // the commands are applied at the start of a block
+    bool leaked = false, cue_heard = false;
+    float fader = 0, xf = 0;
+    for (int block = 0; block < 400; ++block) {  // a controller sweeping the fader and the crossfader, in every block
+      fader = std::fmod(fader + 0.37f, 1.0f);
+      xf = std::fmod(xf + 0.23f, 1.0f);
+      e.send(cmd(Op::Fader, 2, fader));
+      e.send(cmd(Op::Crossfader, 0, xf));
+      const std::vector<float> out = run(e, 64);
+      if (first_sound(out, 4, 0, 0, 0.0f) >= 0 || first_sound(out, 4, 1, 0, 0.0f) >= 0) leaked = true;  // exact zero
+      if (first_sound(out, 4, 2, 0) >= 0) cue_heard = true;
+    }
+    CHECK(!leaked && cue_heard);
+    CHECK(e.deck(2).cue_only == 1);
+    e.cue_only(2, 0);  // back to normal: the master hears it again
+    e.send(cmd(Op::Fader, 2, 1.0f));
+    e.send(cmd(Op::Crossfader, 0, 0.0f));  // deck 3 sits on the left side
+    run(e, 512);
+    const std::vector<float> after = run(e, 2048);
+    CHECK(first_sound(after, 4, 0, 0) >= 0 && e.deck(2).cue_only == 0);
+  }
   std::puts("test_engine_prep: ok");
   return 0;
 }

@@ -17,6 +17,8 @@
 #include "bytes.hpp"
 #include "deckhand/export/export_check.hpp"
 #include "deckhand/export/export_preflight.hpp"
+#include "deckhand/export/export_stems.hpp"
+#include "stem_wav.hpp"
 #include "deckhand/log/log.hpp"
 
 namespace deckhand::usbexport {
@@ -197,6 +199,7 @@ struct TrackRec {
   unsigned file_type = 0;
   // Set when the audio is written as a converted 24-bit WAV instead of a plain copy.
   bool converted = false;
+  bool generated = false;  // stem track: the audio is rendered from the stem cache
   int bitrate_kbps = 0, sample_rate = 0, depth = 16;
   ConversionPlan plan;
   FormatInfo fmt;
@@ -210,12 +213,12 @@ Row track_row(const TrackRec& r) {
   b.assign(0x88, 0);
   set_le16(b, 0x00, 0x24);
   set_le32(b, 0x04, 0x000C0700);  // bitmask: meaning unknown, copied from observed exports (guess)
-  set_le32(b, 0x08, static_cast<std::uint32_t>(std::max(0, r.converted ? r.sample_rate : t.sample_rate)));
+  set_le32(b, 0x08, static_cast<std::uint32_t>(std::max(0, (r.converted || r.generated) ? r.sample_rate : t.sample_rate)));
   set_le32(b, 0x10, static_cast<std::uint32_t>(r.file_size));
   set_le16(b, 0x18, 19048);
   set_le16(b, 0x1A, 30967);
   set_le32(b, 0x20, r.key);
-  set_le32(b, 0x30, static_cast<std::uint32_t>(std::max(0, r.converted ? r.bitrate_kbps : t.bitrate)));
+  set_le32(b, 0x30, static_cast<std::uint32_t>(std::max(0, (r.converted || r.generated) ? r.bitrate_kbps : t.bitrate)));
   set_le32(b, 0x34, static_cast<std::uint32_t>(std::max(0, t.track_number)));
   set_le32(b, 0x38, static_cast<std::uint32_t>(std::max(0.0, t.bpm) * 100.0 + 0.5));
   set_le32(b, 0x3C, r.genre);
@@ -648,6 +651,7 @@ struct CopyPlan {
   fs::path from, to;
   std::uint64_t size = 0;
   bool convert = false;  // write as 24-bit WAV instead of copying
+  std::shared_ptr<const StemRender> stem;  // render this stem mix instead of copying
   FormatInfo fmt;
   ConversionPlan plan;
 };
@@ -658,6 +662,7 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
     error = "export: no destination";
     return false;
   }
+  if (result) result->stems.bytes = 0, result->stems.reused = 0;
   if (!validate_input(tracks_in, lists, error)) return false;
   std::vector<const ExportTrack*> tracks;
   for (const auto& t : tracks_in) tracks.push_back(&t);
@@ -716,6 +721,17 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
     r.file_type = file_type_of(ext);
     std::string fname = src.filename().string();
     bool convert_this = false;
+    const bool is_stem = t->stem != nullptr;
+    if (is_stem) {
+      ext = "wav";
+      r.generated = true;
+      r.file_type = file_type_of("wav");
+      r.file_size = detail::wav_bytes(t->stem->frames, t->stem->bits);
+      r.bitrate_kbps = t->bitrate;
+      r.sample_rate = t->stem->sample_rate;
+      r.depth = t->stem->bits;
+      fname = t->title + ".wav";
+    }
     if (opt.convert_incompatible && !t->source_path.empty()) {
       const auto pi = pre_index.find(t->id);
       if (pi != pre_index.end()) {
@@ -769,7 +785,15 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
             const fs::path dest = root / rel;
             if (fs::exists(dest, xe)) {
               // Never touch a pre-existing file: reuse it only when it is the same audio, otherwise pick a new name.
-              if (!convert_this && !t->source_path.empty() && fs::is_regular_file(dest, xe) &&
+              // Stem files have a stable name: identical content is reused, a stale stem WAV of the same shape (an
+              // earlier export, re-separated since) is replaced, anything else gets a new name.
+              if (is_stem) {
+                if (fs::is_regular_file(dest, xe) && detail::stem_wav_matches(*t->stem, dest.string()))
+                  reuse_existing = true;
+                else if (!(fs::is_regular_file(dest, xe) &&
+                           detail::looks_like_stem_wav(dest.string(), t->stem->sample_rate, t->stem->bits)))
+                  clash_on_disk = true;
+              } else if (!convert_this && !t->source_path.empty() && fs::is_regular_file(dest, xe) &&
                   fs::file_size(dest, xe) == r.file_size && same_file_content(src, dest))
                 reuse_existing = true;
               else
@@ -787,7 +811,19 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
         used_paths.insert(lower(rel));
         r.file_name = fs::path(rel).filename().string();
         if (!t->source_path.empty()) source_rel[t->source_path] = rel;
-        if (!opt.copy_audio) {
+        if (is_stem) {
+          if (reuse_existing) {
+            if (result) ++result->stems.reused;
+          } else {
+            CopyPlan cp;
+            cp.to = root / rel;
+            cp.size = r.file_size;
+            cp.stem = t->stem;
+            copies.push_back(std::move(cp));
+            audio_bytes += r.file_size;
+            if (result) result->stems.bytes += r.file_size;
+          }
+        } else if (!opt.copy_audio) {
           DH_LOG(Warn, "export: %s is not on the stick; DB points at %s", t->source_path.c_str(), rel.c_str());
         } else if (!t->source_path.empty() && !reuse_existing) {
           CopyPlan cp;
@@ -909,6 +945,10 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
     }
     const std::uintmax_t avail =
         opt.available_bytes_override >= 0 ? static_cast<std::uintmax_t>(opt.available_bytes_override) : available_space(root);
+    if (result) {
+      result->required_bytes = need;
+      result->available_bytes = avail;
+    }
     if (need > avail) {
       error = "export: not enough free space on the destination (need about " + std::to_string(need / (1024 * 1024) + 1) +
               " MiB, " + std::to_string(avail / (1024 * 1024)) + " MiB free)";
@@ -919,6 +959,16 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
   // Stage everything.
   if (!txn.mkdirs(root, error)) return false;
   for (const auto& c : copies) {
+    if (c.stem) {
+      fs::path tmp;
+      if (!txn.stage_file(c.to, tmp, error)) return false;
+      std::string cerr;
+      if (!detail::render_stem_wav(*c.stem, tmp.string(), cerr)) {
+        error = "export: " + cerr;
+        return false;
+      }
+      continue;
+    }
     if (!c.convert) {
       if (!txn.copy(c.from, c.to, error)) return false;
       continue;
@@ -933,6 +983,11 @@ bool export_impl(const std::vector<ExportTrack>& tracks_in, const std::vector<Ex
   }
   if (result) {
     result->report = pre;
+    for (const auto& r : recs)
+      if (const std::size_t extra = hot_cues_beyond_format(*r.t)) {
+        result->cues_not_exported += extra;
+        ++result->tracks_with_cues_not_exported;
+      }
     for (auto& t : result->report.tracks) {
       for (const auto& r : recs)
         if (r.t->id == t.track_id && r.converted) t.converted = true;
@@ -968,7 +1023,24 @@ static bool export_usb_impl(const std::vector<ExportTrack>& tracks, const std::v
   error.clear();
   Txn txn;
   try {
-    if (export_impl(tracks, playlists, options, txn, error, result)) return true;
+    std::vector<ExportTrack> all;
+    std::vector<ExportPlaylist> lists;
+    const std::vector<ExportTrack>* tp = &tracks;
+    const std::vector<ExportPlaylist>* lp = &playlists;
+    if (options.stems.enabled()) {
+      StemExpansion ex;
+      if (!expand_stems(tracks, playlists, options, ex, error)) return false;
+      if (result) result->stems = ex.report;
+      if (!ex.tracks.empty()) {
+        all.reserve(tracks.size() + ex.tracks.size());
+        all.insert(all.end(), tracks.begin(), tracks.end());
+        for (auto& t : ex.tracks) all.push_back(std::move(t));
+        lists = std::move(ex.playlists);
+        tp = &all;
+        lp = &lists;
+      }
+    }
+    if (export_impl(*tp, *lp, options, txn, error, result)) return true;
   } catch (const std::exception& e) {
     error = std::string("export: ") + e.what();
   } catch (...) {

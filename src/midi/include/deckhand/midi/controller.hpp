@@ -86,6 +86,15 @@ enum class Action : std::uint8_t {
   FxAssign,     // unit=N target=deck1..4|master: routes effect unit N to that channel
   MasterCue,    // headphone monitoring of the master (toggle; remembers and restores the head mix)
   MicOn, MicLevel, MicEqLow, MicEqHigh, MicTalkover,  // microphone channel (engine commands: DECKHAND_ENGINE_HAS_MIC)
+  // appended: key sync and stems
+  KeySync,      // follow the other deck's key (toggle; value=1|0 sets; hold=1 momentary)
+  KeyMatch,     // one-shot: shift this deck's key to fit the other deck now
+  KeyReset,     // key shift back to 0, follow off
+  StemMute,     // stem=vocals|drums|bass|other (default: pad number mod 4): toggle the stem's mute (hold=1 momentary)
+  StemSolo,     // same for solo
+  StemIsolate,  // same for isolate; momentary unless value= is given
+  StemPreset,   // preset=reset|acapella|instrumental|drums|no_drums
+  StemEnable,   // play the stems / the original mix (toggle; value=1|0 sets)
 };
 
 enum class LedState : std::uint8_t {
@@ -94,6 +103,8 @@ enum class LedState : std::uint8_t {
   KeyLock, Quantize, Slip, Reverse, FxOn, SamplerPlaying, LoopBeats, KeyShift, Modifier,
   FxAssign, MasterCue, ColorFx,  // FxAssign: unit N is assigned to target; ColorFx: effect selected (default: any but filter)
   MicOn, MicTalkover,             // the hub's own view of the last mic command it sent
+  KeySync,                        // the deck follows the other deck's key
+  Stem,                           // stem=...: the stem is audible (off while the deck has no stems playing)
 };
 
 // Where a rule reads (or writes) in a HID report. `byte` counts from the first byte after the report id;
@@ -115,6 +126,10 @@ struct InRule {
   int deck = 0;         // 0-based
   int slot = 0;         // 0-based
   int mode = -1;        // pad mode the rule is limited to; -1 = any (pad_mode: the mode it selects)
+  bool mode_not = false;  // mode=!name: the rule works in every pad mode except `mode`
+  int alt = -1;         // pad_mode: a second press of the button (while its mode is active) selects this mode instead
+  int stem = -1;        // stem actions: 0..3
+  int preset = -1;      // stem_preset: StemPresetId
   bool top = false;     // jog: platter top (scratches when touched)
   bool invert = false;
   float amount = 1;     // beats, direction or scale, depending on the action
@@ -140,6 +155,10 @@ struct OutRule {
   HidField hid_field;
   LedState state{};
   int deck = 0, slot = 0, mode = -1;   // mode: pad mode the LED belongs to (pad_mode state: the mode it shows)
+  bool mode_not = false;               // mode=!name: the LED belongs to every pad mode except `mode`
+  int alt = -1;                        // pad_mode state: a second mode the button shows (alt_on level or blinking)
+  int alt_on = -1;                     // level shown for `alt` (-1: blink between `on` and `off`)
+  int stem = -1;                       // stem state: 0..3
   int on = 0x7F, off = 0x00;  // (a byte for MIDI, up to the field width for HID) for Level: on = maximum value, off = minimum lit value
   bool blink = false;
   // appended
@@ -219,6 +238,17 @@ class ControlSink {
 
 enum class LearnState : std::uint8_t { Idle, Waiting, Observing, Done, Failed };
 
+// Per-controller preferences the application keeps (keyed by the mapping name) and hands to the hub.
+// The name of a pad mode as mappings write it (mode=<name>): "hotcue", "padfx1", ... "stems"; "" when out of range.
+const char* pad_mode_name(int mode);
+
+struct DeviceOptions {
+  double jog_scale = 1.0;      // jog sensitivity: every jog turn is multiplied by this (0.1 .. 8)
+  double ticks_per_rev = 0;    // > 0 replaces the mapping's jog ticks_per_rev (calibration: one full turn = this many ticks)
+  int pickup = -1;             // soft takeover for absolute controls: -1 as the mapping says, 0 off, 1 on
+  bool leds = true;            // false: the hub keeps the controller's LEDs dark
+};
+
 class ControllerHub {
  public:
   ControllerHub(ControlSink& sink, std::vector<Mapping> mappings);
@@ -259,6 +289,17 @@ class ControllerHub {
   // save_user_mapping to keep it.
   bool learn_commit();
   std::vector<std::string> connected() const;  // mapping names in use
+  // ---- per-controller settings (see DeviceOptions); keyed by mapping name, effective at once ----
+  void set_device_options(const std::string& mapping_name, const DeviceOptions& o);
+  DeviceOptions device_options(const std::string& mapping_name) const;
+  // Ticks of the platter turn the last touch-and-turn produced (|sum| while the platter was touched); 0 = none yet.
+  // One full turn of the platter should give the mapping's ticks_per_rev.
+  double last_jog_ticks(const std::string& mapping_name) const;
+  // Mapping names that win when several mappings match one device (takes effect at the next (re)connect / reload).
+  void prefer_mappings(const std::vector<std::string>& names);
+  // Replaces every mapping (e.g. after the user edited a .dhmap) and re-matches the connected devices. Device options,
+  // preferences and pad modes are kept; modifiers and soft-takeover state start over.
+  void reload_mappings(std::vector<Mapping> mappings);
   // Audio routing wanted by a connected controller, if any.
   bool audio_hint(std::string& device_match, int& master_channel, int& phones_channel) const;
 
@@ -326,6 +367,9 @@ class ControllerHub {
   bool mic_on_ = false, mic_talk_ = false;  // last mic command the hub sent (LED states mic_on / mic_talkover)
   mutable std::mutex mutex_;
   std::vector<Active> active_;
+  std::map<std::string, DeviceOptions> options_;
+  std::map<std::string, double> last_ticks_;
+  std::vector<std::string> preferred_;
   int fx_assigned_[kFxUnits] = {kFxMaster, kFxMaster, kFxMaster, kFxMaster};
   bool master_cue_ = false;   // master_cue is on (head mix forced to master)
   float master_cue_saved_ = 0.5f;

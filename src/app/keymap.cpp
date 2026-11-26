@@ -325,7 +325,7 @@ std::string key_control_group(const std::string& control) {
   if (head == "preview") return "Pre-listen";
   if (head == "ui") {
     const std::string rest = control.substr(3);
-    for (const char* deck_action : {"nudge.", "tempo_step."})
+    for (const char* deck_action : {"nudge.", "tempo_step.", "key_shift."})
       if (rest.compare(0, std::strlen(deck_action), deck_action) == 0) return "Deck " + std::string(1, control.back());
     for (const char* p : {"load", "browse", "playlist", "focus", "search", "add", "rate", "clear_search", "edit_track", "compatible", "undo"})
       if (rest.compare(0, std::strlen(p), p) == 0) return "Browser";
@@ -379,6 +379,9 @@ std::vector<UiActionInfo> list_ui_actions() {
   add("ui.preview_seek", "value", "seconds, signed, relative to the pre-listen position", "Skip around in the pre-listened track");
   add("ui.queue_add", "trigger", "none", "Add the selected tracks to the end of the play queue");
   add("ui.queue_play_next", "trigger", "none", "Play the selected tracks next (behind earlier play-next entries)");
+  add("ui.suggestions", "trigger", "none", "Open or close the suggestions: what goes well after the track on air");
+  add("ui.queue_suggestion", "trigger", "none", "Play the top suggestion next (adds it to the play queue)");
+  add("ui.prep", "trigger", "none", "Open or close preparation mode: audition two tracks against each other in the headphones");
   add("ui.add_to_prepare", "trigger", "none", "Add the selected tracks to the playlist named Prepare (if there is one)");
   add("ui.add_to", "trigger", "none", "Open the add-to-playlist menu for the selected tracks");
   add("ui.rate", "value", "0..5 stars", "Rate the selected track");
@@ -391,6 +394,7 @@ std::vector<UiActionInfo> list_ui_actions() {
   add("ui.shortcuts", "trigger", "none", "Open or close the keyboard shortcuts");
   add("ui.sampler", "trigger", "none", "Open or close the sampler");
   add("ui.learn", "trigger", "none", "Open or close MIDI learn");
+  add("ui.controller", "trigger", "none", "Open or close the panel of the connected controller (mapping and per-controller settings)");
   add("ui.columns", "trigger", "none", "Open or close the browser columns");
   add("ui.close_panel", "trigger", "none", "Close the open panel, or clear the search");
   add("ui.window.browser", "trigger", "none", "Show or hide the browser window");
@@ -401,6 +405,7 @@ std::vector<UiActionInfo> list_ui_actions() {
   for (int d = 1; d <= kMaxDecks; ++d) {
     o.push_back({"ui.nudge." + std::to_string(d), "value", "jog revolutions per event, signed (+ = forward); bind it as mode=repeat",
                  "Nudge the deck's pitch while the key is down (jog side bend)"});
+    o.push_back({"ui.key_shift." + std::to_string(d), "value", "semitones, signed (+1 / -1)", "Move the deck's key shift by a step (turns key lock on)"});
     o.push_back({"ui.tempo_step." + std::to_string(d), "value", "tempo fader steps, signed (fader range -1..1)", "Move the tempo fader by a step"});
   }
   return o;
@@ -766,7 +771,7 @@ std::string Keymap::cheat_sheet(Format format) const {
         (b.action.control[4] == '3' || b.action.control[4] == '4'))
       continue;
     if (format == Format::Markdown && (b.action.control.compare(0, 8, "ui.load.") == 0 || b.action.control.compare(0, 9, "ui.nudge.") == 0 ||
-                                       b.action.control.compare(0, 14, "ui.tempo_step.") == 0) &&
+                                       b.action.control.compare(0, 14, "ui.tempo_step.") == 0 || b.action.control.compare(0, 13, "ui.key_shift.") == 0) &&
         (b.action.control.back() == '3' || b.action.control.back() == '4'))
       continue;
     const std::string key = b.action.control + "|" + (b.action.has_value ? fmt_num(b.action.value) : "-") + "|" + key_mode_name(b.action.mode) +

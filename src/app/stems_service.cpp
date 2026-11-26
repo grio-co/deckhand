@@ -107,6 +107,19 @@ StemService::Result StemService::install(const std::string& model_id, bool accep
     error = "the licence must be accepted";
     return Result::NeedLicence;
   }
+  if (!entry.requires_ids.empty()) {  // a recipe combines models that are already installed
+    std::string missing;
+    for (const std::string& need : entry.requires_ids) {
+      bool have = false;
+      for (const StemModelRow& r : models())
+        if (r.entry.id == need && r.installed && r.usable) have = true;
+      if (!have) missing += (missing.empty() ? "" : ", ") + need;
+    }
+    if (!missing.empty()) {
+      error = "install these models first: " + missing;
+      return Result::Refused;
+    }
+  }
   if (!entry.install_supported) {
     error = "this model cannot be installed yet: " + (entry.blocked_by.empty() ? std::string("conversion step missing") : entry.blocked_by);
     return Result::Refused;
@@ -126,7 +139,7 @@ StemService::Result StemService::install(const std::string& model_id, bool accep
   install_thread_ = std::thread([this, entry] {
     stems::InstallHooks hooks;
     hooks.download = downloader_;
-    if (entry.kind == "demucs") hooks.convert = stems::demucs_converter(data_dir_, fs::path(resource_dir_) / "stem-models" / "skeletons");
+    hooks.convert = stems::demucs_converter(data_dir_, fs::path(resource_dir_) / "stem-models" / "skeletons");
     float last = -1;
     const stems::InstallResult res = stems::install_model(
         data_dir_, entry, true,

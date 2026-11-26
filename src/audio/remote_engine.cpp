@@ -1,6 +1,8 @@
 #include "deckhand/audio/remote_engine.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <fstream>
 #include <filesystem>
 
 #include "deckhand/audio/ipc.hpp"
@@ -155,15 +157,28 @@ bool RemoteEngine::establish(std::string& error, bool allow_spawn, bool& spawned
       args.push_back(opt_.resource_dir);
     }
     if (opt_.null_audio) args.push_back("--null-audio");
+    // A helper that comes up after we gave up must not stay beside the in-process fallback: it leaves by itself when no
+    // UI attached (and nothing is loaded) shortly after our own wait would have ended.
+    args.push_back("--exit-unattached");
+    args.push_back(std::to_string(opt_.start_wait_s + 15));
+    std::error_code rm_ec;
+    std::filesystem::remove(std::filesystem::u8path(opt_.data_dir) / "deckhand-engine.abandon", rm_ec);  // a note from an earlier run
     std::uint32_t child = 0;
     if (!spawn_detached(helper, args, opt_.data_dir + "/deckhand-engine.out", child, error)) return false;
     spawned = true;
     // On a heavily loaded machine the helper has taken over 20 s to open its devices and answer.
     // The loop below already stops early if the helper exits, so a generous limit costs nothing
     // in the normal case and avoids falling back to in-process audio with a late helper left running.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + std::chrono::seconds(opt_.start_wait_s);
     bool up = false;
+    int reported = 0;
     while (std::chrono::steady_clock::now() < deadline) {
+      const int waited = static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count());
+      if (waited >= 2 && waited != reported) {  // once a second: a host that can paint shows "Starting the audio engine..."
+        reported = waited;
+        if (opt_.on_start_wait) opt_.on_start_wait(waited);
+      }
       bool mismatch = false;
       if (Conn::connect(names_->socket, l->conn)) {
         if (hello(mismatch)) {
@@ -185,7 +200,12 @@ bool RemoteEngine::establish(std::string& error, bool allow_spawn, bool& spawned
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     if (!up) {
-      if (error.empty()) error = "the engine did not start in time";
+      if (error.empty()) {
+        error = "the engine did not start in time";
+        // Tell the late helper to go: it checks for this note once it runs, and also leaves by itself (see above).
+        const std::filesystem::path note = std::filesystem::u8path(opt_.data_dir) / "deckhand-engine.abandon";
+        std::ofstream(note, std::ios::binary | std::ios::trunc) << child;  // closed at the end of the statement
+      }
       return false;
     }
     l->ours = spawned;
@@ -840,6 +860,46 @@ std::string RemoteEngine::hub_learn_error() const {
   if (!l) return {};
   const HubInfo h = l->sh->hub.read();
   return cstr(h.learn_error, sizeof h.learn_error);
+}
+bool RemoteEngine::hub_set_options(const std::string& mapping, double jog_scale, double ticks_per_rev, int pickup, bool leds) {
+  Wr w;
+  w.u8(0);
+  w.str(mapping);
+  w.f64(jog_scale);
+  w.f64(ticks_per_rev);
+  w.i32(pickup);
+  w.u8(leds ? 1 : 0);
+  std::vector<std::uint8_t> r;
+  if (!rpc(kReqHubDevice, w.bytes(), r, 3000)) return false;
+  Rd rd(r.data(), r.size());
+  return rd.u8() != 0;
+}
+double RemoteEngine::hub_jog_ticks(const std::string& mapping) {
+  Wr w;
+  w.u8(1);
+  w.str(mapping);
+  std::vector<std::uint8_t> r;
+  if (!rpc(kReqHubDevice, w.bytes(), r, 3000)) return 0;
+  Rd rd(r.data(), r.size());
+  return rd.f64();
+}
+bool RemoteEngine::hub_reload_mappings() {
+  Wr w;
+  w.u8(2);
+  std::vector<std::uint8_t> r;
+  if (!rpc(kReqHubDevice, w.bytes(), r, 8000)) return false;
+  Rd rd(r.data(), r.size());
+  return rd.u8() != 0;
+}
+bool RemoteEngine::hub_prefer_mappings(const std::vector<std::string>& names) {
+  Wr w;
+  w.u8(3);
+  w.u16(static_cast<std::uint16_t>(std::min<std::size_t>(names.size(), 64)));
+  for (std::size_t i = 0; i < names.size() && i < 64; ++i) w.str(names[i]);
+  std::vector<std::uint8_t> r;
+  if (!rpc(kReqHubDevice, w.bytes(), r, 3000)) return false;
+  Rd rd(r.data(), r.size());
+  return rd.u8() != 0;
 }
 std::vector<std::string> RemoteEngine::hub_connected() const {
   std::vector<std::string> out;

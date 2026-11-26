@@ -152,6 +152,13 @@ bool App::read_text(const ui::Target& t, std::string& out) {
         const double beats = (v.loop_out - v.loop_in) / (60.0 / std::max(1.0, v.bpm / (1.0 + v.tempo)) * v.sample_rate);
         out = beats >= 1 ? T("deck.loop", {{"beats", std::lround(beats)}}) : T("deck.loop_fraction", {{"divisor", std::lround(1.0 / std::max(beats, 0.001))}});
       }
+    } else if (n == "pad_bank") {
+      out = pad_bank_[d] ? "9-16" : "1-8";
+    } else if (n == "key_sync_status") {  // empty unless key sync is on or has just been used
+      static const char* const ids[] = {"none", "ok", "too_far", "no_own_key", "no_ref_key", "leader"};
+      out.clear();
+      if (v.loaded && (v.key_sync_follow || v.key_sync_result != 0) && v.key_sync_result < 6 && v.key_sync_result != 0)
+        out = T(std::string("deck.keysync_") + ids[v.key_sync_result]);
     } else if (n == "key_shift") {
       const long semis = std::lround(v.key_shift);
       out = semis == 0 ? "0" : fmt("%+ld", semis);
@@ -209,6 +216,9 @@ bool App::read_text(const ui::Target& t, std::string& out) {
     if (n == "rec") {
       const RecorderStatus rec = engine_->recorder_status();
       out = rec.recording ? T("app.rec") + " " + clock_text(rec.seconds) : T("app.rec");
+    } else if (n == "controller_open") {
+      const auto c = hub_->connected();
+      out = c.empty() ? T("app.no_controller") : c.front();
     } else if (n == "language") {
       out = i18n_.language();
     } else if (n == "skin") {
@@ -373,6 +383,9 @@ void App::do_action(const ui::Target& t) {
     do_window_action(n);
   } else if (n == "sampler" && module_known("sampler")) {  // the skin has its own sampler window: that is the sampler
     set_module_visible("sampler", 2);
+  } else if (n == "controller_open") {
+    if (panel_ == Panel::Controller) close_panel();
+    else open_panel(Panel::Controller);
   } else if (n == "settings" || n == "sampler" || n == "learn") {
     const Panel p = n == "settings" ? Panel::Settings : n == "sampler" ? Panel::Sampler : Panel::Learn;
     if (panel_ == p) close_panel();
@@ -430,6 +443,8 @@ void App::do_action(const ui::Target& t) {
       if (!prep(t.deck, m.action, a, error) && !error.empty()) status_note_ = T("status.error", {{"message", error}});
       break;
     }
+  } else if (n == "pad_bank") {
+    if (t.deck >= 0 && t.deck < kMaxDecks) pad_bank_[t.deck] ^= 1;
   } else if (n == "sampler_stop") {
     Command c;
     c.op = Op::SamplerStop;
@@ -902,8 +917,11 @@ void App::draw_pads(const ui::Target& t, const skin::ResolvedWidget& w, const Re
   const float gap = 3, cw = (r.w - gap * static_cast<float>(cols + 1)) / static_cast<float>(cols),
               ch = (r.h - gap * static_cast<float>(rows + 1)) / static_cast<float>(rows);
   const int id_base = (di + 1) * 100;
-  for (int k = 0; k < cols * rows && k < kHotCues; ++k) {
-    const Rect pr{r.x + gap + static_cast<float>(k % cols) * (cw + gap), r.y + gap + static_cast<float>(k / cols) * (ch + gap), cw, ch};
+  const int cap = cols * rows;  // a grid smaller than the 16 slots shows one bank of them; the skin's "pad_bank" button switches
+  const int base = cap < kHotCues ? std::clamp(pad_bank_[di], 0, (kHotCues - 1) / cap) * cap : 0;
+  for (int pos = 0; pos < cap && base + pos < kHotCues; ++pos) {
+    const int k = base + pos;
+    const Rect pr{r.x + gap + static_cast<float>(pos % cols) * (cw + gap), r.y + gap + static_cast<float>(pos / cols) * (ch + gap), cw, ch};
     const bool set = v.hot_cue[k] >= 0;
     const bool hover = pr.contains(in_.x, in_.y);
     const Color slot_color = pinfo.hot_color[k] >= 0 ? rgb_of(pinfo.hot_color[k]) : kHot[k];
@@ -921,7 +939,7 @@ void App::draw_pads(const ui::Target& t, const skin::ResolvedWidget& w, const Re
       held_ = id_base + 10 + k;
     }
   }
-  if (in_.released && held_ / 100 == di + 1 && held_ % 100 >= 10 && held_ % 100 < 20) {
+  if (in_.released && held_ / 100 == di + 1 && held_ % 100 >= 10 && held_ % 100 < 30) {
     std::string error;
     apply_control(*engine_, "deck" + std::to_string(di + 1) + ".hotcue." + std::to_string(held_ % 100 - 10 + 1), true, 0, error);
     held_ = 0;

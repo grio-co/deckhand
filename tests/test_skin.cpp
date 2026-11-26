@@ -234,7 +234,7 @@ int main() {
                           "deck[1].fx[1].select", "deck[1].fx[2].on", "deck[2].fx[3].wet", "deck[1].time", "deck[1].letter",
                           "mixer.master.volume", "mixer.headphone.volume", "mixer.headphone.mix", "mixer.sampler.level",
                           "app.rec", "app.export", "app.import", "app.language", "app.skin", "app.layout", "app.settings", "app.sampler",
-                          "app.learn", "app.status", "app.controller", "app.audio", "app.has_import", "app.multi_language", "app.multi_skin",
+                          "app.learn", "app.status", "app.controller.open", "app.audio", "app.has_import", "app.multi_language", "app.multi_skin",
                           "app.has_four", "browser.search", "browser.count", "browser.playlist.add_list", "browser.playlist.add_folder",
                           "browser.playlist.rename", "browser.playlist.delete", "browser.add_to", "browser.remove", "browser.can_remove",
                           "browser.edit", "deck[2].load", "deck[1].grid.edit", "deck[2].grid.edit", "deck[1].metronome", "deck[2].grid.shift_m1",

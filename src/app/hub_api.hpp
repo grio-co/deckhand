@@ -22,6 +22,12 @@ class HubApi {
   virtual bool learn_commit() = 0;
   virtual std::vector<std::string> connected() = 0;
   virtual bool audio_hint(std::string& match, int& master, int& phones) = 0;
+  // Per-controller settings (jog sensitivity, calibration, soft takeover, LEDs), mapping reload and choice. The defaults
+  // do nothing (a hub that cannot).
+  virtual bool set_options(const std::string& mapping, const DeviceOptions& o) { (void)mapping; (void)o; return false; }
+  virtual double jog_ticks(const std::string& mapping) { (void)mapping; return 0; }
+  virtual bool reload_mappings(const std::vector<Mapping>& mappings) { (void)mappings; return false; }
+  virtual bool prefer_mappings(const std::vector<std::string>& names) { (void)names; return false; }
 };
 
 class LocalHub final : public HubApi {
@@ -36,6 +42,10 @@ class LocalHub final : public HubApi {
   bool learn_commit() override { return h_.learn_commit(); }
   std::vector<std::string> connected() override { return h_.connected(); }
   bool audio_hint(std::string& m, int& a, int& b) override { return h_.audio_hint(m, a, b); }
+  bool set_options(const std::string& mapping, const DeviceOptions& o) override { h_.set_device_options(mapping, o); return true; }
+  double jog_ticks(const std::string& mapping) override { return h_.last_jog_ticks(mapping); }
+  bool reload_mappings(const std::vector<Mapping>& mappings) override { h_.reload_mappings(mappings); return true; }
+  bool prefer_mappings(const std::vector<std::string>& names) override { h_.prefer_mappings(names); return true; }
 
  private:
   ControllerHub& h_;
@@ -59,6 +69,12 @@ class RemoteHub final : public HubApi {
   bool learn_commit() override { return e_.hub_learn_commit(); }
   std::vector<std::string> connected() override { return e_.hub_connected(); }
   bool audio_hint(std::string& m, int& a, int& b) override { return e_.hub_audio_hint(m, a, b); }
+  bool set_options(const std::string& mapping, const DeviceOptions& o) override {
+    return e_.hub_set_options(mapping, o.jog_scale, o.ticks_per_rev, o.pickup, o.leds);
+  }
+  double jog_ticks(const std::string& mapping) override { return e_.hub_jog_ticks(mapping); }
+  bool reload_mappings(const std::vector<Mapping>&) override { return e_.hub_reload_mappings(); }  // the engine process reads its own folders
+  bool prefer_mappings(const std::vector<std::string>& names) override { return e_.hub_prefer_mappings(names); }
 
  private:
   RemoteEngine& e_;

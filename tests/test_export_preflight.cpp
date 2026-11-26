@@ -527,6 +527,46 @@ int main() {
     const FormatInfo fi = probe_format((stick / "Contents/Artist/Album/float32.wav").string());
     CHECK(fi.recognized && fi.codec == Codec::Pcm && fi.bit_depth == 24);
   }
+  // ---- hot cues 9-16: the stick format carries 8; the rest is reported, never an error ------------------------
+  {
+    ExportTrack t = tracks[1];  // a playable file (the old-entry-point block below exports it too)
+    for (int slot = 1; slot <= 12; ++slot) {
+      ExportCue c;
+      c.hot = true;
+      c.slot = slot;
+      c.time_ms = 50 * slot;
+      t.cues.push_back(c);
+    }
+    ExportCue mem;  // a memory cue is not a hot cue and is kept
+    mem.time_ms = 700;
+    t.cues.push_back(mem);
+    CHECK(hot_cues_beyond_format(t) == 4);
+    const PreflightReport pr = preflight_export({t}, default_player_profile());
+    bool noted = false;
+    for (const auto& i : pr.tracks.at(0).issues) noted = noted || (i.id == "cues.not_exported" && i.verdict == Verdict::Warning);
+    CHECK(noted);
+    const fs::path stick = tmp / "stick_cues";
+    ExportOptions o;
+    o.destination = stick.string();
+    ExportResult res;
+    std::string err;
+    CHECK(export_usb({t}, {}, o, err, res));
+    CHECK(res.cues_not_exported == 4 && res.tracks_with_cues_not_exported == 1);
+    ValidationReport vr;
+    CHECK(validate_export(stick.string(), vr) && vr.ok());
+    ReadExport rx;
+    CHECK(read_export(stick.string(), rx, err) && rx.tracks.size() == 1);
+    int hot = 0, memory = 0, highest = 0;
+    for (const ExportCue& c : rx.tracks[0].track.cues) {
+      if (c.hot) {
+        ++hot;
+        highest = std::max(highest, c.slot);
+      } else {
+        ++memory;
+      }
+    }
+    CHECK(hot == 8 && highest == 8 && memory == 1);
+  }
   // The old entry point still works and never converts.
   {
     const fs::path stick = tmp / "stick_old";

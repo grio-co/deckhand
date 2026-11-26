@@ -4,6 +4,10 @@
 #include "deckhand/sync/sync.hpp"
 #include "app_impl.hpp"
 #include "deckhand/analysis/analysis.hpp"
+#include "deckhand/core/key_math.hpp"
+#include "deckhand/broadcast/json.hpp"
+#include "deckhand/export/export.hpp"
+#include "deckhand/export/export_device.hpp"
 
 #include <cctype>
 
@@ -67,6 +71,7 @@ App::App(const dh_platform& platform, const dh_config& config)
   std::vector<std::string> folders;
   if (!resource_dir_.empty()) folders.push_back(resource_dir_ + "/controllers");
   folders.push_back(data_dir_ + "/controllers");
+  mapping_folders_ = folders;
   setup_engine(folders);
 
   scan_skins();
@@ -131,6 +136,9 @@ App::App(const dh_platform& platform, const dh_config& config)
     return true;
   });
 
+  lighting_ = std::make_unique<LightingBridge>();
+  lighting_->open(data_dir_);  // reads lighting.json; starts only when it says enabled
+
   if (!lib_->setting("sync.folder").empty()) {  // bring in other devices' changes first
     Job j;
     j.kind = Job::Sync;
@@ -147,6 +155,7 @@ App::App(const dh_platform& platform, const dh_config& config)
 
 App::~App() {
   api_.reset();  // stop outside callers first
+  if (lighting_) lighting_->close();  // one dark frame, outputs closed
   stems_.reset();
   stream_.reset();
   quit_ = true;
@@ -188,6 +197,12 @@ void App::setup_engine(const std::vector<std::string>& mapping_folders) {
     o.log_level = static_cast<int>(log::level());
     // A host that embeds DeckHand in another executable says where the helper is (default: beside the executable).
     if (const char* h = std::getenv("DECKHAND_ENGINE_HELPER"); h && *h) o.helper_path = h;
+    // The windows do not exist yet while the core is being created, so nothing can paint during this wait: the status
+    // line is set for a host that does (the text stays until the first frame), and the log says what is going on.
+    o.on_start_wait = [this](int seconds) {
+      set_status(T("engine.starting", {{"seconds", seconds}}));
+      DH_LOG(Info, "waiting for the audio engine to start (%d s)", seconds);
+    };
     auto remote = std::make_unique<RemoteEngine>(o);
     std::string error;
     if (remote->connect(error)) {
@@ -202,6 +217,7 @@ void App::setup_engine(const std::vector<std::string>& mapping_folders) {
               std::lock_guard<std::mutex> lock(state_mutex_);
               for (DeckInfo& d : decks_) d = DeckInfo{};  // the new engine has empty decks
             }
+            ctl_resync_ = true;  // the new engine has no controller settings yet
             start_audio();
             apply_input(true);  // the new engine has no input open
             Job j;  // the new engine has empty sampler slots too
@@ -406,6 +422,7 @@ void App::control_main() {
     while (engine_->poll(e)) {
       if (e.type == EventType::ScheduledFired || e.type == EventType::ScheduledDropped) {
         if (automix_) automix_->on_engine_event(e);
+        if (prep_) prep_->on_engine_event(e);
         if (api_) api_->engine_event(e);  // only ever produced by API requests, so api_ exists
         continue;
       }
@@ -439,6 +456,8 @@ void App::control_main() {
       }
     }
     if (automix_) automix_->tick();
+    if (prep_) prep_->tick();
+    if (lighting_) lighting_->tick(*engine_);
     DeckView views[kMaxDecks];
     for (int i = 0; i < kMaxDecks; ++i) views[i] = engine_->deck(i);
     const double now = now_seconds();
@@ -623,10 +642,32 @@ void App::run_job(Library& lib, const Job& j) {
       }
       UsbExportRequest req;
       req.destination = j.path;
-      req.convert_incompatible = j.flag || lib.setting("export.convert_incompatible") == "1";
-      req.player_profile = j.text.empty() ? lib.setting("export.player_profile") : j.text;
-      if (j.track_id > 0) req.playlist_ids.push_back(j.track_id);
-      else if (j.track_id < 0) req.smart_playlist_ids.push_back(-j.track_id);  // a smart playlist, sent negative
+      const ApiExportRequest* ar = j.export_req.get();
+      req.convert_incompatible = j.flag || (ar && ar->convert_incompatible) || lib.setting("export.convert_incompatible") == "1";
+      const std::string profile = ar && !ar->player_profile.empty() ? ar->player_profile : j.text;
+      req.player_profile = profile.empty() ? lib.setting("export.player_profile") : profile;
+      if (ar) {
+        req.playlist_ids = ar->playlist_ids;
+        if (ar->smart_playlist_id > 0) req.smart_playlist_ids.push_back(ar->smart_playlist_id);
+      } else if (j.track_id > 0) {
+        req.playlist_ids.push_back(j.track_id);
+      } else if (j.track_id < 0) {
+        req.smart_playlist_ids.push_back(-j.track_id);  // a smart playlist, sent negative
+      }
+      if (ar && ar->stems_given) {
+        req.stem_mixes = ar->stem_mixes;
+        req.stem_mixes_by_playlist = ar->stem_mixes_by_playlist;
+        req.stem_bits = ar->stem_bits;
+        req.stems_inline = ar->stems_inline;
+        if (!ar->stems_folder.empty()) req.stems_folder = ar->stems_folder;
+      } else {  // the export panel's choice: 0 off, 1 acapella + instrumental, 2 all four
+        const std::string mode = lib.setting("export.stems", "0");
+        req.stem_mixes = mode == "1" ? usbexport::kMixesAcapellaInstrumental : mode == "2" ? usbexport::kMixesFourStems : 0;
+        req.stems_inline = lib.setting("export.stems_inline", "0") == "1";
+        req.stem_bits = lib.setting("export.stem_bits", "24") == "16" ? 16 : 24;
+      }
+      if (req.stem_mixes != 0 || !req.stem_mixes_by_playlist.empty())
+        req.stem_lookup = [this](std::int64_t id, const std::string&) { return stems_ ? stems_->stems_file(id) : std::string(); };
       UsbExportResult res;
       std::string error;
       const bool ok = export_library_to_usb(lib, req, res, error, [&](int done, int total, const std::string& title) {
@@ -637,15 +678,40 @@ void App::run_job(Library& lib, const Job& j) {
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
         exporting_ = false;
-        if (!res.report_json.empty())
-          last_export_report_ = "{\"report\":" + res.report_json + ",\"converted\":" + std::to_string(res.converted) +
-                                ",\"remaining_will_not_play\":" + std::to_string(res.remaining_will_not_play) + "}";
+        if (!res.report_json.empty() || res.required_bytes != 0) {
+          std::string names = "[";
+          for (std::size_t i = 0; i < res.no_stems.size(); ++i) names += (i ? "," : "") + broadcast::Json::quote(res.no_stems[i]);
+          names += "]";
+          last_export_report_ = "{\"report\":" + (res.report_json.empty() ? std::string("null") : res.report_json) +
+                                ",\"converted\":" + std::to_string(res.converted) +
+                                ",\"remaining_will_not_play\":" + std::to_string(res.remaining_will_not_play) +
+                                ",\"stem_tracks\":" + std::to_string(res.stem_tracks) + ",\"no_stems\":" + names +
+                                ",\"cues_not_exported\":" + std::to_string(res.cues_not_exported) +
+                                ",\"required_bytes\":" + std::to_string(res.required_bytes) +
+                                ",\"available_bytes\":" + std::to_string(res.available_bytes) +
+                                ",\"ok\":" + (ok ? "true" : "false") + ",\"error\":" + broadcast::Json::quote(ok ? std::string() : error) + "}";
+        }
       }
       if (!ok) set_status(T("status.export_failed", {{"message", error}}));
       else if (res.missing_files) set_status(T("status.exported_missing", {{"tracks", res.tracks}, {"playlists", res.playlists}, {"missing", res.missing_files}}));
+      else if (res.cues_not_exported > 0 && res.converted == 0 && res.remaining_will_not_play == 0)
+        set_status(T("status.exported_cues", {{"tracks", res.tracks}, {"cues", res.cues_not_exported}, {"path", j.path}}));
       else if (res.converted > 0 || res.remaining_will_not_play > 0)
         set_status(T("status.exported_report", {{"tracks", res.tracks}, {"converted", res.converted}, {"remaining", res.remaining_will_not_play}, {"path", j.path}}));
       else set_status(T("status.exported", {{"tracks", res.tracks}, {"playlists", res.playlists}, {"path", j.path}}));
+      break;
+    }
+    case Job::VerifyStick: {  // "Check this stick": the pre-gig check, summarised in the status line
+      usbexport::DeviceReport rep;
+      usbexport::verify_device(j.path, rep);
+      std::string first;
+      for (const auto& p : rep.problems)
+        if (p.error) {
+          first = p.message;
+          break;
+        }
+      set_status(rep.ok ? T("status.stick_ok", {{"tracks", static_cast<int>(rep.tracks)}, {"playlists", static_cast<int>(rep.playlists)}})
+                        : T("status.stick_problems", {{"count", static_cast<int>(rep.problems.size())}, {"first", first}}));
       break;
     }
     case Job::RecFinish:
@@ -844,6 +910,7 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
     const AudibleRange range = find_audible_range(audio->pcm.data(), audio->frames, audio->sample_rate);
     if (range.ok) lib.set_last_sound_ms(track_id, range.last_ms);
   }
+  loaded->key_index = keymath::parse(key_text);  // key sync needs the analysed key; -1 reports "no key"
   loaded->cue_point = initial_cue_ms(lib, track_id, *audio) / 1000.0 * sr;
   for (const BeatSection& b : grid) {
     loaded->grid.push_back({b.first_beat_ms / 1000.0 * sr, b.bpm, b.bar_beat});
@@ -892,12 +959,39 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
   if (attach_only) {  // the engine already holds this track: only rebuild what the UI shows
     if (engine_->deck(deck).track_id != track_id) return;
   } else {
+    const int loaded_key = loaded->key_index;
     engine_->load(deck, std::move(loaded));
     Command g;  // loudness trim from analysis, kept within a sane range
     g.op = Op::AutoGain;
     g.deck = static_cast<std::uint8_t>(deck);
     g.f = static_cast<float>(std::clamp(gain.value_or(0.0), -12.0, 12.0));
     engine_->send(g);
+    engine_->set_track_key(deck, loaded_key);
+    if (lighting_) {
+      LightingTrack lt;
+      lt.track_id = track_id;
+      std::vector<LightingGridSection> gs;
+      for (const BeatSection& b : grid) gs.push_back({b.first_beat_ms, b.bpm, b.bar_beat});
+      lighting_beats_from_grid(gs, static_cast<double>(audio->frames) / sr * 1000.0, lt.beats_ms, lt.downbeat_phase);
+      if (auto sp = lib.phrases(track_id)) {
+        for (const StoredPhraseSection& x : sp->sections) {
+          PhraseSection ps;
+          ps.start_ms = x.start_ms;
+          ps.end_ms = x.end_ms;
+          ps.start_bar = x.start_bar;
+          ps.end_bar = x.end_bar;
+          ps.bars = x.bars;
+          ps.energy = x.energy;
+          ps.label = x.label;
+          ps.label_confidence = x.label_confidence;
+          ps.kind = x.kind;
+          lt.phrases.push_back(std::move(ps));
+        }
+      }
+      lt.rgb = row->color > 0 ? static_cast<std::uint32_t>(row->color) & 0xFFFFFFu : 0u;
+      lighting_->set_track(deck, loaded_key, std::move(lt));
+    }  // key sync reports "no key" without it
+    apply_key_sync_settings(*engine_, parse_key_sync_settings(lib.setting("keysync.mode"), lib.setting("keysync.fine"), lib.setting("keysync.limit")), deck);
   }
   attach_stems(lib, deck, track_id);
   {
