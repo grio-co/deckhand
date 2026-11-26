@@ -22,10 +22,10 @@ bool stems_available() {
 #if defined(DECKHAND_STEMS_DISABLED)
   return false;
 #else
-  return detail::kHaveOnnx;
+  return true;  // the built-in graph executor (src/stems/graph) is always compiled in
 #endif
 }
-const char* backend_name() { return stems_available() ? "onnxruntime" : "none"; }
+const char* backend_name() { return stems_available() ? "builtin" : "none"; }
 
 // ---- resampler -------------------------------------------------------------------------------------------------
 namespace {

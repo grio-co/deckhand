@@ -13,19 +13,69 @@ engine (`src/audio`) is untouched.
 | Disk cache (content-hash keys, LRU cap, atomic writes, verify) | done, tested |
 | Background queue (one job, low priority, pause/resume/cancel) | done, tested |
 | Model slot (`StemModel`) and manifest format (`*.dhstems.json`) | done, tested |
-| ONNX Runtime backend (`OnnxStemModel`, `DemucsCoreModel`) | **written, not compiled or run**: the official runtime could not be downloaded (see below) |
+| Built-in graph executor (`src/stems/graph`, "dhgraph") + `GraphStemModel` | **done, verified against a reference runtime** (see Runtime). `stems_available()` is true, backend name `builtin` |
+| ONNX Runtime backend (`OnnxStemModel`, `DemucsCoreModel`) | kept, compiled out behind `DECKHAND_WITH_ONNX` (off); never used by default, never linked |
 | Catalogue + user-driven installer + checkpoint converter | done and tested offline; the real download path (system `curl`) is untested end to end |
-| Demucs v4 `htdemucs` | skeleton, converter and C++ STFT verified against the reference; **no C++ end-to-end run** (no runtime) |
-| Demucs v4 `htdemucs_ft` (bag of four) | catalogued, not installable yet (needs a bag runner) |
-| Mel-Band RoFormer vocals | checkpoint downloaded and parsed; **no skeleton or C++ pipeline yet** |
+| Demucs v4 `htdemucs` | skeleton, converter, C++ STFT and executor verified against the reference; **runs end to end in C++** (synthetic 30 s test, see Runtime) |
+| Demucs v4 `htdemucs_ft` (bag of four) | bag runner (`pipeline: htdemucs-ft-core`) and installer written; each of the four models verified against the reference; runs end to end in C++ |
+| Mel-Band RoFormer vocals | checkpoint parsed; reference implementation identified (below); **no skeleton, no C++ pipeline yet** |
 | Engine playback of stems, UI, REST route | Phase 2 / other owners |
 
-**Runtime blocker.** `github.com/microsoft/onnxruntime` (repository, releases and raw files) answered HTTP 404 from this
-machine on 2026-11-26, although PyPI still lists the project. The PyPI wheel contains only `libonnxruntime.dylib`, no C/C++
-headers, so nothing could be compiled against it. `scripts/fetch-stems-runtime.sh` is written and refuses to install
-anything until `scripts/stems-runtime.sha256` has pinned hashes (it is empty on purpose). All ONNX code is guarded by
-`DECKHAND_WITH_ONNX`, which turns itself off when `third_party/onnxruntime` is absent, so the default build and CI are
-unaffected. The ONNX models and the Demucs core were validated with the PyPI `onnxruntime` 1.32.0 Python wheel instead.
+## Runtime: the built-in executor
+
+The ONNX Runtime upstream repository is no longer published at its official GitHub location, so there is no official C++ package to
+link. DeckHand therefore runs its models on its own small interpreter, `src/stems/graph` ("dhgraph"), with no third-party dependency
+(Accelerate on macOS is a system framework).
+
+- **Reader** (`onnx_proto.*`): hand-written protobuf wire-format parser for ModelProto/GraphProto (nodes, initializers with
+  external-data location/offset/length, value infos, attributes). Every length, count, depth (16) and size is bounds-checked; unknown
+  fields are skipped; sparse initializers and sub-graphs are refused. External-data paths may not be absolute or contain `..`.
+  Tested with truncated and corrupted copies of the real skeleton and hand-built hostile files.
+- **Operators** (float32, int64, bool; numpy broadcasting; rank up to 8): Add Sub Mul Div Pow Mod Max Min, Equal Less Greater LessOrEqual
+  GreaterOrEqual And Or Not Where, Erf Sigmoid Sqrt Sin Cos Tanh Relu Exp Log Reciprocal Floor Ceil Gelu LeakyRelu Clip Neg Abs, Cast
+  Constant ConstantOfShape Shape Range Identity, Reshape Flatten Squeeze Unsqueeze Transpose Expand Tile Concat Split Slice Gather ScatterND
+  Pad (constant, reflect, edge), ReduceMean/Sum/Prod/Max/Min, Softmax, LayerNormalization, InstanceNormalization, MatMul (batched,
+  broadcast), Gemm, Conv and ConvTranspose (1-D and 2-D, strides, pads, dilations, groups, bias). Anything else stops at load with
+  `unsupported op X at node N (name)`; shape and type mismatches stop the run with the node named, never a guess. The committed
+  `htdemucs` skeleton uses 37 operator types (4,483 nodes, 533 external weights); all are implemented.
+- **Speed design**: the first run executes the whole graph, folds everything that depends only on constants and shapes (3,000 of 4,483
+  nodes for htdemucs: all the shape arithmetic), records each remaining value's size and last use, and lays all activations out in one
+  arena by liveness (views such as Reshape/Unsqueeze share storage). Later runs touch no allocator. A changed input shape re-plans.
+  Convolutions are im2col + SGEMM in column tiles (16 MB work buffer), matmuls are SGEMM (`cblas_sgemm` from Accelerate, a portable blocked
+  fallback elsewhere; one function in `kernels.cpp`, so OpenBLAS can replace it), elementwise/normalisation/data-movement operators run on a
+  small thread pool. The thread cap is the `threads` argument of `open_model()` (0 = min(4, cores)); the system BLAS manages its own threads.
+- **Models** (`graph_model.cpp`): `GraphStemModel` for plain tensor models (layouts from the manifest) and for `htdemucs-core` (C++ STFT,
+  mask and inverse STFT around the network); `htdemucs-ft-core` runs the four fine-tuned models of the bag (one skeleton, files
+  `htdemucs.drums.weights`, `.bass`, `.other`, `.vocals`, converted from the four checkpoints in upstream bag order) and takes stem k
+  from model k only, as upstream's bag weights do. The four executors share one activation arena.
+
+**Verification** (all against the PyPI `onnxruntime` Python wheel used only as an oracle on a developer machine; `tools/make_stems_graph_fixtures.py`
+and `tools/stems_graph_compare.py` regenerate the fixtures):
+
+| Check | Result |
+|---|---|
+| 81 single-purpose operator models (all operator families, broadcasting, dtypes, tile borders, 1 and 4 threads, planned and re-run) | match the reference (rtol 2e-4) |
+| htdemucs core, 7.8 s synthetic chunk, spectral output | max abs error 5.5e-4 on peak 1.69 (3e-4 of peak), RMS error 1.3e-5 on RMS 0.020 |
+| htdemucs core, time-branch output | max abs error 2.3e-5 on peak 0.26, RMS error 3.8e-6 |
+| htdemucs_ft models 0-3 (spectral / time) | max abs error 1.8e-4 / 2.2e-5, 7.3e-5 / 2.3e-5, 1.0e-4 / 2.8e-5, 5.9e-5 / 1.7e-5 |
+| ft bag vs four single models, per stem | bit-identical (max difference 0) |
+
+The test suite (`test_stems_graph`) compares against committed fixtures of 216 kB in total (no Python needed); the tests that need real
+weights run only when `third_party/models` holds the checkpoints (or `DH_STEMS_WEIGHTS` / `DH_STEMS_FT_DIR` point at converted weights)
+and skip otherwise.
+
+**End to end** (`deckhand-stems separate`, a synthesised 30 s stereo file: plucked harmonic bass, noise-burst drums, formant tone; the Mac was
+under load average 15-35 the whole time, 8 cores, thread cap 4):
+
+| Model | Speed | Peak memory | Result |
+|---|---|---|---|
+| htdemucs | 30 s of audio in 9.5-10.3 s = 2.9-3.2x real time (about 1.7 s per 7.8 s chunk once planned) | 1.26 GB resident | stems sum to the input within 1e-9; correlation of bass / drums / vocals stems with the true parts 0.995 / 0.987 / 0.998; bass band (below 120 Hz) 100% in the bass stem; largest step at chunk borders about 3x the mean step (no seams) |
+| htdemucs_ft | 30 s in 45 s = 0.66x real time (four networks per chunk; load average 35-70) | 2.3 GB resident | sums to the input within 2e-9; see the note below |
+
+Memory: htdemucs needs 168 MB of weights, a 595 MB activation arena and 34 MB of convolution work buffer; the bag holds four weight sets
+(672 MB) and one shared arena. The synthetic formant tone is not recognised as "vocals" by the fine-tuned vocals model (the same model, run
+alone, files it under "other"), so the ft numbers on this file say nothing about its quality; stem k is verified to come from model k.
+Nothing here has been listened to.
 
 ## Licence position (why no model ships)
 
@@ -73,7 +123,7 @@ A model is installed by placing `<name>.dhstems.json` plus its file(s) in `<data
 }
 ```
 
-`"pipeline": "htdemucs-core"` replaces `input`/`output`: the ONNX file is the Demucs network core and the STFT work is done in C++.
+`"pipeline": "htdemucs-core"` replaces `input`/`output`: the ONNX file is the Demucs network core and the STFT work is done in C++. `"htdemucs-ft-core"` is the same with four weight files next to it (`htdemucs.<stem>.weights`, stems in the manifest order).
 Tensor-layout handling is tested with three generated models (`tools/make_stems_test_models.py`, 241 to 304 bytes each).
 
 ## Install flow (API for the app)
@@ -95,8 +145,9 @@ Windows 10+, Linux) with TLS verification and https-only redirects: no new libra
 certificates, so it was not used. A native client (NSURLSession / WinHTTP) would be a better long-term home.
 
 **Wiring needed (not mine to edit):** a settings screen listing `list_catalogue()` with the licence text and a checkbox, calling
-`install_model` on a worker thread with progress/cancel; a REST route for the same; `stems_available()` gating (do not offer a
-download when the build has no runtime); packaging `resources/stem-models` including `skeletons/`.
+`install_model` on a worker thread with progress/cancel; a REST route for the same; packaging `resources/stem-models` including
+`skeletons/`. `stems_available()` is now true in every build with stems enabled and `backend_name()` reports `builtin`. The app should
+use `demucs_converter()` for both Demucs entries (it now handles the four-checkpoint `htdemucs_ft` entry; the catalogue no longer blocks it).
 
 ## No Python at the end user: skeletons
 
@@ -118,6 +169,13 @@ error 2.2e-4 (peak 0.27), time branch 4.1e-6 (peak 0.17). One 7.8 s chunk took 2
 2. Run Demucs on **`i`**, take drums, bass and other from it (its vocals output is discarded or used as a residual check).
 3. Mixture consistency at the end on the original mix: the existing proportional step distributes `mix - (v + d + b + o)` and then closes
    `other` exactly. The stems sum to the input, so "all on" is transparent.
+**Reference implementation found (not yet used for an export).** `bs-roformer` 0.3.10 on PyPI (MIT, Phil Wang / lucidrains,
+https://github.com/lucidrains/BS-RoFormer) loads `MelBandRoformer.ckpt` with `strict` matching and no missing or unexpected keys when built
+with dim 384, depth 6, stereo, 1 stem, time/freq transformer depth 1, 60 bands, 8 heads of 64, mask-estimator depth 2, STFT 2048/441
+(config inferred from the tensor shapes and key names; newer releases, 0.4 and later, use other module layouts and do not load it).
+Plan: export the part between the band-split input and the mask output (STFT, band gather, mask averaging and inverse STFT in C++, like
+Demucs), with the library's attention rewritten as MatMul/Softmax so no Einsum is needed; expected extra operators: ReduceL2 (RMS norm),
+Clip/Max. The model is 228 M parameters (about 0.9 GB of weights), so it is slow on CPU. None of this is implemented yet.
 Cost: two models per track (about 1.3x the time of Demucs alone with RoFormer's size, more on CPU). Not implemented: needs the RoFormer
 skeleton and its mel-band STFT pipeline.
 
@@ -134,8 +192,10 @@ Disk use (computed from the format, checked in tests): **42.3 MB per minute** of
 
 ## Speed
 
-Measured only through Python ORT (no C++ runtime yet): htdemucs, one 7.8 s chunk in 2.5 s on a machine at load 100-150. With 25% overlap
-that is roughly 2.3x real time; `htdemucs_ft` would be about four times slower. These numbers are pessimistic. C++ numbers are not measured.
+Measured with the built-in executor on a loaded 8-core Apple Silicon Mac (see Runtime): htdemucs about 1.7 s per 7.8 s chunk (steady state),
+2.9-3.2x real time including overlap and resampling; htdemucs_ft about 0.66x real time. The first chunk of every model pays about 2.3 s for the
+planning run. An idle machine will be faster; Windows and Linux use the portable matrix kernel and will be slower until a BLAS is slotted into
+`kernels.cpp`.
 
 ## What Phase 2 needs in the engine
 
@@ -145,10 +205,10 @@ that is roughly 2.3x real time; `htdemucs_ft` would be about four times slower. 
   When stems are active the deck can play the stem sum instead of the original file, which is transparent to within 16-bit rounding.
 - IPC (`src/audio` protocol and `src/enginehost`): commands for stem gains/mutes per deck, a "stems ready" state and progress events.
 - Library: store the cache key per track, queue separation on load when idle, pause the queue while a deck plays.
-- A bag runner for `htdemucs_ft`, the RoFormer skeleton and the combination above.
+- The RoFormer skeleton and the combination above (the bag runner for `htdemucs_ft` is done).
 
 ## Third-party notices to ship
 
-- ONNX Runtime (MIT, Microsoft): only once the runtime is bundled. Text in `third_party/onnxruntime/LICENSE` and `ThirdPartyNotices.txt` of the release.
+- No runtime is bundled any more (the built-in executor is DeckHand's own); ONNX Runtime only if the optional `DECKHAND_WITH_ONNX` backend is ever shipped.
 - Demucs architecture code (MIT, Meta): the skeleton is generated from it. Weights are NOT part of DeckHand.
 - lucidrains BS-RoFormer / Mel-Band RoFormer code (MIT), when its skeleton is added. See `THIRD-PARTY-NOTICES.md`.

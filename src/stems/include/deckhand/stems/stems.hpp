@@ -73,10 +73,10 @@ struct SeparateResult {
 // with complementary windows and normalised by the accumulated window weight.
 SeparateResult separate(const Audio& in, StemModel& model, const SeparateOptions& opt = {});
 
-// True when a real model backend (ONNX Runtime) is compiled in and stems are not disabled at build time.
+// True when stems are not disabled at build time: the built-in graph executor is always compiled in.
 // Separation with a custom StemModel works either way.
 bool stems_available();
-const char* backend_name();  // "onnxruntime", or "none"
+const char* backend_name();  // "builtin", or "none"
 
 // Band-limited resampler (Kaiser-windowed sinc, DC gain 1). Output length is round(n * to / from).
 std::vector<float> resample(const std::vector<float>& in, int from_rate, int to_rate);

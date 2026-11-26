@@ -69,7 +69,7 @@ bool parse_manifest(const std::string& text, ModelManifest& m, std::string* err)
   if ((v = j.get("channels"))) { if (!v->is_num() || v->n != 2) return fail(err, "only \"channels\": 2 is supported"); }
   if ((v = j.get("overlap"))) { if (!v->is_num() || v->n < 0 || v->n > 0.5) return fail(err, "\"overlap\" must be 0..0.5"); o.overlap = float(v->n); }
   o.pipeline = str_of(j, "pipeline");
-  if (!o.pipeline.empty() && o.pipeline != "htdemucs-core") return fail(err, "unknown \"pipeline\"");
+  if (!o.pipeline.empty() && o.pipeline != "htdemucs-core" && o.pipeline != "htdemucs-ft-core") return fail(err, "unknown \"pipeline\"");
   const Json* in = j.get("input");
   if (!o.pipeline.empty() && !in) {  // fixed-signature pipeline: tensor names come from the pipeline
     if ((v = j.get("execution_provider"))) o.execution_provider = v->is_str() ? v->s : "";
@@ -162,9 +162,11 @@ bool verify_model_file(const ModelManifest& m, std::string* err) {
 }
 
 std::unique_ptr<StemModel> open_model(const ModelManifest& m, int threads, std::string* err) {
-  if (!stems_available()) { fail(err, "this build has no model backend (built without ONNX Runtime)"); return nullptr; }
+  if (!stems_available()) { fail(err, "this build has no model backend (stems are disabled at build time)"); return nullptr; }
   if (!verify_model_file(m, err)) return nullptr;
-  return detail::open_onnx(m, (m.dir / m.file).string(), threads, err);
+  // The built-in executor runs everything; ONNX Runtime (when compiled in) is used only where CoreML is asked for.
+  if (detail::kHaveOnnx && m.execution_provider == "coreml") return detail::open_onnx(m, (m.dir / m.file).string(), threads, err);
+  return detail::open_graph(m, (m.dir / m.file).string(), threads, err);
 }
 
 }  // namespace deckhand::stems

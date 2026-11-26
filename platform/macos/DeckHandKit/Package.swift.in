@@ -17,6 +17,6 @@ let package = Package(
         .linkedFramework("AppKit"), .linkedFramework("Metal"), .linkedFramework("MetalKit"),
         .linkedFramework("QuartzCore"), .linkedFramework("CoreText"), .linkedFramework("CoreMIDI"),
         .linkedFramework("CoreAudioKit"), .linkedFramework("AudioToolbox"), .linkedFramework("CoreAudio"),
-        .linkedFramework("CoreFoundation"), .linkedLibrary("c++"),
+        .linkedFramework("CoreFoundation"), .linkedFramework("Accelerate"), .linkedLibrary("c++"),
       ]),
   ])

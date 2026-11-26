@@ -19,8 +19,11 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 - Stem separation groundwork: seamless chunked separation that sums back to the input, a
   content-keyed disk cache, a background queue that pauses while a deck plays, and a model
   installer that fetches weights from their authors on the user's request after showing the
-  licence ([docs/STEMS.md](docs/STEMS.md)). No model ships, and no inference runtime is linked
-  yet, so separation does not run.
+  licence ([docs/STEMS.md](docs/STEMS.md)). No model ships.
+- Stems: a built-in inference engine (no outside runtime; Accelerate on macOS, portable fallback
+  elsewhere) runs the two Demucs four-stem models offline; results agree with a reference
+  implementation to about 5e-4 on synthetic audio. Roughly 3x real time for the standard model on
+  an Apple silicon laptop under load.
 - Metadata safety: every tag edit is journalled per field (up to 200 per track) and can be undone
   singly or as a batch; imports no longer overwrite fields edited by hand unless asked; deleted
   tracks go to a trash that keeps cues, grid and playlist places for 30 days. Library schema 5.

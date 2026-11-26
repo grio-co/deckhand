@@ -865,9 +865,11 @@ TEST(converter_writes_layout_exactly) {
     {"name":"c.t","offset":128,"length":24,"shape":[2,3]},{"name":"d.idx","offset":192,"length":8,"shape":[2]}]})J"; }
   std::string err;
   CHECK(convert_checkpoint(tiny, d / "l.json", d / "w.bin", nullptr, &err));
-  std::ifstream f(d / "w.bin", std::ios::binary);
   std::vector<float> v(64);
-  f.read(reinterpret_cast<char*>(v.data()), 256);
+  {  // closed before fs::remove_all below: Windows cannot delete a file that is still open (the throw was the 0xc0000409 abort)
+    std::ifstream f(d / "w.bin", std::ios::binary);
+    f.read(reinterpret_cast<char*>(v.data()), 256);
+  }
   CHECK(fs::file_size(d / "w.bin") == 256);
   CHECK(v[0] == 0.f && v[5] == 5.f);                         // a.weight
   CHECK(v[16] == 0.5f && v[17] == -1.f && v[19] == 0.25f);   // b.bias (float16 widened)
@@ -1024,7 +1026,7 @@ TEST(demucs_install_flow_offline) {
 // ---- stub / availability --------------------------------------------------------------------------------------
 TEST(availability_reporting) {
   std::printf("backend: %s\n", backend_name());
-  CHECK(stems_available() == (std::string(backend_name()) == "onnxruntime"));
+  CHECK(stems_available() == (std::string(backend_name()) == "builtin"));
 }
 
 // ---- real models (skipped when none installed) -------------------------------------------------------------------

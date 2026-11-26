@@ -50,7 +50,7 @@ swiftc -O -swift-version 5 \
   -ldh_library -ldh_audio -ldh_gfx -ldh_log -ldh_platform -ldh_miniaudio \
   $(cat "$BUILD/tls_link.txt") $(cat "$BUILD/sqlite_link.txt") -lc++ \
   -framework AppKit -framework Metal -framework MetalKit -framework QuartzCore -framework CoreText \
-  -framework CoreMIDI -framework IOKit -framework CoreAudioKit -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
+  -framework CoreMIDI -framework IOKit -framework CoreAudioKit -framework AudioToolbox -framework CoreAudio -framework CoreFoundation -framework Accelerate
 
 cp "$ROOT"/controllers/*.dhmap "$APP/Contents/Resources/controllers/"
 cp "$ROOT/platform/macos/DeckHand.icns" "$APP/Contents/Resources/DeckHand.icns"

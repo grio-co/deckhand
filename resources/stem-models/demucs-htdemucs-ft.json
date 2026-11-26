@@ -49,7 +49,6 @@
  },
  "upstream_url": "https://github.com/facebookresearch/demucs",
  "install": {
-  "supported": false,
-  "blocked_by": "Needs a four-model bag runner (one skeleton, four weight files); not implemented yet."
+  "supported": true
  }
 }

@@ -66,7 +66,8 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [ ] USB export: run `compare_exports` against a reference stick (docs/EXPORT.md says how to make one),
       then the CDJ-3000 test; 11 format details are still undocumented guesses
 - [ ] Vendored dependencies for portable builds; CI does not yet run the shell screenshot checks
-- [ ] iOS app (pull request open; touch layout pending; add `design/icon/ios/AppIcon.appiconset`)
+- [ ] iOS app: feature parity with the desktop build is the goal (owner, 2026-11-26); pull request
+      open; merge main into the iOS branch, touch layout, `design/icon/ios/AppIcon.appiconset`
 
 ## Target feature set (owner's list, 2026-11-26: parity with the leading club-standard prep and
 ## performance software, and more). `[x]` exists, `[~]` partly or in progress, `[ ]` not started.
@@ -116,10 +117,11 @@ Sync
       clean-room; the answer here is fast, verified USB/SD export
 
 Gaps in the incumbent that DeckHand should close (owner's list, 2026-11-26)
-- [~] Pre-analysed stems: cache, queue, installer and model catalogue exist; BLOCKED on an
-      inference runtime (the planned one is no longer published at its source); only one model has
-      a ready graph; no model ships; then stems written to the USB stick as ordinary tracks for players
-      that cannot separate
+- [~] Pre-analysed stems: built-in inference engine (no outside runtime) runs the two Demucs models
+      offline, verified numerically against a reference on synthetic audio (nobody has listened yet);
+      cache, queue, installer and catalogue exist; no model ships (user installs from the authors'
+      host). Still to do: the RoFormer vocal model, stem playback in the engine, stems on the USB
+      stick
 - [~] Fluid beat grid: drifting tempo, live drummers and tempo jumps become as many sections as
       needed (within ~10 ms on synthetic tests); untested on real recordings
 - [x] Cues follow the grid (API; the in-app confirm is still a status line only)

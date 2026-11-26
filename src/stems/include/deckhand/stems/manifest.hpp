@@ -26,7 +26,7 @@ struct ModelManifest {
   std::vector<std::string> output_names;              // ... or one tensor per stem, in `stems` order (layout has no S)
   std::string output_layout = "BSCT";                 // letters B, S stem, C channel, T time
   std::array<std::string, kStemCount> stems{"vocals", "drums", "bass", "other"};  // model output order
-  std::string pipeline;                               // "" = plain tensors as described above; "htdemucs-core" = Demucs core + C++ STFT
+  std::string pipeline;                               // "" = plain tensors as described above; "htdemucs-core" = Demucs core + C++ STFT; "htdemucs-ft-core" = bag of four, htdemucs.<stem>.weights
   std::string execution_provider = "cpu";             // "cpu" or "coreml" (CoreML where available, else falls back)
   std::filesystem::path dir;                          // folder the manifest was loaded from (not in the JSON)
 };

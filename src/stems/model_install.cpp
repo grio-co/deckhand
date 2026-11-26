@@ -209,24 +209,30 @@ InstallResult install_model(const fs::path& data, const CatalogueEntry& e, bool 
 
 std::function<bool(const fs::path&, const CatalogueEntry&, std::string*)> demucs_converter(const fs::path& data, const fs::path& skel) {
   return [data, skel](const fs::path& dir, const CatalogueEntry& e, std::string* err) -> bool {
-    if (e.kind != "demucs" || e.files.size() != 1) return fail(err, "not a single-model Demucs entry");
+    // One checkpoint = htdemucs; four = htdemucs_ft in the order of the upstream bag: drums, bass, other, vocals.
+    static const char* const kBagStems[4] = {"drums", "bass", "other", "vocals"};
+    const bool bag = e.files.size() == 4;
+    if (e.kind != "demucs" || (e.files.size() != 1 && !bag)) return fail(err, "not a Demucs entry with one or four checkpoints");
     std::error_code ec;
     fs::copy_file(skel / "htdemucs.onnx", dir / "htdemucs.onnx", fs::copy_options::overwrite_existing, ec);
     if (ec) return fail(err, "skeleton missing: " + (skel / "htdemucs.onnx").string());
-    if (!convert_checkpoint(dir / e.files[0].name, skel / "htdemucs.layout.json", dir / "htdemucs.weights", nullptr, err)) return false;
+    for (std::size_t k = 0; k < e.files.size(); ++k) {
+      std::string out = bag ? std::string("htdemucs.") + kBagStems[k] + ".weights" : "htdemucs.weights";
+      if (!convert_checkpoint(dir / e.files[k].name, skel / "htdemucs.layout.json", dir / out, nullptr, err)) return false;
+    }
     std::string sk;
     if (!sha256_file(dir / "htdemucs.onnx", sk)) return fail(err, "cannot hash the skeleton");
     std::ostringstream m;
     m << "{\"format\":\"deckhand-stems-model/1\",\"id\":\"" << e.id << "\",\"name\":\"" << e.name << "\",\"file\":\"" << e.id << "/htdemucs.onnx\","
       << "\"licence\":\"" << e.weights_licence << "\",\"source_url\":\"" << e.files[0].url << "\",\"sha256\":\"" << sk << "\","
-      << "\"sample_rate\":44100,\"segment_frames\":343980,\"overlap\":0.25,\"channels\":2,\"pipeline\":\"htdemucs-core\","
+      << "\"sample_rate\":44100,\"segment_frames\":343980,\"overlap\":0.25,\"channels\":2,\"pipeline\":\"" << (bag ? "htdemucs-ft-core" : "htdemucs-core") << "\","
       << "\"stems\":[\"drums\",\"bass\",\"other\",\"vocals\"]}\n";
     fs::path mf = models_dir(data) / (e.id + ".dhstems.json"), part = mf;
     part += ".part";
     { std::ofstream f(part, std::ios::trunc); f << m.str(); if (!f) return fail(err, "cannot write manifest"); }
     fs::rename(part, mf, ec);
     if (ec) return fail(err, "cannot write manifest");
-    fs::remove(dir / e.files[0].name, ec);  // the 84 MB download is no longer needed
+    for (auto& f : e.files) fs::remove(dir / f.name, ec);  // the downloads are no longer needed
     return true;
   };
 }
