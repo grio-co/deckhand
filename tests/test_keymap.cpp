@@ -1,5 +1,6 @@
 // Keyboard shortcuts: parsing, layering, conflicts, contexts, hold/repeat, the shipped defaults, and docs/SHORTCUTS.md.
 // `test_keymap --write-docs` regenerates the table in docs/SHORTCUTS.md from resources/keymaps/default.dhkeys.
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -256,7 +257,8 @@ int main(int argc, char** argv) {
 
   // ---- docs/SHORTCUTS.md is generated from the file
   {
-    const std::string doc = slurp("docs/SHORTCUTS.md");
+    std::string doc = slurp("docs/SHORTCUTS.md");
+    doc.erase(std::remove(doc.begin(), doc.end(), '\r'), doc.end());  // a Windows checkout may have CRLF
     const auto a = doc.find(kBegin), b = doc.find(kEnd);
     CHECK(a != std::string::npos && b != std::string::npos && a < b);
     const std::string have = doc.substr(a + std::strlen(kBegin), b - a - std::strlen(kBegin));

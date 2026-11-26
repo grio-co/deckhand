@@ -61,7 +61,11 @@ Fixture build_source(Library& lib) {
   Fixture f;
   const fs::path music = g_dir / "Music & More";
   f.a_path = (music / "a b#1%2.mp3").string();
+#ifdef _WIN32
+  f.b_path = (music / "x q.flac").string();  // < > " are not legal in Windows file names
+#else
   f.b_path = (music / "<x> \"q\" \xC3\xA9\xE6\x97\xA5\xE6\x9C\xAC.flac").string();
+#endif
   f.c_path = (g_dir / "gone" / "zz.wav").string();
   spit(f.a_path, "0123456789");
   spit(f.b_path, "abcdef");
@@ -136,7 +140,11 @@ void test_round_trip() {
   CHECK(has(xml, "Location=\"file://localhost/"));
   CHECK(has(xml, "a%20b%231%252.mp3"));
   CHECK(has(xml, "Music%20%26%20More"));
+#ifdef _WIN32
+  CHECK(has(xml, "x%20q.flac"));
+#else
   CHECK(has(xml, "%3Cx%3E%20%22q%22%20%C3%A9%E6%97%A5%E6%9C%AC.flac"));
+#endif
   CHECK(!has(xml, "Fish & Chips"));
   CHECK(has(xml, "Rating=\"204\"") && has(xml, "Colour=\"0x3366CC\"") && has(xml, "Tonality=\"8A\""));
   CHECK(has(xml, "<TEMPO Inizio=\"0.12050\" Bpm=\"128.4000\" Metro=\"4/4\" Battito=\"1\"/>"));
