@@ -274,7 +274,7 @@ static void test_schema4_migration() {
   }
   {
     Library lib(path);
-    CHECK(count(lib, "SELECT max(version) FROM schema_version") == kLibrarySchemaVersion && kLibrarySchemaVersion == 5);
+    CHECK(count(lib, "SELECT max(version) FROM schema_version") == kLibrarySchemaVersion && kLibrarySchemaVersion == 6);
     const auto copies = library_backups(path);
     CHECK(!copies.empty() && copies[0].reason == "upgrade" && copies[0].schema_version == 4 && copies[0].tracks == 1);
     CHECK(lib.track_count() == 1 && lib.track(a)->title == "Alpha" && lib.track(a)->bpm == 126);
@@ -289,6 +289,37 @@ static void test_schema4_migration() {
   }
 }
 
+static void test_schema5_migration() {
+  const std::string path = fresh("deckhand_test_meta_migrate5.db");
+  std::int64_t a = 0;
+  {
+    Library lib(path);
+    NewTrack t;
+    t.path = "/m/a.mp3";
+    t.title = "Alpha";
+    a = lib.upsert_track(t);
+    lib.set_hot_cue(a, 1, 900);
+    // As schema 5 left it: no size / hash columns.
+    lib.db().exec("DROP INDEX idx_tracks_file_size; DROP INDEX idx_tracks_content_hash;"
+                  "ALTER TABLE tracks DROP COLUMN file_size; ALTER TABLE tracks DROP COLUMN content_hash;"
+                  "ALTER TABLE trash_tracks DROP COLUMN file_size; ALTER TABLE trash_tracks DROP COLUMN content_hash;"
+                  "UPDATE schema_version SET version = 5;");
+  }
+  {
+    Library lib(path);
+    CHECK(count(lib, "SELECT max(version) FROM schema_version") == 6);
+    const auto copies = library_backups(path);
+    CHECK(!copies.empty() && copies[0].reason == "upgrade" && copies[0].schema_version == 5);
+    CHECK(count(lib, "SELECT count(*) FROM pragma_table_info('tracks') WHERE name IN ('file_size', 'content_hash')") == 2);
+    CHECK(count(lib, "SELECT count(*) FROM pragma_table_info('trash_tracks') WHERE name IN ('file_size', 'content_hash')") == 2);
+    CHECK(count(lib, "SELECT file_size IS NULL FROM tracks") == 1);  // unknown until hash_pending runs
+    CHECK(lib.track(a)->title == "Alpha" && lib.cues(a).size() == 1);
+    CHECK(lib.hash_pending(10).missing == 1);  // /m/a.mp3 does not exist
+    lib.remove_track(a);
+    CHECK(lib.restore_track(a));
+  }
+}
+
 int main() {
   test_journal_and_undo();
   test_analysis_source_and_cues();
@@ -296,6 +327,7 @@ int main() {
   test_import_protection();
   test_trash();
   test_schema4_migration();
+  test_schema5_migration();
   std::puts("test_metadata_safety ok");
   return 0;
 }

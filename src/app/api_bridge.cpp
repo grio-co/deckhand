@@ -19,6 +19,7 @@
 
 #include "deckhand/api/server.hpp"
 #include "deckhand/app/controls.hpp"
+#include "deckhand/app/stems_service.hpp"
 #include "deckhand/export/export_preflight.hpp"
 #include "deckhand/import/interchange.hpp"
 #include "deckhand/library/library.hpp"
@@ -78,6 +79,106 @@ Json undo_json(const UndoResult& u) {
   j.set("applied", u.applied);
   j.set("batch_id", u.batch_id);
   return j;
+}
+
+Json cue_json(const Cue& c) {
+  Json j = Json::object();
+  j.set("kind", c.kind == CueKind::Hot ? "hot" : c.kind == CueKind::Loop ? "loop" : "memory");
+  if (c.slot >= 0) j.set("slot", c.slot);
+  j.set("start_ms", c.start_ms);
+  if (c.end_ms >= 0) j.set("end_ms", c.end_ms);
+  if (!c.label.empty()) j.set("label", c.label);
+  return j;
+}
+
+Json follow_json(const CueFollowProposal& p) {
+  Json j = Json::object();
+  Json moves = Json::array(), off = Json::array(), same = Json::array();
+  for (const CueMove& m : p.moves) {
+    Json o = Json::object();
+    o.set("from", cue_json(m.before));
+    o.set("to", cue_json(m.after));
+    o.set("beats", m.beats);
+    moves.push_back(std::move(o));
+  }
+  for (const Cue& c : p.off_grid) off.push_back(cue_json(c));
+  for (const Cue& c : p.unchanged) same.push_back(cue_json(c));
+  j.set("moves", std::move(moves));
+  j.set("off_grid", std::move(off));
+  j.set("unchanged", std::move(same));
+  j.set("no_grid", p.no_grid);
+  j.set("tolerance_ms", p.tolerance_ms);
+  return j;
+}
+
+Json strip_json(const StripResult& r) {
+  Json j = Json::object();
+  j.set("dry_run", r.dry_run);
+  j.set("batch_id", r.batch_id);
+  j.set("tracks", r.tracks);
+  j.set("tracks_changed", r.tracks_changed);
+  Json cleared = Json::object();
+  for (const auto& [k, v] : r.cleared) cleared.set(k, v);
+  j.set("cleared", std::move(cleared));
+  j.set("skipped_grid_locked", r.skipped_grid_locked);
+  j.set("skipped_user_key", r.skipped_user_key);
+  Json notes = Json::array();
+  for (const std::string& n : r.notes) notes.push_back(n);
+  j.set("notes", std::move(notes));
+  return j;
+}
+
+Json duplicate_json(const DuplicateGroup& g) {
+  Json j = Json::object();
+  j.set("kind", g.kind);
+  j.set("confidence", g.confidence);
+  Json members = Json::array();
+  for (const DuplicateMember& m : g.members) {
+    Json o = track_json(m.row);
+    o.set("file_size", m.file_size);
+    o.set("sample_rate", m.sample_rate);
+    o.set("lossless", m.lossless);
+    o.set("cue_count", m.cue_count);
+    o.set("has_grid", m.has_grid);
+    members.push_back(std::move(o));
+  }
+  j.set("members", std::move(members));
+  Json diff = Json::array();
+  for (const std::string& d : g.differences) diff.push_back(d);
+  j.set("differences", std::move(diff));
+  j.set("suggested_keep", g.suggested_keep);
+  j.set("suggestion_reason", g.suggestion_reason);
+  return j;
+}
+
+Json merge_json(const MergeResult& m) {
+  Json j = Json::object();
+  j.set("dry_run", m.dry_run);
+  j.set("batch_id", m.batch_id);
+  j.set("kept", m.kept);
+  Json removed = Json::array();
+  for (const std::int64_t id : m.removed) removed.push_back(id);
+  j.set("removed", std::move(removed));
+  j.set("playlists_repointed", m.playlists_repointed);
+  j.set("playlists_already_had", m.playlists_already_had);
+  j.set("hot_cues_copied", m.hot_cues_copied);
+  j.set("memory_cues_copied", m.memory_cues_copied);
+  j.set("loops_copied", m.loops_copied);
+  j.set("grid_copied", m.grid_copied);
+  j.set("history_moved", m.history_moved);
+  Json filled = Json::array();
+  for (const std::string& f : m.fields_filled) filled.push_back(f);
+  j.set("fields_filled", std::move(filled));
+  return j;
+}
+
+bool id_list(const Json& v, std::vector<std::int64_t>& out) {
+  if (!v.is_array()) return false;
+  for (std::size_t i = 0; i < v.size(); ++i) {
+    if (!v.at(i).is_number()) return false;
+    out.push_back(v.at(i).as_int());
+  }
+  return true;
 }
 
 Response undo_response(const UndoResult& u) {
@@ -387,6 +488,23 @@ struct ApiBridge::Impl {
       std::string paction;
       if (parse_prep_control(name, pdeck, paction, pslot)) return prep_response(pdeck, paction, pslot, body);
     }
+    if (is_chain_control(name)) {  // effect chain edits: structural, applied at once, never scheduled
+      if (body["in_ms"].is_number() || body["at_unix_ms"].is_number() || body["when"].is_object() || body["at_beat"].is_object() ||
+          body["in_beats"].is_object())
+        return Response::error(400, "effect chain edits cannot be scheduled");
+      std::string out_text, cerror;
+      if (!apply_chain_control(host.api_engine(), name, has_value, v, body["text"].as_string(), out_text, cerror)) return Response::error(400, cerror);
+      Json j = Json::object();
+      j.set("control", name);
+      const auto at = name.rfind(".chain.");
+      const std::string verb = at == std::string::npos ? std::string() : name.substr(at + 7);
+      if (verb.rfind("insert", 0) == 0) j.set("id", static_cast<std::int64_t>(std::atoll(out_text.c_str())));
+      if (verb == "save") {
+        Json preset = Json::parse(out_text);
+        j.set("preset", std::move(preset));
+      }
+      return Response::ok(std::move(j));
+    }
     std::vector<Command> commands;
     std::string error;
     if (!build_control(host.api_engine(), name, has_value, v, commands, error)) return Response::error(400, error);
@@ -430,6 +548,9 @@ struct ApiBridge::Impl {
       when_text = "deck " + std::to_string(deck + 1) + (relative ? " in " : " at beat ") + std::to_string(b[field].as_double()) + (relative ? " beats" : "");
       scheduled_request = true;
     }
+    if (scheduled_request)
+      for (const Command& c : commands)
+        if (c.op == Op::FxSelect) return Response::error(400, "choosing an effect for a slot builds an effect and cannot be scheduled; insert a unit with deckN.chain.insert instead, or send it now");
     Json j = Json::object();
     j.set("control", name);
     if (!scheduled_request) {
@@ -512,6 +633,477 @@ struct ApiBridge::Impl {
       server->publish("decks", decks);
       server->publish("mixer", mixer_json());
     }
+  }
+
+
+  // ---- effect chains ------------------------------------------------------------------------------------------------
+  Json chain_json(int target) {
+    const FxChainInfo c = host.api_engine().fx_chain(target);
+    Json j = Json::object();
+    j.set("target", fx_target_name(target));
+    j.set("exists", c.exists != 0);
+    j.set("bypass", c.bypass != 0);
+    j.set("wet", static_cast<double>(c.wet));
+    j.set("count", c.count);
+    j.set("max_units", kFxChainMax);
+    j.set("rev", static_cast<std::int64_t>(c.rev));
+    Json units = Json::array();
+    for (int i = 0; i < c.count && i < kFxChainMax; ++i) {
+      const FxUnitInfo& u = c.unit[i];
+      const EffectInfo* e = effect_info(u.kind);
+      Json o = Json::object();
+      o.set("id", u.id);
+      o.set("pos", i);
+      o.set("effect", e ? e->slug : "");
+      o.set("number", static_cast<int>(u.kind));
+      o.set("name", e ? e->name : "");
+      o.set("on", u.on != 0);
+      o.set("wet", static_cast<double>(u.wet));
+      o.set("param", static_cast<double>(u.param));
+      o.set("param2", static_cast<double>(u.param2));
+      o.set("param3", static_cast<double>(u.param3));
+      o.set("beats", static_cast<double>(u.beats));
+      o.set("seconds", u.seconds);
+      if (u.legacy_slot >= 0) o.set("slot", u.legacy_slot + 1);
+      units.push_back(std::move(o));
+    }
+    j.set("units", std::move(units));
+    return j;
+  }
+
+  static bool effect_from_json(const Json& v, EffectKind& out) {
+    if (v.is_string()) {
+      out = effect_from_slug(v.as_string());
+      return out != EffectKind::None;
+    }
+    if (v.is_integer()) {
+      const std::int64_t n = v.as_int();
+      if (n < 1 || n >= static_cast<std::int64_t>(EffectKind::Count)) return false;
+      out = static_cast<EffectKind>(n);
+      return true;
+    }
+    return false;
+  }
+
+  bool unit_exists(int target, int id) {
+    const FxChainInfo c = host.api_engine().fx_chain(target);
+    for (int i = 0; i < c.count && i < kFxChainMax; ++i)
+      if (c.unit[i].id == id) return true;
+    return false;
+  }
+
+  // Resolves {target}; sets `bad` to a response when it does not name a chain.
+  bool chain_target(const Request& r, int& target, Response& bad) {
+    if (!parse_fx_target(r.params.at("target"), target) || !fx_target_valid(target)) {
+      bad = Response::error(404, "no such chain; target is deck1..deck4, master, mic, sampler or deckN.stemM (M 1..8)");
+      return false;
+    }
+    return true;
+  }
+  bool chain_edit(const FxChainEdit& e, FxChainResult& res, Response& bad) {
+    if (host.api_engine().fx_chain_edit(e, res)) return true;
+    bad = Response::error(409, res.error.empty() ? "the engine refused the chain edit" : res.error);
+    return false;
+  }
+
+  void add_chain_routes() {
+    auto& s = *server;
+    s.add_route("GET", "/v1/fx/chains/{target}", "read", [this](const Request& r) {
+      int t = 0;
+      Response bad;
+      if (!chain_target(r, t, bad)) return bad;
+      return Response::ok(chain_json(t));
+    });
+    s.add_route("POST", "/v1/fx/chains/{target}/units", "control:fx:{target}", [this](const Request& r) {
+      int t = 0;
+      Response bad;
+      if (!chain_target(r, t, bad)) return bad;
+      EffectKind kind = EffectKind::None;
+      if (!effect_from_json(r.body["effect"], kind)) return Response::error(400, "effect must be a slug or number from GET /v1/effects");
+      FxChainEdit e;
+      e.verb = FxChainVerb::Insert;
+      e.target = t;
+      e.kind = kind;
+      e.pos = r.body["pos"].is_number() ? static_cast<int>(r.body["pos"].as_int()) : -1;
+      e.value = opt_bool(r.body, "on", false) ? 1 : 0;
+      FxChainResult res;
+      if (!chain_edit(e, res, bad)) return bad;
+      Json j = chain_json(t);
+      j.set("id", res.id);
+      Response ok = Response::ok(std::move(j));
+      ok.status = 201;
+      return ok;
+    });
+    s.add_route("PATCH", "/v1/fx/chains/{target}/units/{id}", "control:fx:{target}", [this](const Request& r) {
+      int t = 0;
+      Response bad;
+      std::int64_t id = 0;
+      if (!chain_target(r, t, bad)) return bad;
+      if (!int_param(r, "id", id) || !unit_exists(t, static_cast<int>(id))) return Response::error(404, "no such unit in this chain");
+      struct F { const char* key; FxField f; double lo, hi; };
+      const F fields[] = {{"wet", FxField::Wet, 0, 1},       {"param", FxField::Param, 0, 1}, {"param2", FxField::Param2, 0, 1},
+                          {"param3", FxField::Param3, 0, 1}, {"beats", FxField::Beats, 0.0625, 64}, {"seconds", FxField::Seconds, 0, 60}};
+      for (const F& f : fields)
+        if (r.body.contains(f.key) && (!r.body[f.key].is_number() || r.body[f.key].as_double() < f.lo || r.body[f.key].as_double() > f.hi))
+          return Response::error(400, std::string(f.key) + " must be a number " + std::to_string(f.lo) + ".." + std::to_string(f.hi));
+      if (r.body.contains("on") && !r.body["on"].is_bool()) return Response::error(400, "on must be true or false");
+      EffectKind kind = EffectKind::None;
+      if (r.body.contains("effect") && !effect_from_json(r.body["effect"], kind)) return Response::error(400, "effect must be a slug or number from GET /v1/effects");
+      FxChainResult res;
+      if (kind != EffectKind::None) {  // replacing resets the unit's other fields, so it goes first
+        FxChainEdit e;
+        e.verb = FxChainVerb::Replace;
+        e.target = t;
+        e.id = static_cast<int>(id);
+        e.kind = kind;
+        if (!chain_edit(e, res, bad)) return bad;
+      }
+      const auto set = [&](FxField f, double v) {
+        FxChainEdit e;
+        e.verb = FxChainVerb::Set;
+        e.target = t;
+        e.id = static_cast<int>(id);
+        e.field = static_cast<int>(f);
+        e.value = v;
+        return chain_edit(e, res, bad);
+      };
+      if (r.body.contains("on") && !set(FxField::On, r.body["on"].as_bool() ? 1 : 0)) return bad;
+      for (const F& f : fields)
+        if (r.body.contains(f.key) && !set(f.f, r.body[f.key].as_double())) return bad;
+      return Response::ok(chain_json(t));
+    });
+    s.add_route("DELETE", "/v1/fx/chains/{target}/units/{id}", "control:fx:{target}", [this](const Request& r) {
+      int t = 0;
+      Response bad;
+      std::int64_t id = 0;
+      if (!chain_target(r, t, bad)) return bad;
+      if (!int_param(r, "id", id) || !unit_exists(t, static_cast<int>(id))) return Response::error(404, "no such unit in this chain");
+      FxChainEdit e;
+      e.verb = FxChainVerb::Remove;
+      e.target = t;
+      e.id = static_cast<int>(id);
+      FxChainResult res;
+      if (!chain_edit(e, res, bad)) return bad;
+      Response ok;
+      ok.status = 204;
+      return ok;
+    });
+    s.add_route("POST", "/v1/fx/chains/{target}/units/{id}/move", "control:fx:{target}", [this](const Request& r) {
+      int t = 0;
+      Response bad;
+      std::int64_t id = 0;
+      if (!chain_target(r, t, bad)) return bad;
+      if (!int_param(r, "id", id) || !unit_exists(t, static_cast<int>(id))) return Response::error(404, "no such unit in this chain");
+      if (!r.body["pos"].is_integer() || r.body["pos"].as_int() < 0) return Response::error(400, "pos must be a non-negative integer (the new index)");
+      FxChainEdit e;
+      e.verb = FxChainVerb::Move;
+      e.target = t;
+      e.id = static_cast<int>(id);
+      e.pos = static_cast<int>(std::min<std::int64_t>(r.body["pos"].as_int(), kFxChainMax));
+      FxChainResult res;
+      if (!chain_edit(e, res, bad)) return bad;
+      return Response::ok(chain_json(t));
+    });
+    s.add_route("PUT", "/v1/fx/chains/{target}/settings", "control:fx:{target}", [this](const Request& r) {
+      int t = 0;
+      Response bad;
+      if (!chain_target(r, t, bad)) return bad;
+      if (r.body.contains("bypass") && !r.body["bypass"].is_bool()) return Response::error(400, "bypass must be true or false");
+      if (r.body.contains("wet") && (!r.body["wet"].is_number() || r.body["wet"].as_double() < 0 || r.body["wet"].as_double() > 1))
+        return Response::error(400, "wet must be a number 0..1");
+      if (!r.body.contains("bypass") && !r.body.contains("wet")) return Response::error(400, "give bypass and/or wet");
+      FxChainResult res;
+      if (r.body.contains("bypass")) {
+        FxChainEdit e;
+        e.verb = FxChainVerb::SetChain;
+        e.target = t;
+        e.field = 0;
+        e.value = r.body["bypass"].as_bool() ? 1 : 0;
+        if (!chain_edit(e, res, bad)) return bad;
+      }
+      if (r.body.contains("wet")) {
+        FxChainEdit e;
+        e.verb = FxChainVerb::SetChain;
+        e.target = t;
+        e.field = 1;
+        e.value = r.body["wet"].as_double();
+        if (!chain_edit(e, res, bad)) return bad;
+      }
+      return Response::ok(chain_json(t));
+    });
+    s.add_route("GET", "/v1/fx/chains/{target}/preset", "read", [this](const Request& r) {
+      int t = 0;
+      Response bad;
+      if (!chain_target(r, t, bad)) return bad;
+      FxChainEdit e;
+      e.verb = FxChainVerb::Save;
+      e.target = t;
+      FxChainResult res;
+      if (!chain_edit(e, res, bad)) return bad;
+      return Response::ok(Json::parse(res.text));
+    });
+    s.add_route("PUT", "/v1/fx/chains/{target}/preset", "control:fx:{target}", [this](const Request& r) {
+      int t = 0;
+      Response bad;
+      if (!chain_target(r, t, bad)) return bad;
+      if (!r.body.is_object()) return Response::error(400, "the body is a chain preset (the object GET .../preset returns)");
+      FxChainInfo parsed;
+      std::string perr;
+      if (!fx_chain_from_json(r.body.dump(), parsed, perr)) return Response::error(400, "not a chain preset: " + perr);
+      FxChainEdit e;
+      e.verb = FxChainVerb::Load;
+      e.target = t;
+      e.text = r.body.dump();
+      FxChainResult res;
+      if (!chain_edit(e, res, bad)) return bad;
+      return Response::ok(chain_json(t));
+    });
+  }
+
+  // ---- keymap and stems ---------------------------------------------------------------------------------------------
+  static Json stem_job_json(const stems::JobInfo& j) {
+    Json o = Json::object();
+    o.set("job", j.id);
+    o.set("label", j.label);
+    o.set("state", stems::job_state_name(j.state));
+    o.set("progress", static_cast<double>(j.progress));
+    o.set("seconds", j.seconds);
+    if (!j.error.empty()) o.set("error", j.error);
+    return o;
+  }
+
+  void add_keymap_stem_routes() {
+    auto& s = *server;
+    s.add_route("GET", "/v1/keymap", "read", [this](const Request&) {
+      const std::string text = host.api_keymap_json();
+      if (text.empty()) return Response::error(404, "keyboard shortcuts are not available");
+      return Response::ok(Json::parse(text));
+    });
+    s.add_route("PUT", "/v1/keymap", "admin", [this](const Request& r) {
+      // The body is the .dhkeys text: a JSON string, or an object {"text": "..."}. Empty resets to the shipped defaults.
+      std::string text;
+      if (r.body.is_string()) text = r.body.as_string();
+      else if (r.body["text"].is_string()) text = r.body["text"].as_string();
+      else if (!r.body.is_null()) return Response::error(400, "the body is the dhkeys text as a string, or {\"text\": \"...\"}");
+      std::vector<std::string> warnings;
+      std::string error;
+      if (!host.api_keymap_set(text, warnings, error)) return Response::error(400, error);
+      Json j = Json::object();
+      Json w = Json::array();
+      for (const std::string& x : warnings) w.push_back(x);
+      j.set("warnings", std::move(w));
+      return Response::ok(std::move(j));
+    });
+
+    s.add_route("GET", "/v1/stems/status", "read", [this](const Request&) {
+      StemService* st = host.api_stems();
+      if (!st) return Response::error(404, "stem separation is not part of this build");
+      const StemStatus x = st->status();
+      Json j = Json::object();
+      j.set("available", x.available);
+      if (!x.available) j.set("why_not", x.why_not);
+      j.set("backend", x.backend);
+      j.set("model", x.model);
+      Json cache = Json::object();
+      cache.set("bytes", x.cache_bytes);
+      cache.set("cap_bytes", x.cache_cap);
+      cache.set("entries", x.cache_entries);
+      j.set("cache", std::move(cache));
+      Json q = Json::object();
+      q.set("paused", x.paused);
+      q.set("paused_by_user", x.user_paused);
+      q.set("paused_while_playing", x.auto_paused);
+      q.set("pending", x.pending);
+      Json jobs = Json::array();
+      for (const stems::JobInfo& job : x.jobs) jobs.push_back(stem_job_json(job));
+      q.set("jobs", std::move(jobs));
+      j.set("queue", std::move(q));
+      const StemInstallState in = st->install_state();
+      Json inst = Json::object();
+      inst.set("model", in.id);
+      inst.set("state", in.state);
+      inst.set("progress", static_cast<double>(in.progress));
+      if (!in.error.empty()) inst.set("error", in.error);
+      j.set("install", std::move(inst));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("GET", "/v1/stems/models", "read", [this](const Request&) {
+      StemService* st = host.api_stems();
+      if (!st) return Response::error(404, "stem separation is not part of this build");
+      Json a = Json::array();
+      for (const StemModelRow& m : st->models()) {
+        const stems::CatalogueEntry& e = m.entry;
+        Json o = Json::object();
+        o.set("id", e.id);
+        o.set("name", e.name);
+        o.set("kind", e.kind);
+        o.set("summary", e.summary);
+        o.set("quality", e.quality);
+        o.set("speed", e.speed);
+        Json stems_list = Json::array();
+        for (const std::string& n : e.stems) stems_list.push_back(n);
+        o.set("stems", std::move(stems_list));
+        o.set("download_bytes", e.total_bytes());
+        o.set("installed", m.installed);
+        o.set("usable", m.usable);
+        o.set("installed_bytes", m.installed_bytes);
+        if (!m.licence_accepted_at.empty()) o.set("licence_accepted_at", m.licence_accepted_at);
+        o.set("install_supported", e.install_supported);
+        if (!e.blocked_by.empty()) o.set("blocked_by", e.blocked_by);
+        Json lic = Json::object();
+        lic.set("summary", e.licence_summary);
+        lic.set("statement_source", e.licence_source);
+        lic.set("link", e.licence_link);
+        lic.set("weights", e.weights_licence);
+        lic.set("code", e.code_licence);
+        lic.set("training_data", e.training_data);
+        lic.set("restriction", e.restriction);
+        o.set("licence", std::move(lic));
+        o.set("source", e.upstream_url);
+        a.push_back(std::move(o));
+      }
+      return Response::ok(std::move(a));
+    });
+    s.add_route("POST", "/v1/stems/models/{id}/install", "admin", [this](const Request& r) {
+      StemService* st = host.api_stems();
+      if (!st) return Response::error(404, "stem separation is not part of this build");
+      const std::string id = r.params.at("id");
+      std::string why;
+      if (!st->available(&why)) return Response::error(409, why);
+      const bool accepted = r.body["accept_licence"].is_bool() && r.body["accept_licence"].as_bool();
+      for (const StemModelRow& m : st->models()) {
+        if (m.entry.id != id) continue;
+        if (!accepted)
+          return Response::error(400, "accept_licence: true is required. Licence: " + m.entry.licence_summary + " (" + m.entry.licence_source + ")");
+        break;
+      }
+      std::string error;
+      switch (st->install(id, accepted, error)) {
+        case StemService::Result::Ok: break;
+        case StemService::Result::NotFound: return Response::error(404, error);
+        case StemService::Result::NeedLicence: return Response::error(400, error);
+        case StemService::Result::Busy:
+        case StemService::Result::Unavailable: return Response::error(409, error);
+        case StemService::Result::Refused: return Response::error(409, error);
+      }
+      Json j = Json::object();
+      j.set("model", id);
+      j.set("state", "running");
+      Response ok = Response::ok(std::move(j));
+      ok.status = 202;
+      return ok;
+    });
+    s.add_route("DELETE", "/v1/stems/models/{id}", "admin", [this](const Request& r) {
+      StemService* st = host.api_stems();
+      if (!st) return Response::error(404, "stem separation is not part of this build");
+      if (!st->remove(r.params.at("id"))) return Response::error(404, "that model is not installed (or is being installed)");
+      Response ok;
+      ok.status = 204;
+      return ok;
+    });
+    s.add_route("POST", "/v1/stems/queue", "library:write", [this](const Request& r) {
+      StemService* st = host.api_stems();
+      if (!st) return Response::error(404, "stem separation is not part of this build");
+      std::string why;
+      if (!st->available(&why)) return Response::error(409, why);
+      std::vector<std::int64_t> ids;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (r.body["track_ids"].is_array()) {
+          if (!id_list(r.body["track_ids"], ids)) return Response::error(400, "track_ids must be numbers");
+        } else if (r.body["playlist_id"].is_number()) {
+          ids = lib.playlist_track_ids(r.body["playlist_id"].as_int());
+        } else {
+          return Response::error(400, "give track_ids or playlist_id");
+        }
+      }
+      if (ids.size() > 5000) return Response::error(400, "at most 5000 tracks at a time");
+      Json queued = Json::array(), skipped = Json::array();
+      for (const std::int64_t id : ids) {
+        std::optional<TrackRow> row;
+        {
+          std::lock_guard<std::mutex> lock(lib_mutex);
+          row = lib.track(id);
+        }
+        Json o = Json::object();
+        o.set("track_id", id);
+        if (!row) {
+          o.set("reason", "no such track");
+          skipped.push_back(std::move(o));
+          continue;
+        }
+        if (st->track(id).cached && !opt_bool(r.body, "force", false)) {
+          o.set("reason", "already separated");
+          skipped.push_back(std::move(o));
+          continue;
+        }
+        std::uint64_t job = 0;
+        std::string error;
+        const std::string label = row->artist.empty() ? row->title : row->artist + " - " + row->title;
+        const StemService::Result res = st->enqueue(id, row->path, label, job, error);
+        if (res == StemService::Result::Ok) {
+          o.set("job", job);
+          queued.push_back(std::move(o));
+        } else if (res == StemService::Result::Unavailable) {
+          return Response::error(409, error);
+        } else {
+          o.set("reason", error);
+          skipped.push_back(std::move(o));
+        }
+      }
+      Json j = Json::object();
+      j.set("queued", std::move(queued));
+      j.set("skipped", std::move(skipped));
+      Response ok = Response::ok(std::move(j));
+      ok.status = 202;
+      return ok;
+    });
+    s.add_route("DELETE", "/v1/stems/queue/{job}", "library:write", [this](const Request& r) {
+      StemService* st = host.api_stems();
+      std::int64_t job = 0;
+      if (!st || !int_param(r, "job", job) || job < 1 || !st->cancel_job(static_cast<std::uint64_t>(job))) return Response::error(404, "no such queued job");
+      Response ok;
+      ok.status = 204;
+      return ok;
+    });
+    s.add_route("POST", "/v1/stems/queue/pause", "library:write", [this](const Request&) {
+      StemService* st = host.api_stems();
+      if (!st) return Response::error(404, "stem separation is not part of this build");
+      st->pause();
+      return Response::ok();
+    });
+    s.add_route("POST", "/v1/stems/queue/resume", "library:write", [this](const Request&) {
+      StemService* st = host.api_stems();
+      if (!st) return Response::error(404, "stem separation is not part of this build");
+      st->resume();  // the queue still waits while a deck is playing
+      return Response::ok();
+    });
+    s.add_route("GET", "/v1/tracks/{id}/stems", "library:read", [this](const Request& r) {
+      StemService* st = host.api_stems();
+      std::int64_t id = 0;
+      if (!st) return Response::error(404, "stem separation is not part of this build");
+      if (!int_param(r, "id", id)) return Response::error(404, "no such track");
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (!lib.track(id)) return Response::error(404, "no such track");
+      }
+      const StemTrackInfo t = st->track(id);
+      Json j = Json::object();
+      j.set("track_id", id);
+      j.set("cached", t.cached);
+      if (t.cached) {
+        j.set("bytes", t.bytes);
+        j.set("model", t.model);
+        j.set("key", t.key);
+      }
+      j.set("queued", t.queued);
+      if (t.queued) {
+        j.set("job", t.job);
+        j.set("state", t.state);
+        j.set("progress", static_cast<double>(t.progress));
+      }
+      return Response::ok(std::move(j));
+    });
   }
 
   // ---- routes ---------------------------------------------------------------------------
@@ -657,6 +1249,9 @@ struct ApiBridge::Impl {
         j.set("number", static_cast<int>(e.kind));
         j.set("name", e.name);
         j.set("param", e.param_name);
+        j.set("param2", e.param2_name);
+        j.set("param3", e.param3_name);
+        j.set("slug", e.slug);
         j.set("beat_synced", e.beat_synced);
         j.set("colour_only", e.colour);
         j.set("release", e.release);
@@ -822,6 +1417,175 @@ struct ApiBridge::Impl {
       }
       if (u.status == UndoStatus::Ok) host.api_library_changed();
       return undo_response(u);
+    });
+    s.add_route("POST", "/v1/library/tracks/{id}/grid", "library:write", [this](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such track");
+      const Json& secs = r.body["sections"];
+      if (!secs.is_array() || secs.size() == 0 || secs.size() > 256) return Response::error(400, "sections must be an array of 1 to 256 tempo sections");
+      std::vector<BeatSection> grid;
+      for (std::size_t i = 0; i < secs.size(); ++i) {
+        const Json& o = secs.at(i);
+        const double bpm = o["bpm"].as_double(), first = o["first_beat_ms"].as_double(-1e18);
+        const std::int64_t bar = o["bar_beat"].is_number() ? o["bar_beat"].as_int() : 1;
+        if (!o["bpm"].is_number() || !(bpm >= 30 && bpm <= 300) || !(first > -1e9 && first < 1e9) || bar < 1 || bar > 4)
+          return Response::error(400, "each section needs first_beat_ms, bpm 30 to 300 and bar_beat 1 to 4");
+        grid.push_back({first, bpm, static_cast<int>(bar)});
+      }
+      std::optional<bool> lock;
+      if (r.body["lock"].is_bool()) lock = r.body["lock"].as_bool();
+      std::optional<double> bpm = grid.front().bpm;
+      if (r.body["bpm"].is_number()) bpm = r.body["bpm"].as_double();
+      const bool dry = opt_bool(r.body, "dry_run", false);
+      Json j = Json::object();
+      {
+        std::lock_guard<std::mutex> lock_(lib_mutex);
+        if (!lib.track(id)) return Response::error(404, "no such track");
+        CueFollow mode = cue_follow_from(lib.setting("cues_follow_grid", "ask"));
+        if (r.body["cues_follow"].is_string()) {
+          const std::string m = r.body["cues_follow"].as_string();
+          if (m != "ask" && m != "always" && m != "never") return Response::error(400, "cues_follow must be ask, always or never");
+          mode = cue_follow_from(m);
+        }
+        EditScope api_edit("api");
+        const GridCommit c = lib.commit_grid(id, grid, bpm, lock, mode, kCueGridToleranceMs, dry);
+        j.set("dry_run", dry);
+        j.set("batch_id", c.batch_id);
+        j.set("grid_changed", c.grid_changed);
+        j.set("cues_follow", cue_follow_name(c.mode));
+        j.set("cues_applied", c.applied);
+        j.set("cues", follow_json(c.proposal));
+      }
+      if (!dry) host.api_library_changed();
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/tracks/{id}/cues/follow-grid", "library:write", [this](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such track");
+      if (!r.body["batch_id"].is_number()) return Response::error(400, "batch_id (from the grid edit) is required");
+      FollowResult f;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (!lib.track(id)) return Response::error(404, "no such track");
+        f = lib.apply_cue_follow(id, r.body["batch_id"].as_int());
+      }
+      if (f.status == FollowStatus::NoGridEdit) return Response::error(404, "that batch holds no grid edit of this track");
+      if (f.status == FollowStatus::AlreadyApplied) return Response::error(409, "the cues of that grid edit were already moved");
+      if (f.status == FollowStatus::Conflict) return Response::error(409, "the grid was edited again since; nothing was moved");
+      host.api_library_changed();
+      Json j = Json::object();
+      j.set("batch_id", f.batch_id);
+      j.set("cues", follow_json(f.proposal));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/analysis/strip", "library:write", [this](const Request& r) {
+      StripKinds k;
+      const Json& kinds = r.body["kinds"];
+      if (!kinds.is_array() || kinds.size() == 0) return Response::error(400, "kinds must list what to clear: grid, key, loudness, waveform, first_sound, phrases, vocals, stems");
+      for (std::size_t i = 0; i < kinds.size(); ++i) {
+        const std::string n = kinds.at(i).as_string();
+        if (n == "grid") k.grid = true;
+        else if (n == "key") k.key = true;
+        else if (n == "loudness") k.loudness = true;
+        else if (n == "waveform") k.waveform = true;
+        else if (n == "first_sound") k.first_sound = true;
+        else if (n == "phrases") k.phrases = true;
+        else if (n == "vocals") k.vocals = true;
+        else if (n == "stems") k.stems = true;
+        else return Response::error(400, "unknown kind: " + n);
+      }
+      std::vector<std::int64_t> ids;
+      Json j;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (r.body["ids"].is_array()) {
+          if (!id_list(r.body["ids"], ids)) return Response::error(400, "ids must be numbers");
+        } else if (r.body["playlist_id"].is_number() || r.body["search"].is_string()) {
+          ids = lib.track_ids(r.body["playlist_id"].as_int(), r.body["search"].as_string());
+        } else if (opt_bool(r.body, "all", false)) {
+          ids = lib.track_ids(0, "");
+        } else {
+          return Response::error(400, "select tracks with ids, playlist_id and/or search, or all: true");
+        }
+        EditScope api_edit("api");
+        StripResult res = lib.strip_analysis(ids, k, opt_bool(r.body, "force", false), opt_bool(r.body, "dry_run", false));
+        if (k.stems) {  // the separated stems of these tracks live in the stem cache, not in the library
+          int n = 0;
+          if (StemService* st = host.api_stems()) {
+            for (const std::int64_t id : ids) {
+              if (res.dry_run) n += st->track(id).cached ? 1 : 0;
+              else n += st->evict_track(id) ? 1 : 0;
+            }
+          }
+          res.notes.erase(std::remove_if(res.notes.begin(), res.notes.end(), [](const std::string& t) { return t.rfind("stems:", 0) == 0; }), res.notes.end());
+          if (n > 0) res.cleared["stems"] = n;
+          else res.notes.push_back("stems: no cached stems for these tracks");
+        }
+        j = strip_json(res);
+        if (!res.dry_run) host.api_library_changed();
+      }
+      return Response::ok(std::move(j));
+    });
+    s.add_route("GET", "/v1/library/duplicates", "library:read", [this](const Request& r) {
+      DuplicateOptions o;
+      const auto q = [&](const char* k) { return r.query.count(k) ? r.query.at(k) : std::string(); };
+      const std::string mode = q("mode");
+      if (mode == "exact") o.likely = false;
+      else if (mode == "likely") o.exact = false;
+      else if (!mode.empty() && mode != "all") return Response::error(400, "mode must be exact, likely or all");
+      o.same_bpm = q("same_bpm") == "1";
+      o.same_key = q("same_key") == "1";
+      if (!q("duration_ms").empty()) o.duration_tolerance_ms = std::clamp<double>(std::atof(q("duration_ms").c_str()), 0, 60000);
+      if (!q("limit").empty()) o.limit = static_cast<std::size_t>(std::clamp<long long>(std::atoll(q("limit").c_str()), 1, 5000));
+      Json items = Json::array(), j = Json::object();
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        for (const DuplicateGroup& g : lib.find_duplicates(o)) items.push_back(duplicate_json(g));
+        const HashProgress p = lib.hash_pending(0);  // limit 0 only counts what is still unhashed
+        j.set("hash_pending", p.remaining);
+      }
+      j.set("items", std::move(items));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/duplicates/hash", "library:write", [this](const Request& r) {
+      const int limit = static_cast<int>(std::clamp<std::int64_t>(r.body["limit"].is_number() ? r.body["limit"].as_int() : 50, 1, 500));
+      HashProgress p;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        p = lib.hash_pending(limit);
+      }
+      Json j = Json::object();
+      j.set("sized", p.sized);
+      j.set("hashed", p.hashed);
+      j.set("missing", p.missing);
+      j.set("remaining", p.remaining);
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/duplicates/merge", "library:write", [this](const Request& r) {
+      if (!r.body["keep_id"].is_number()) return Response::error(400, "keep_id is required");
+      std::vector<std::int64_t> remove;
+      if (!id_list(r.body["remove_ids"], remove) || remove.empty()) return Response::error(400, "remove_ids must be a non-empty array of track ids");
+      MergeOptions o;
+      const Json& opt = r.body["options"];
+      if (opt["copy_cues"].is_string()) {
+        const std::string c = opt["copy_cues"].as_string();
+        if (c == "missing") o.cues = MergeOptions::Cues::Missing;
+        else if (c == "all") o.cues = MergeOptions::Cues::All;
+        else if (c == "none") o.cues = MergeOptions::Cues::None;
+        else return Response::error(400, "copy_cues must be missing, all or none");
+      }
+      o.fill_metadata = opt_bool(opt, "fill_metadata", true);
+      o.combine_history = opt_bool(opt, "combine_history", true);
+      o.dry_run = opt_bool(opt, "dry_run", false);
+      MergeResult m;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        EditScope api_edit("api");
+        m = lib.merge_duplicates(r.body["keep_id"].as_int(), remove, o);
+      }
+      if (!m.ok) return Response::error(400, m.error);
+      if (!o.dry_run) host.api_library_changed();
+      return Response::ok(merge_json(m));
     });
     s.add_route("GET", "/v1/library/trash", "library:read", [this](const Request&) {
       Json items = Json::array();
@@ -1337,6 +2101,20 @@ struct ApiBridge::Impl {
     }
     server = std::make_unique<api::ApiServer>(tokens, cfg);
     add_routes();
+    if (StemService* st = host.api_stems()) {
+      st->set_event_sink([this](const std::string& type, const std::string& id, const std::string& state, float progress, const std::string& error) {
+        if (!server) return;
+        Json e = Json::object();
+        e.set("type", type);
+        e.set(type == "stems.install" ? "model" : "job", id);
+        e.set("state", state);
+        e.set("progress", static_cast<double>(progress));
+        if (!error.empty()) e.set("error", error);
+        server->publish("events", e);
+      });
+    }
+    add_chain_routes();
+    add_keymap_stem_routes();
     if (!server->start(&error)) {
       DH_LOG(Error, "API did not start: %s", error.c_str());
       description = "API off (" + error + ")";
@@ -1358,6 +2136,7 @@ ApiBridge::ApiBridge(ApiHost& host, const std::string& data_dir) : impl_(std::ma
 }
 
 ApiBridge::~ApiBridge() {
+  if (StemService* st = impl_->host.api_stems()) st->set_event_sink(nullptr);
   impl_->quit = true;
   if (impl_->ticker.joinable()) impl_->ticker.join();
   if (impl_->server) impl_->server->stop();

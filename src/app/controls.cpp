@@ -87,7 +87,7 @@ const Def kPreview[] = {
 
 // Effect slot controls: deck1.fx2.wet, mixer.fx1.select ... (mixer = the master bus).
 const Def kFx[] = {
-    {"select", Kind::Value, Op::FxSelect, 0, 14, "effect number from GET /v1/effects (0 = none)", "Choose the effect in this slot"},
+    {"select", Kind::Value, Op::FxSelect, 0, static_cast<double>(EffectKind::Count) - 1, "effect number from GET /v1/effects (0 = none)", "Choose the effect in this slot"},
     {"on", Kind::Toggle, Op::FxEnable, 0, 1, "0 off, 1 on, none = toggle", "Switch the effect on"},
     {"wet", Kind::Value, Op::FxWet, 0, 1, "0..1", "Effect level"},
     {"param", Kind::Value, Op::FxParam, 0, 1, "0..1", "The effect's own parameter"},
@@ -319,6 +319,25 @@ std::vector<ControlInfo> list_controls() {
     for (int slot = 1; slot <= kFxSlots; ++slot)
       for (const Def& d : kFx) out.push_back({group + ".fx" + std::to_string(slot) + "." + d.name, kind_name(d.kind), d.range, d.help});
   }
+  {
+    std::vector<std::string> groups = {"deck1", "deck2", "deck3", "deck4", "mixer", "mic", "sampler"};
+    for (int deck = 1; deck <= kMaxDecks; ++deck)
+      for (int st = 1; st <= kFxStemsPerDeck; ++st) groups.push_back("deck" + std::to_string(deck) + ".stem" + std::to_string(st));
+    for (const std::string& g : groups) {
+      const std::string b = g + ".chain.";
+      out.push_back({b + "insert", "value", "effect number", "Add an effect unit at the end of the chain (also insert.<pos>; insert_on starts it on)"});
+      out.push_back({b + "remove.<id>", "trigger", "none", "Remove a unit"});
+      out.push_back({b + "move.<id>", "value", "new index", "Move a unit"});
+      out.push_back({b + "replace.<id>", "value", "effect number", "Replace a unit's effect, keeping its place"});
+      for (const char* f : {"on", "wet", "param", "param2", "param3", "beats", "seconds"})
+        out.push_back({b + "unit." + f + ".<id>", "value", "see GET /v1/effects", std::string("Unit ") + f});
+      out.push_back({b + "bypass", "toggle", "0 off, 1 on", "Bypass the whole chain"});
+      out.push_back({b + "wet", "value", "0..1", "Chain wet / dry"});
+      out.push_back({b + "clear", "trigger", "none", "Remove every unit"});
+      out.push_back({b + "save", "trigger", "none", "Returns the chain preset as JSON"});
+      out.push_back({b + "load", "trigger", "body text = preset JSON", "Replace the chain with a preset"});
+    }
+  }
   for (const Def& d : kPreview) out.push_back({std::string("preview.") + d.name, kind_name(d.kind), d.range, d.help});
   for (int slot = 1; slot <= kSamplerSlots; ++slot)
     for (const Def& d : kSampler) out.push_back({"sampler." + std::to_string(slot) + "." + d.name, kind_name(d.kind), d.range, d.help});
@@ -327,6 +346,10 @@ std::vector<ControlInfo> list_controls() {
 
 bool build_control(const IEngine& engine, std::string_view name, bool has_value, double value, std::vector<Command>& out,
                    std::string& error) {
+  if (is_chain_control(name)) {
+    error = "effect chain edits are applied at once and cannot be scheduled";
+    return false;
+  }
   Parsed p;
   if (!parse(name, p, error)) return false;
   const Def& d = *p.def;
@@ -464,6 +487,10 @@ bool apply_control(IEngine& engine, std::string_view name, bool has_value, doubl
       return false;
     }
   }
+  if (is_chain_control(name)) {
+    std::string out;
+    return apply_chain_control(engine, name, has_value, value, std::string(), out, error);
+  }
   std::vector<Command> commands;
   if (!build_control(engine, name, has_value, value, commands, error)) return false;
   for (const Command& c : commands) engine.send(c);
@@ -471,6 +498,34 @@ bool apply_control(IEngine& engine, std::string_view name, bool has_value, doubl
 }
 
 bool read_control(const IEngine& engine, std::string_view name, double& value) {
+  if (is_chain_control(name)) {
+    const auto at = name.find(".chain.");
+    int target = 0;
+    if (!parse_fx_target(name.substr(0, at), target)) return false;
+    const std::string_view verb = name.substr(at + 7);
+    const FxChainInfo ci = engine.fx_chain(target);
+    if (verb == "bypass") { value = ci.bypass; return true; }
+    if (verb == "wet") { value = ci.wet; return true; }
+    if (verb.substr(0, 5) != "unit.") return false;
+    const auto d2 = verb.rfind('.');
+    int id = 0;
+    if (d2 <= 5 || !parse_int(verb.substr(d2 + 1), id)) return false;
+    const std::string_view f = verb.substr(5, d2 - 5);
+    for (int i = 0; i < ci.count && i < kFxChainMax; ++i) {
+      const FxUnitInfo& u = ci.unit[i];
+      if (u.id != id) continue;
+      if (f == "on") value = u.on;
+      else if (f == "wet") value = u.wet;
+      else if (f == "param") value = u.param;
+      else if (f == "param2") value = u.param2;
+      else if (f == "param3") value = u.param3;
+      else if (f == "beats") value = u.beats;
+      else if (f == "seconds") value = u.seconds;
+      else return false;
+      return true;
+    }
+    return false;
+  }
   Parsed p;
   std::string error;
   if (!parse(name, p, error)) return false;
@@ -545,6 +600,186 @@ bool read_control(const IEngine& engine, std::string_view name, double& value) {
     case Op::Metronome: value = v.metronome; return true;
     default: return false;
   }
+}
+
+// ---- effect chain controls ---------------------------------------------------------------------------------------------
+bool parse_fx_target(std::string_view t, int& target) {
+  if (t == "master" || t == "mixer") { target = kFxMaster; return true; }
+  if (t == "mic") { target = kFxTargetMic; return true; }
+  if (t == "sampler") { target = kFxTargetSampler; return true; }
+  if (t.size() < 5 || t.substr(0, 4) != "deck") return false;
+  t.remove_prefix(4);
+  int deck = 0;
+  const auto st = t.find("stem");
+  if (st == std::string_view::npos) {
+    if (!parse_int(t, deck) || deck < 1 || deck > kMaxDecks) return false;
+    target = deck - 1;
+    return true;
+  }
+  std::string_view dtext = t.substr(0, st);
+  if (!dtext.empty() && dtext.back() == '.') dtext.remove_suffix(1);
+  int stem = 0;
+  if (!parse_int(dtext, deck) || deck < 1 || deck > kMaxDecks || !parse_int(t.substr(st + 4), stem) || stem < 1 || stem > kFxStemsPerDeck) return false;
+  target = fx_target_stem(deck - 1, stem - 1);
+  return true;
+}
+
+std::string fx_target_name(int t) {
+  if (t >= 0 && t < kMaxDecks) return "deck" + std::to_string(t + 1);
+  if (t == kFxMaster) return "master";
+  if (t == kFxTargetMic) return "mic";
+  if (t == kFxTargetSampler) return "sampler";
+  if (t >= kFxTargetStemBase && t < kFxTargetCount) {
+    const int r = t - kFxTargetStemBase;
+    return "deck" + std::to_string(r / kFxStemsPerDeck + 1) + ".stem" + std::to_string(r % kFxStemsPerDeck + 1);
+  }
+  return "";
+}
+
+bool is_chain_control(std::string_view name) { return name.find(".chain.") != std::string_view::npos; }
+
+bool apply_chain_control(IEngine& engine, std::string_view name, bool has_value, double value, const std::string& text,
+                         std::string& out_text, std::string& error) {
+  const auto at = name.find(".chain.");
+  int target = 0;
+  if (at == std::string_view::npos || !parse_fx_target(name.substr(0, at), target)) {
+    error = "chain controls look like deck1.chain.insert, mixer.chain.bypass, mic.chain.clear, deck2.stem1.chain.wet";
+    return false;
+  }
+  std::string_view verb = name.substr(at + 7);
+  int n = -1;
+  bool has_n = false;
+  const auto num_suffix = [&]() {  // strips a trailing ".<int>"
+    const auto d = verb.rfind('.');
+    int v = 0;
+    if (d == std::string_view::npos || !parse_int(verb.substr(d + 1), v)) return false;
+    n = v;
+    has_n = true;
+    verb = verb.substr(0, d);
+    return true;
+  };
+  num_suffix();
+  const auto need_value = [&](double lo, double hi, const char* what) {
+    if (!has_value || !std::isfinite(value) || value < lo || value > hi) {
+      error = std::string("value needed: ") + what;
+      return false;
+    }
+    return true;
+  };
+  const auto need_id = [&]() {
+    if (!has_n || n <= 0) {
+      error = "this control needs a unit id, e.g. deck1.chain.remove.3 (ids are in GET /v1/fx/chains/{target})";
+      return false;
+    }
+    return true;
+  };
+  FxChainEdit e;
+  e.target = target;
+  FxChainResult r;
+  const auto run = [&]() {
+    if (!engine.fx_chain_edit(e, r)) {
+      error = r.error.empty() ? "the engine refused the chain edit" : r.error;
+      return false;
+    }
+    return true;
+  };
+  const double kind_hi = static_cast<double>(EffectKind::Count) - 1;
+  if (verb == "insert" || verb == "insert_on") {
+    if (!need_value(1, kind_hi, "effect number 1.. from GET /v1/effects")) return false;
+    e.verb = FxChainVerb::Insert;
+    e.kind = static_cast<EffectKind>(static_cast<int>(value));
+    e.pos = has_n ? n : -1;
+    e.value = verb == "insert_on" ? 1 : 0;
+    if (!run()) return false;
+    out_text = std::to_string(r.id);
+    return true;
+  }
+  if (verb == "remove") {
+    if (!need_id()) return false;
+    e.verb = FxChainVerb::Remove;
+    e.id = n;
+    return run();
+  }
+  if (verb == "move") {
+    if (!need_id() || !need_value(0, kFxChainMax, "new index 0..7")) return false;
+    e.verb = FxChainVerb::Move;
+    e.id = n;
+    e.pos = static_cast<int>(value);
+    return run();
+  }
+  if (verb == "replace") {
+    if (!need_id() || !need_value(1, kind_hi, "effect number 1..")) return false;
+    e.verb = FxChainVerb::Replace;
+    e.id = n;
+    e.kind = static_cast<EffectKind>(static_cast<int>(value));
+    return run();
+  }
+  if (verb.substr(0, 5) == "unit.") {
+    if (!need_id()) return false;
+    const std::string_view f = verb.substr(5);
+    e.verb = FxChainVerb::Set;
+    e.id = n;
+    if (f == "on") {
+      e.field = static_cast<int>(FxField::On);
+      if (has_value) {
+        if (!need_value(0, 1, "0 off, 1 on")) return false;
+        e.value = value;
+      } else {  // toggle
+        e.value = 1;
+        for (int i = 0; i < kFxChainMax; ++i) {
+          const FxChainInfo ci = engine.fx_chain(target);
+          if (i < ci.count && ci.unit[i].id == n) e.value = ci.unit[i].on ? 0 : 1;
+        }
+      }
+      return run();
+    }
+    if (f == "wet") e.field = static_cast<int>(FxField::Wet);
+    else if (f == "param") e.field = static_cast<int>(FxField::Param);
+    else if (f == "param2") e.field = static_cast<int>(FxField::Param2);
+    else if (f == "param3") e.field = static_cast<int>(FxField::Param3);
+    else if (f == "beats") e.field = static_cast<int>(FxField::Beats);
+    else if (f == "seconds") e.field = static_cast<int>(FxField::Seconds);
+    else {
+      error = "unit controls: on, wet, param, param2, param3, beats, seconds";
+      return false;
+    }
+    if (!need_value(0, f == "beats" ? 64 : f == "seconds" ? 60 : 1, f == "beats" ? "beats 0.0625..64" : f == "seconds" ? "seconds, 0 = use beats" : "0..1")) return false;
+    e.value = value;
+    return run();
+  }
+  if (verb == "bypass" || verb == "wet") {
+    e.verb = FxChainVerb::SetChain;
+    if (verb == "bypass") {
+      e.field = 0;
+      e.value = has_value ? (value != 0 ? 1 : 0) : (engine.fx_chain(target).bypass ? 0 : 1);
+    } else {
+      if (!need_value(0, 1, "0..1")) return false;
+      e.field = 1;
+      e.value = value;
+    }
+    return run();
+  }
+  if (verb == "clear") {
+    e.verb = FxChainVerb::Clear;
+    return run();
+  }
+  if (verb == "save") {
+    e.verb = FxChainVerb::Save;
+    if (!run()) return false;
+    out_text = r.text;
+    return true;
+  }
+  if (verb == "load") {
+    if (text.empty()) {
+      error = "load needs the preset JSON in the request body as \"text\"";
+      return false;
+    }
+    e.verb = FxChainVerb::Load;
+    e.text = text;
+    return run();
+  }
+  error = "unknown chain control";
+  return false;
 }
 
 }  // namespace deckhand

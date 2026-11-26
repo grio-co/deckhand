@@ -46,7 +46,7 @@ swiftc -O -swift-version 5 \
   -I "$ROOT/platform/macos/DeckHandKit/Sources/CDeckHand/include" \
   "$ROOT"/platform/macos/DeckHandKit/Sources/DeckHandKit/*.swift "$ROOT"/platform/macos/Shell/main.swift \
   -o "$APP/Contents/MacOS/DeckHand" \
-  -L "$BUILD" -ldh_app -ldh_sync -ldh_services -ldh_broadcast -ldh_api -ldh_skin -ldh_i18n -ldh_export -ldh_analysis -ldh_midi -ldh_import \
+  -L "$BUILD" -ldh_app -ldh_stems -ldh_sync -ldh_services -ldh_broadcast -ldh_api -ldh_skin -ldh_i18n -ldh_export -ldh_analysis -ldh_midi -ldh_import \
   -ldh_library -ldh_audio -ldh_gfx -ldh_log -ldh_platform -ldh_miniaudio \
   $(cat "$BUILD/tls_link.txt") $(cat "$BUILD/sqlite_link.txt") -lc++ \
   -framework AppKit -framework Metal -framework MetalKit -framework QuartzCore -framework CoreText \
@@ -54,7 +54,7 @@ swiftc -O -swift-version 5 \
 
 cp "$ROOT"/controllers/*.dhmap "$APP/Contents/Resources/controllers/"
 cp "$ROOT/platform/macos/DeckHand.icns" "$APP/Contents/Resources/DeckHand.icns"
-cp -R "$ROOT/resources/lang" "$ROOT/resources/skins" "$ROOT/resources/keymaps" "$APP/Contents/Resources/"
+cp -R "$ROOT/resources/lang" "$ROOT/resources/skins" "$ROOT/resources/keymaps" "$ROOT/resources/stem-models" "$APP/Contents/Resources/"
 sed -e "s/@BUNDLE_ID@/$BUNDLE_ID/" -e "s/@VERSION@/$VERSION/g" \
     -e "s/@MIN_OS@/$(sw_vers -productVersion | cut -d. -f1).0/" \
     "$ROOT/platform/macos/Info.plist" > "$APP/Contents/Info.plist"

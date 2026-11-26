@@ -68,6 +68,9 @@ int usage() {
                "  import-xml FILE [--dry-run 1] [--overwrite-metadata 1] [--overwrite-cues 1] [--overwrite-grid 1] [--no-merge 1]\n"
                "  export-m3u8 FILE|DIR [--playlist ID] [--relative 1]   one playlist to a file, or (no --playlist) all into a folder\n"
                "  import-m3u8 FILE [--name NAME] [--parent ID] [--dry-run 1]\n"
+               "  duplicates [--mode exact|likely|all] [--same-bpm 1] [--same-key 1] [--no-hash 1]   list duplicate groups (hashes files that share a size first)\n"
+               "  merge-duplicates KEEP_ID REMOVE_ID[,ID...] [--copy-cues missing|all|none] [--dry-run 1]   removed tracks go to the trash; files stay\n"
+               "  strip-analysis --kinds grid,key,loudness,waveform,first_sound,phrases,vocals,stems  (--ids 1,2 | --playlist ID | --search TEXT | --all 1) [--force 1] [--dry-run 1]\n"
                "  backup                       copy the library into backups/   [--data DIR]\n"
                "  backups                      list the copies, newest first    [--data DIR]\n"
                "  restore FILE                 replace the library with a copy (quit DeckHand first)   [--data DIR]\n"
@@ -273,6 +276,91 @@ int main(int argc, char** argv) {
       for (const auto& m : res.missing) std::printf("  missing: %s\n", m.c_str());
       if (res.converted) std::printf("%d tracks written as 24-bit WAV\n", res.converted);
       if (res.remaining_will_not_play) std::printf("warning: %d tracks a club player will not play (see docs/EXPORT.md)\n", res.remaining_will_not_play);
+    } else if (cmd == "duplicates") {
+      const std::string mode = arg_value(argc, argv, "--mode", "all");
+      if (!std::strcmp(arg_value(argc, argv, "--no-hash", "0"), "0")) {
+        for (HashProgress p = lib.hash_pending(200); p.remaining > 0 && (p.sized + p.hashed + p.missing) > 0; p = lib.hash_pending(200))
+          std::fprintf(stderr, "hashing, %d left\n", p.remaining);
+      }
+      DuplicateOptions o;
+      o.exact = mode != "likely";
+      o.likely = mode != "exact";
+      o.same_bpm = !std::strcmp(arg_value(argc, argv, "--same-bpm", "0"), "1");
+      o.same_key = !std::strcmp(arg_value(argc, argv, "--same-key", "0"), "1");
+      const auto groups = lib.find_duplicates(o);
+      for (const auto& g : groups) {
+        std::printf("%s group, confidence %.2f, suggest keeping %lld (%s)", g.kind.c_str(), g.confidence,
+                    static_cast<long long>(g.suggested_keep), g.suggestion_reason.c_str());
+        for (const auto& d : g.differences) std::printf(" [%s differs]", d.c_str());
+        std::printf("\n");
+        for (const auto& m : g.members)
+          std::printf("  %lld\t%s\t%d kbps\t%d plays\t%d cues\t%s\n", static_cast<long long>(m.row.id), m.row.format.c_str(), m.row.bitrate,
+                      m.row.play_count, m.cue_count, m.row.path.c_str());
+      }
+      std::printf("%zu groups\n", groups.size());
+    } else if (cmd == "merge-duplicates" && argc >= 4) {
+      std::vector<std::int64_t> remove;
+      std::string list = argv[3];
+      for (std::size_t at = 0; at < list.size();) {
+        const auto comma = list.find(',', at);
+        remove.push_back(std::atoll(list.substr(at, comma == std::string::npos ? std::string::npos : comma - at).c_str()));
+        at = comma == std::string::npos ? list.size() : comma + 1;
+      }
+      MergeOptions o;
+      const std::string c = arg_value(argc, argv, "--copy-cues", "missing");
+      o.cues = c == "all" ? MergeOptions::Cues::All : c == "none" ? MergeOptions::Cues::None : MergeOptions::Cues::Missing;
+      o.dry_run = !std::strcmp(arg_value(argc, argv, "--dry-run", "0"), "1");
+      const MergeResult m = lib.merge_duplicates(std::atoll(argv[2]), remove, o);
+      if (!m.ok) {
+        std::fprintf(stderr, "error: %s\n", m.error.c_str());
+        return 1;
+      }
+      std::printf("%skept %lld, %zu to the trash; %d playlists re-pointed (%d already had it); cues copied: %d hot, %d memory, %d loops; grid %s; %d plays moved; edit batch %lld\n",
+                  m.dry_run ? "dry run: " : "", static_cast<long long>(m.kept), m.removed.size(), m.playlists_repointed, m.playlists_already_had,
+                  m.hot_cues_copied, m.memory_cues_copied, m.loops_copied, m.grid_copied ? "copied" : "kept", m.history_moved,
+                  static_cast<long long>(m.batch_id));
+    } else if (cmd == "strip-analysis") {
+      StripKinds k;
+      std::string kinds = arg_value(argc, argv, "--kinds", "");
+      for (std::size_t at = 0; at < kinds.size();) {
+        const auto comma = kinds.find(',', at);
+        const std::string n = kinds.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+        at = comma == std::string::npos ? kinds.size() : comma + 1;
+        if (n == "grid") k.grid = true;
+        else if (n == "key") k.key = true;
+        else if (n == "loudness") k.loudness = true;
+        else if (n == "waveform") k.waveform = true;
+        else if (n == "first_sound") k.first_sound = true;
+        else if (n == "phrases") k.phrases = true;
+        else if (n == "vocals") k.vocals = true;
+        else if (n == "stems") k.stems = true;
+        else {
+          std::fprintf(stderr, "unknown kind: %s\n", n.c_str());
+          return 2;
+        }
+      }
+      std::vector<std::int64_t> ids;
+      const std::string idlist = arg_value(argc, argv, "--ids", "");
+      if (!idlist.empty()) {
+        for (std::size_t at = 0; at < idlist.size();) {
+          const auto comma = idlist.find(',', at);
+          ids.push_back(std::atoll(idlist.substr(at, comma == std::string::npos ? std::string::npos : comma - at).c_str()));
+          at = comma == std::string::npos ? idlist.size() : comma + 1;
+        }
+      } else if (std::strcmp(arg_value(argc, argv, "--playlist", ""), "") || std::strcmp(arg_value(argc, argv, "--search", ""), "")) {
+        ids = lib.track_ids(std::atoll(arg_value(argc, argv, "--playlist", "0")), arg_value(argc, argv, "--search", ""));
+      } else if (!std::strcmp(arg_value(argc, argv, "--all", "0"), "1")) {
+        ids = lib.track_ids(0, "");
+      } else {
+        return usage();
+      }
+      if (!(k.grid || k.key || k.loudness || k.waveform || k.first_sound || k.phrases || k.vocals || k.stems)) return usage();
+      const StripResult r = lib.strip_analysis(ids, k, !std::strcmp(arg_value(argc, argv, "--force", "0"), "1"),
+                                               !std::strcmp(arg_value(argc, argv, "--dry-run", "0"), "1"));
+      std::printf("%s%d tracks looked at, %d changed; grid locked and skipped: %d; keys set by hand and skipped: %d\n", r.dry_run ? "dry run: " : "",
+                  r.tracks, r.tracks_changed, r.skipped_grid_locked, r.skipped_user_key);
+      for (const auto& [kind, n] : r.cleared) std::printf("  %s: %d\n", kind.c_str(), n);
+      for (const auto& n : r.notes) std::printf("  note: %s\n", n.c_str());
     } else if (cmd == "playlists") {
       for (const auto& p : lib.playlists())
         std::printf("%lld\t%s%s\t(%d)\n", static_cast<long long>(p.id), p.is_folder ? "[folder] " : "",

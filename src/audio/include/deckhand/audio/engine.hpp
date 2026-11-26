@@ -139,6 +139,10 @@ enum class Op : std::uint8_t {
   SchedInsert,     // i = payload slot handed over by Engine::schedule
   SchedCancel,     // d = schedule id
   SchedCancelAll,
+  // ---- effect chains (protocol 5); internal: chain edits go through IEngine::fx_chain_edit, never over the command ring ----
+  FxChainSwap,     // deck = chain target, Command::chain = prepared chain state (built by fx_chain_edit)
+  FxUnitSet,       // deck = chain target, i = (FxField << 16) | unit id, f / d = value
+  FxChainSet,      // deck = chain target, i = 0 bypass (f > 0.5) / 1 chain wet (f 0..1)
   Count,           // number of ops; not a command
 };
 
@@ -149,7 +153,12 @@ enum class EffectKind : std::uint8_t {
   None = 0,
   Echo, PingPong, Spiral, Reverb, Flanger, Phaser, LowCutEcho, FilterSweep, Roll, Transform, Pitch,
   Crusher, VinylBrake, Backspin,
-  ColorNoise, ColorDubEcho, ColorCrush, ColorPitch, ColorSpace,  // colour-slot only (driven by the knob)
+  ColorNoise, ColorDubEcho, ColorCrush, ColorPitch, ColorSpace,  // colour-slot (driven by the knob); in a chain they are plain units
+  // appended (protocol 5)
+  Isolator,   // 3-band isolator: param = low, param2 = mid, param3 = high (0.5 = unity, 0 = kill, 1 = +6 dB)
+  Slicer,     // rhythmic slicer: param = density (hits per 8 steps), param2 = rotation, param3 = gate length
+  BuildUp,    // one macro knob (param): rising high-pass + echo feedback + noise riser; released on the next beat
+  Filter,     // one-knob DJ filter: param 0.5 = off, below = low-pass, above = high-pass; param2 = resonance
   Count
 };
 
@@ -160,12 +169,103 @@ struct EffectInfo {
   bool beat_synced = false;     // FxTime is a beat fraction
   bool tail = false;            // keeps ringing after it is switched off
   bool release = false;         // vinyl brake / backspin: acts while engaged, returns on release
-  bool colour = false;          // only valid through Op::ColorFx
+  bool colour = false;          // the filter-knob (Op::ColorFx) kind; in an effect chain it is an ordinary unit
   float default_wet = 0.5f, default_param = 0.5f, default_beats = 1.0f;
+  // appended (protocol 5)
+  const char* param2_name = "";  // what FxField::Param2 controls ("" = unused)
+  const char* param3_name = "";
+  const char* slug = "";         // stable lower-case identifier used in chain presets
 };
 int effect_count();                        // number of real effects (excludes None)
 const EffectInfo& effect_info_at(int i);   // 0 .. effect_count()-1
 const EffectInfo* effect_info(EffectKind k);
+
+
+// ---- effect chains (protocol 5) ---------------------------------------------------------------------------------
+// A chain is an ordered list of up to kFxChainMax effect units, processed in series. Every bus that can carry effects
+// owns exactly one chain, addressed by a "target":
+//   0..3                 channel (deck) pre-fader chain          (kFxMaster = 4: master bus)
+//   kFxTargetMic         microphone channel, before it joins the master bus
+//   kFxTargetSampler     the sampler bus, before it joins the master bus
+//   fx_target_stem(d, s) stem s (0..7) of deck d (addressing only until the stem engine feeds it)
+// The three fixed slots (Op::FxSelect / FxEnable / FxWet / FxTime / FxParam, DeckView::fx, MixerView::fx) are a
+// view onto the default chain of a deck or of the master bus: slot i is the unit tagged legacy_slot == i.
+constexpr int kFxChainMax = 8;
+constexpr int kFxTargetMic = 5;
+constexpr int kFxTargetSampler = 6;
+constexpr int kFxTargetStemBase = 16;
+constexpr int kFxStemsPerDeck = 8;
+constexpr int kFxTargetCount = kFxTargetStemBase + kMaxDecks * kFxStemsPerDeck;  // 48
+constexpr int fx_target_stem(int deck, int stem) { return kFxTargetStemBase + deck * kFxStemsPerDeck + stem; }
+constexpr bool fx_target_valid(int t) {
+  return (t >= 0 && t <= kFxTargetSampler) || (t >= kFxTargetStemBase && t < kFxTargetCount);
+}
+
+struct FxChainState;  // prepared off the audio thread, swapped in at a block boundary (engine-internal)
+
+// Fields of one unit that FxChainVerb::Set can change.
+enum class FxField : std::uint8_t { On = 0, Wet, Param, Beats, Seconds, Param2, Param3, Count };
+
+struct FxUnitInfo {
+  std::int32_t id = 0;          // stable for the unit's life, unique within its chain
+  EffectKind kind = EffectKind::None;
+  std::uint8_t on = 0;
+  std::int8_t legacy_slot = -1; // 0..2: this unit is fixed slot i of the default chain; -1 = user unit
+  std::uint8_t pad = 0;
+  float wet = 0.5f, param = 0.5f, param2 = 0.5f, param3 = 0.5f, beats = 1.0f, pad2 = 0;
+  double seconds = 0;           // > 0: fixed time instead of beats
+};
+struct FxChainInfo {
+  std::uint8_t exists = 0;      // the chain has ever held a unit
+  std::uint8_t bypass = 0;
+  std::int16_t pad = 0;
+  std::int32_t count = 0;
+  float wet = 1.0f;             // chain wet / dry
+  std::uint32_t rev = 0;        // counts structural edits
+  FxUnitInfo unit[kFxChainMax];
+};
+
+enum class FxChainVerb : std::uint8_t {
+  Get,        // target
+  Insert,     // target, pos (-1 = end), kind, value > 0.5: start on        -> id
+  Remove,     // target, id                                                  (tails of delay / reverb units ring out)
+  Move,       // target, id, pos (new index, clamped)
+  Replace,    // target, id, kind (keeps position, id and on-state; other fields reset to the new effect's defaults)
+  Set,        // target, id, field, value
+  SetChain,   // target, field = 0 bypass / 1 wet, value
+  Clear,      // target
+  Load,       // target, text = preset (see fx_chain_to_json)               replaces the whole chain
+  Save,       // target                                                      -> text
+  Count
+};
+struct FxChainEdit {
+  FxChainVerb verb = FxChainVerb::Get;
+  int target = 0;
+  int id = 0;
+  int pos = -1;
+  EffectKind kind = EffectKind::None;
+  int field = 0;                // FxField (Set) or 0 / 1 (SetChain)
+  double value = 0;
+  std::string text;             // Load
+};
+struct FxChainResult {
+  bool ok = false;
+  int id = 0;                   // Insert: the new unit
+  std::string text;             // Save: preset JSON
+  std::string error;
+  FxChainInfo info;             // the chain after the edit
+};
+
+// Chain presets: a small JSON blob, e.g.
+//   {"v":1,"bypass":false,"wet":1,"fx":[{"type":"echo","on":true,"wet":0.5,"param":0.5,"p2":0.5,"p3":0.5,"beats":0.5,"seconds":0}]}
+// Function level only; the app decides where it is stored. Unit ids and legacy tags are not part of a preset.
+std::string fx_chain_to_json(const FxChainInfo& chain);
+bool fx_chain_from_json(const std::string& text, FxChainInfo& out, std::string& error);
+const char* effect_slug(EffectKind k);                // "ping_pong"
+EffectKind effect_from_slug(const std::string& slug); // EffectKind::None when unknown
+
+// Per-block CPU cost of effects, for tests and diagnostics (offline; allocates).
+double fx_bench_ns_per_block(EffectKind kind, int block_frames, double sample_rate, int blocks);
 
 // Sample for a sampler slot. Built off the audio thread, then handed over.
 struct LoadedSample {
@@ -184,6 +284,7 @@ struct Command {
   double d = 0;
   LoadedTrack* track = nullptr;
   LoadedSample* sample = nullptr;
+  FxChainState* chain = nullptr;  // Op::FxChainSwap only (internal)
 };
 
 // ScheduledFired: `sched_id` fired at engine clock frame `clock_frame` (the first output sample the command
@@ -414,6 +515,32 @@ class IEngine {
 
   virtual bool poll(EngineEvent& out) = 0;
   virtual void collect_garbage() = 0;
+
+  // ---- effect chains (protocol 5) ----
+  // One entry point for every structural or parameter edit (see FxChainVerb); thread-safe, never blocks the audio
+  // thread. Defaults make an engine that predates chains answer "unsupported".
+  virtual bool fx_chain_edit(const FxChainEdit& edit, FxChainResult& result) {
+    (void)edit;
+    result = FxChainResult{};
+    result.error = "effect chains are not supported by this engine";
+    return false;
+  }
+  // The chain at `target` (count 0 / exists false when it never held a unit).
+  virtual FxChainInfo fx_chain(int target) const {
+    (void)target;
+    return FxChainInfo{};
+  }
+  // Convenience wrappers over fx_chain_edit.
+  int fx_insert(int target, EffectKind kind, int pos = -1, bool on = false);  // unit id, 0 on failure
+  bool fx_remove(int target, int id);
+  bool fx_move(int target, int id, int pos);
+  int fx_replace(int target, int id, EffectKind kind);
+  bool fx_set(int target, int id, FxField field, double value);
+  bool fx_chain_bypass(int target, bool bypass);
+  bool fx_chain_wet(int target, double wet);
+  bool fx_chain_clear(int target);
+  std::string fx_chain_save(int target);
+  bool fx_chain_load(int target, const std::string& json, std::string* error = nullptr);
 };
 
 class Engine final : public IEngine {
@@ -490,6 +617,8 @@ class Engine final : public IEngine {
   // Call regularly from one non-real-time thread: drains events and frees retired tracks.
   bool poll(EngineEvent& out) override;
   void collect_garbage() override;
+  bool fx_chain_edit(const FxChainEdit& edit, FxChainResult& result) override;
+  FxChainInfo fx_chain(int target) const override;
 
   // Offline rendering without a device (tests, tools). Interleaved float output.
   void configure_offline(std::uint32_t sample_rate, int channels);

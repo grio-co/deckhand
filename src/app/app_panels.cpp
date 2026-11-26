@@ -181,6 +181,7 @@ void App::open_panel(Panel p) {
       break;
     }
     case Panel::Export: begin_export_menu(); break;
+    case Panel::Tools: tools_reload(); break;
     case Panel::Shortcuts:
       keys_ui_ = KeysUi();
       key_release_all();
@@ -279,6 +280,7 @@ Rect App::panel_size(float w, float h, std::string& title) {
     case Panel::Relink: m = {0, 0, std::min(560.0f, w - 24), std::min(250.0f, h - 24)}; title = T("relink.title"); break;
     case Panel::Columns: m = {0, 0, std::min(400.0f, w - 24), std::min(496.0f, h - 24)}; title = T("browser.columns_title"); break;
     case Panel::Smart: m = {0, 0, std::min(720.0f, w - 24), std::min(470.0f, h - 24)}; title = T("smart.title"); break;
+    case Panel::Tools: m = {0, 0, std::min(640.0f, w - 24), std::min(480.0f, h - 24)}; title = T("tools.title"); break;
     case Panel::Shortcuts: m = {0, 0, std::min(700.0f, w - 24), std::min(580.0f, h - 24)}; title = T("keys.title"); break;
     case Panel::CueEdit:
       m = {0, 0, std::min(430.0f, w - 24), std::min(250.0f, h - 24)};
@@ -322,6 +324,7 @@ void App::draw_panel_body(const Rect& m, const std::string& title) {
   else if (panel_ == Panel::Smart) draw_smart_editor(m);
   else if (panel_ == Panel::Relink) draw_relink(m);
   else if (panel_ == Panel::Shortcuts) draw_shortcuts(m);
+  else if (panel_ == Panel::Tools) draw_tools(m);
 }
 
 void App::draw_overlays() {
@@ -441,6 +444,12 @@ void App::draw_settings(const Rect& m) {
   y += 18;
   if (ui_button({x, y, 260, 24}, T("keys.open"))) {
     open_panel(Panel::Shortcuts);
+    dl_.pop_clip();
+    return;
+  }
+  y += line;
+  if (ui_button({x, y, 260, 24}, T("tools.open"))) {
+    open_panel(Panel::Tools);
     dl_.pop_clip();
     return;
   }

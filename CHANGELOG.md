@@ -6,6 +6,21 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Effect chains: up to eight effects in any order on each deck, the master, the microphone and
+  the sampler, edited without clicks (tails ring out); new isolator, slicer, build-up and one-knob
+  filter; chain presets; controls and REST routes (`/v1/fx/chains/...`). Engine protocol 5.
+- Cues follow the grid: committing a grid change offers to move on-beat cues and loops with it, as
+  one undoable step (`cues_follow_grid` setting). Off-beat cues stay.
+- Selective analysis removal across many tracks (grid, key, loudness, waveform, first sound, stems).
+- Duplicate finder (same audio, or same artist/title/length) with merge of cues, playlists and
+  history into the kept track; removed entries go to the trash; audio files are never touched.
+  Library schema 6.
+- "Library tools" panel: stem models, trash, edit history, duplicates. Keymap over the API.
+- Stem separation groundwork: seamless chunked separation that sums back to the input, a
+  content-keyed disk cache, a background queue that pauses while a deck plays, and a model
+  installer that fetches weights from their authors on the user's request after showing the
+  licence ([docs/STEMS.md](docs/STEMS.md)). No model ships, and no inference runtime is linked
+  yet, so separation does not run.
 - Metadata safety: every tag edit is journalled per field (up to 200 per track) and can be undone
   singly or as a batch; imports no longer overwrite fields edited by hand unless asked; deleted
   tracks go to a trash that keeps cues, grid and playlist places for 30 days. Library schema 5.

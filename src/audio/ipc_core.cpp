@@ -275,7 +275,8 @@ Scope scope_of(Op op) {
       return Scope::Fx;
     case Op::SamplerTrigger: case Op::SamplerSync: case Op::SamplerLoop: case Op::SamplerGain:
       return Scope::Slot;
-    case Op::Load: case Op::SamplerLoad: case Op::ReplaceMeta: case Op::PreviewLoad: case Op::SchedInsert: case Op::SchedCancel: case Op::SchedCancelAll: case Op::Count:
+    case Op::Load: case Op::SamplerLoad: case Op::ReplaceMeta: case Op::PreviewLoad: case Op::SchedInsert: case Op::SchedCancel: case Op::SchedCancelAll:
+    case Op::FxChainSwap: case Op::FxUnitSet: case Op::FxChainSet: case Op::Count:
       return Scope::Reject;
     default:
       return Scope::Deck;
@@ -369,6 +370,54 @@ WireCommand to_wire(const Command& c) {
   w.f = c.f;
   w.d = c.d;
   return w;
+}
+
+// ---- effect chains ----------------------------------------------------------------------------------
+void put_chain_info(Wr& w, const FxChainInfo& c) {
+  w.u8(c.exists);
+  w.u8(c.bypass);
+  w.i32(c.count);
+  w.f64(c.wet);
+  w.u32(c.rev);
+  for (int i = 0; i < c.count && i < kFxChainMax; ++i) {
+    const FxUnitInfo& u = c.unit[i];
+    w.i32(u.id);
+    w.u8(static_cast<std::uint8_t>(u.kind));
+    w.u8(u.on);
+    w.i32(u.legacy_slot);
+    w.f64(u.wet);
+    w.f64(u.param);
+    w.f64(u.param2);
+    w.f64(u.param3);
+    w.f64(u.beats);
+    w.f64(u.seconds);
+  }
+}
+
+bool get_chain_info(Rd& r, FxChainInfo& c) {
+  c = FxChainInfo{};
+  c.exists = r.u8() ? 1 : 0;
+  c.bypass = r.u8() ? 1 : 0;
+  const std::int32_t n = r.i32();
+  c.wet = static_cast<float>(r.f64());
+  c.rev = r.u32();
+  if (!r.ok() || n < 0 || n > kFxChainMax) return false;
+  c.count = n;
+  for (int i = 0; i < n; ++i) {
+    FxUnitInfo& u = c.unit[i];
+    u.id = r.i32();
+    const std::uint8_t k = r.u8();
+    u.kind = k < static_cast<std::uint8_t>(EffectKind::Count) ? static_cast<EffectKind>(k) : EffectKind::None;
+    u.on = r.u8() ? 1 : 0;
+    u.legacy_slot = static_cast<std::int8_t>(std::clamp<std::int32_t>(r.i32(), -1, kFxSlots - 1));
+    u.wet = static_cast<float>(r.f64());
+    u.param = static_cast<float>(r.f64());
+    u.param2 = static_cast<float>(r.f64());
+    u.param3 = static_cast<float>(r.f64());
+    u.beats = static_cast<float>(r.f64());
+    u.seconds = r.f64();
+  }
+  return r.ok();
 }
 
 // ---- framing --------------------------------------------------------------------------------------

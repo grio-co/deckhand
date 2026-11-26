@@ -681,6 +681,33 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
       for (std::size_t i = 0; i < d.size() && i < 256; ++i) out.str(d[i]);
       return;
     }
+    case kReqFxChain: {  // effect chain edit / query; the UI is untrusted input
+      FxChainEdit e;
+      const std::uint8_t verb = rd.u8();
+      e.target = rd.u8();
+      e.id = rd.i32();
+      e.pos = rd.i32();
+      const std::uint8_t kind = rd.u8();
+      e.field = rd.i32();
+      e.value = rd.f64();
+      e.text = rd.str();
+      FxChainResult res;
+      bool ok = rd.ok() && verb < static_cast<std::uint8_t>(FxChainVerb::Count) && kind < static_cast<std::uint8_t>(EffectKind::Count) &&
+                std::isfinite(e.value);
+      if (ok) {
+        e.verb = static_cast<FxChainVerb>(verb);
+        e.kind = static_cast<EffectKind>(kind);
+        ok = engine_.fx_chain_edit(e, res);
+      } else {
+        res.error = "bad request";
+      }
+      out.u8(ok ? 1 : 0);
+      out.i32(res.id);
+      out.str(res.error);
+      out.str(res.text);
+      put_chain_info(out, res.info);
+      return;
+    }
     case kReqSetTrackMeta: {  // grid and memory cues of a loaded track; the UI is untrusted input
       const int deck = rd.u8();
       const std::int64_t track_id = rd.i64();

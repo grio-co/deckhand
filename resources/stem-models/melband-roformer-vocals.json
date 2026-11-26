@@ -1,0 +1,35 @@
+{
+ "format": "deckhand-stems-catalogue/1",
+ "id": "melband-roformer-vocals",
+ "name": "Mel-Band RoFormer vocals (Kimberley Jensen)",
+ "kind": "roformer",
+ "summary": "Vocal / instrumental model. Gives cleaner vocals than Demucs; combine with Demucs for drums and bass.",
+ "stems": [
+  "vocals",
+  "instrumental"
+ ],
+ "quality": "Checkpoint name reports epoch-0 SDR 10.86 on the author's validation set (not MUSDB; not comparable).",
+ "speed": "Large model (913 MB checkpoint): slower than htdemucs.",
+ "files": [
+  {
+   "name": "MelBandRoformer.ckpt",
+   "url": "https://huggingface.co/KimberleyJSN/melbandroformer/resolve/main/MelBandRoformer.ckpt",
+   "size": 913106900,
+   "sha256": "87201f4d31afb5bc79993230fc49446918425574db48c01c405e44f365c7559e"
+  }
+ ],
+ "licence": {
+  "summary": "Licence declared by the author on the model's Hugging Face page: MIT. The training data is not disclosed by the author, so its status is unknown. You are responsible for checking that your use is acceptable to you.",
+  "statement_source": "https://huggingface.co/KimberleyJSN/melbandroformer",
+  "code_licence": "none stated in the author's GitHub repository; architecture code by lucidrains (MIT)",
+  "weights_licence": "MIT (Hugging Face model card metadata)",
+  "restriction": "permissive-declared",
+  "link": "https://huggingface.co/KimberleyJSN/melbandroformer",
+  "training_data": "author's private dataset with contributed material; not disclosed"
+ },
+ "upstream_url": "https://github.com/KimberleyJensen/Mel-Band-Roformer-Vocal-Model",
+ "install": {
+  "supported": false,
+  "blocked_by": "No ONNX skeleton or C++ STFT/mel-band pipeline for this architecture yet (checkpoint reading is done)."
+ }
+}

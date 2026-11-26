@@ -5,6 +5,7 @@
 // (see ipc.hpp). If the engine process dies it is restarted with back-off; if this process dies the engine keeps
 // playing and the next RemoteEngine attaches to it.
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -111,6 +112,9 @@ class RemoteEngine final : public IEngine {
   void cancel_all() override;
   bool poll(EngineEvent& out) override;
   void collect_garbage() override {}  // the engine process frees its own garbage
+  // Effect chains live in the engine process; edits are control-socket requests, reads are cached for ~100 ms.
+  bool fx_chain_edit(const FxChainEdit& edit, FxChainResult& result) override;
+  FxChainInfo fx_chain(int target) const override;
 
  private:
   void share_track(Op op, int deck, std::unique_ptr<LoadedTrack> track);
@@ -122,6 +126,15 @@ class RemoteEngine final : public IEngine {
   void monitor_main();
   void notify(Status s, const std::string& message);
   int next_slot();
+
+  struct ChainCache {
+    FxChainInfo info;
+    std::chrono::steady_clock::time_point at{};
+    bool valid = false;
+  };
+  void invalidate_chain(int target);
+  mutable std::mutex chain_mutex_;
+  mutable ChainCache chain_cache_[kFxTargetCount];
 
   Options opt_;
   std::string names_error_;

@@ -3,6 +3,7 @@
 #include "fx.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -30,6 +31,8 @@ inline void smooth(FxUnit& u, const K& k) {
   u.on_s += ((u.on ? 1.0f : 0.0f) - u.on_s) * k.on;
   u.wet_s += (u.wet - u.wet_s) * k.wet;
   u.param_s += (u.param - u.param_s) * k.par;
+  u.param2_s += (u.param2 - u.param2_s) * k.par;
+  u.param3_s += (u.param3 - u.param3_s) * k.par;
 }
 inline float fz(float x) { return std::fabs(x) < 1e-20f ? 0.0f : x; }
 float lp_coef(double fc, double sr) { return static_cast<float>(1.0 - std::exp(-2.0 * kPi * fc / sr)); }
@@ -517,32 +520,213 @@ void brake_run(FxUnit& u, const FxCtx& cx, float* buf, int n, bool spin) {
 void brake_proc(FxUnit& u, const FxCtx& c, float* b, int n) { brake_run(u, c, b, n, false); }
 void spin_proc(FxUnit& u, const FxCtx& c, float* b, int n) { brake_run(u, c, b, n, true); }
 
+// ---- appended effects (protocol 5) ---------------------------------------------------------------------------
+// 3-band isolator: two Linkwitz-Riley (4th order) crossovers, 250 Hz and 2.5 kHz, built from cascaded second-order
+// state-variable filters. The bands add back to a flat magnitude (phase-shifted like any crossover); each band has
+// its own gain: 0 = kill, 0.5 = unity, 1 = +6 dB.
+inline float iso_gain(float k) { return k < 0.5f ? (2.0f * k) * (2.0f * k) : 1.0f + (k - 0.5f) * 2.0f; }
+struct IsoCoef {
+  float a1, a2, a3;
+};
+inline IsoCoef iso_coef(double fc, double sr) {
+  const double g = std::tan(kPi * std::min(fc, sr * 0.45) / sr), k = 1.41421356237;
+  const float a1 = static_cast<float>(1.0 / (1.0 + g * (g + k)));
+  return {a1, static_cast<float>(g) * a1, static_cast<float>(g) * static_cast<float>(g) * a1};
+}
+inline void iso_svf(float x, float* st, const IsoCoef& c, float& lp, float& hp) {
+  const float k = 1.41421356f;
+  const float v3 = x - st[1];
+  const float v1 = c.a1 * st[0] + c.a2 * v3;
+  const float v2 = st[1] + c.a2 * st[0] + c.a3 * v3;
+  st[0] = fz(2 * v1 - st[0]);
+  st[1] = fz(2 * v2 - st[1]);
+  lp = v2;
+  hp = x - k * v1 - v2;
+}
+void isolator_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
+  const K k = coefs(cx);
+  const IsoCoef c1 = iso_coef(250.0, cx.sr), c2 = iso_coef(2500.0, cx.sr);
+  for (int i = 0; i < n; ++i) {
+    smooth(u, k);
+    const float gl = iso_gain(u.param_s), gm = iso_gain(u.param2_s), gh = iso_gain(u.param3_s);
+    const float m = u.on_s * u.wet_s;
+    for (int c = 0; c < 2; ++c) {
+      float* st = u.s + c * 16;  // 8 two-state filters: low path (2), high path (2) at 250 Hz; the same at 2.5 kHz
+      const float x = buf[i * 2 + c];
+      float t, lo, h1, d;
+      iso_svf(x, st, c1, t, d);
+      iso_svf(t, st + 2, c1, lo, d);
+      iso_svf(x, st + 4, c1, d, t);
+      iso_svf(t, st + 6, c1, d, h1);
+      float mid, hi;
+      iso_svf(h1, st + 8, c2, t, d);
+      iso_svf(t, st + 10, c2, mid, d);
+      iso_svf(h1, st + 12, c2, d, t);
+      iso_svf(t, st + 14, c2, d, hi);
+      const float y = lo * gl + mid * gm + hi * gh;
+      buf[i * 2 + c] = x + (y - x) * m;
+    }
+  }
+}
+
+// Slicer: eight steps of one beat division; param picks how many of them play (a Euclidean spread), param2 rotates
+// the pattern, param3 sets how much of each step the gate stays open.
+void slicer_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
+  const K k = coefs(cx);
+  const double period = std::max(1.0 / 64, u.seconds > 0 ? u.seconds * cx.sr / cx.bf : static_cast<double>(u.beats));
+  const int hits = 1 + static_cast<int>(std::lround(std::clamp(u.param, 0.0f, 1.0f) * 7.0f));
+  const int rot = static_cast<int>(std::lround(std::clamp(u.param2, 0.0f, 1.0f) * 7.0f));
+  const float sm = static_cast<float>(1.0 - std::exp(-1.0 / (0.002 * cx.sr)));
+  double sp = cx.beat_pos / period;
+  const double dsp = 1.0 / (cx.bf * period);
+  for (int i = 0; i < n; ++i) {
+    smooth(u, k);
+    const double fl = std::floor(sp);
+    const double frac = sp - fl;
+    const int step = static_cast<int>(std::fmod(fl, 8.0) + 8.0) & 7;
+    const bool hit = (((step + rot) & 7) * hits) % 8 < hits;
+    const float open = 0.15f + 0.8f * u.param3_s;
+    u.s[0] += ((hit && frac < open ? 1.0f : 0.0f) - u.s[0]) * sm;
+    sp += dsp;
+    const float m = u.on_s * u.wet_s, g = 1.0f - m + m * u.s[0];
+    buf[i * 2] *= g;
+    buf[i * 2 + 1] *= g;
+  }
+}
+
+// Build-up: one knob (param) raises a high-pass, feeds a beat-synced echo with growing feedback and fades in a noise
+// riser. Switching off does not cut: the effect is released on the next beat line, the filter and the riser leave in a
+// few milliseconds and the echo rings out like any other tail.
+void buildup_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
+  const K k = coefs(cx);
+  const double maxd = static_cast<double>(u.cap - 8);
+  double tgt = beat_time(u, cx);
+  while (tgt > maxd) tgt *= 0.5;
+  tgt = std::max(tgt, 8.0);
+  if (u.time_s < 0) u.time_s = tgt;
+  const float ke = static_cast<float>(1.0 - std::exp(-1.0 / (0.004 * cx.sr)));
+  if (u.rise) {
+    u.n[0] = 1;
+    u.n[2] = 0;
+    u.hold = true;
+  }
+  if (u.on) u.n[2] = 0;
+  else if (u.n[0] == 1) u.n[2] = 1;  // release when the next beat starts
+  double bp = cx.beat_pos;
+  const double dbp = 1.0 / cx.bf;
+  float peak = 0;
+  float hp_a = 0, nz_a = 0;
+  for (int i = 0; i < n; ++i) {
+    smooth(u, k);
+    const std::int32_t bi = static_cast<std::int32_t>(std::floor(bp));
+    bp += dbp;
+    if (u.n[2] == 1 && bi != u.n[1]) {
+      u.n[0] = 0;
+      u.n[2] = 0;
+    }
+    u.n[1] = bi;
+    u.s[10] += (static_cast<float>(u.n[0]) - u.s[10]) * ke;
+    if (u.n[0] == 0 && u.s[10] < 1e-4f) {
+      u.s[10] = 0;
+      u.hold = false;
+    }
+    const float amt = u.param_s * u.s[10];
+    if ((i & 7) == 0) {
+      hp_a = lp_coef(30.0 * std::exp2(7.0 * static_cast<double>(amt)), cx.sr);
+      nz_a = lp_coef(700.0 + 9000.0 * static_cast<double>(amt * amt), cx.sr);
+    }
+    u.time_s += std::clamp(tgt - u.time_s, -0.25, 0.25);
+    float yl, yr;
+    dl_read(u, 0, u.time_s, yl);
+    dl_read(u, 1, u.time_s, yr);
+    const float fb = 0.3f + 0.5f * u.param_s;  // below 0.8 so the tail always dies
+    const float nzv = noise(u);
+    u.s[8] += nz_a * (nzv - u.s[8]);
+    u.s[9] += lp_coef(250.0, cx.sr) * (u.s[8] - u.s[9]);
+    const float riser = (u.s[8] - u.s[9]) * 0.1f * amt * amt;
+    const float send = amt * 0.9f;
+    const float mf = std::min(1.0f, amt * 3.0f), m = u.wet_s * u.s[10];
+    float outv[2], hpv[2];
+    for (int c = 0; c < 2; ++c) {
+      const float x = buf[i * 2 + c];
+      u.s[c * 2] = fz(u.s[c * 2] + hp_a * (x - u.s[c * 2]));
+      u.s[c * 2 + 1] = fz(u.s[c * 2 + 1] + hp_a * (u.s[c * 2] - u.s[c * 2 + 1]));
+      hpv[c] = x - u.s[c * 2 + 1];
+      const float body = x + (hpv[c] - x) * mf + riser;
+      outv[c] = x + (body - x) * m;
+    }
+    const float wl = fz(hpv[0] * send + fb * yl), wr = fz(hpv[1] * send + fb * yr);
+    dl_write(u, wl, wr);
+    peak = std::max(peak, std::fabs(wl) + std::fabs(wr));
+    buf[i * 2] = outv[0] + u.wet_s * 0.8f * yl;
+    buf[i * 2 + 1] = outv[1] + u.wet_s * 0.8f * yr;
+  }
+  track_quiet(u, peak, n);
+}
+
+// One-knob DJ filter: 0.5 = off, turning down closes a low-pass, turning up opens a high-pass (param2 = resonance).
+void filter_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
+  const K k = coefs(cx);
+  float a1 = 1, a2 = 0, a3 = 0, kk = 1;
+  for (int i = 0; i < n; ++i) {
+    smooth(u, k);
+    const float knob = u.param_s;
+    const bool low = knob < 0.5f;
+    if ((i & 7) == 0) {
+      const double a = std::min(1.0, std::fabs(static_cast<double>(knob) - 0.5) * 2.0);
+      const double f = std::min(low ? 18000.0 * std::pow(60.0 / 18000.0, a) : 20.0 * std::pow(8000.0 / 20.0, a), cx.sr * 0.45);
+      const double g = std::tan(kPi * f / cx.sr);
+      kk = static_cast<float>(1.0 / (0.7 + 5.0 * static_cast<double>(u.param2_s)));
+      a1 = static_cast<float>(1.0 / (1.0 + g * (g + kk)));
+      a2 = static_cast<float>(g) * a1;
+      a3 = static_cast<float>(g) * a2;
+    }
+    const float m = u.on_s * u.wet_s;
+    for (int c = 0; c < 2; ++c) {
+      const float x = buf[i * 2 + c];
+      float& ic1 = u.s[c * 2];
+      float& ic2 = u.s[c * 2 + 1];
+      const float v3 = x - ic2;
+      const float v1 = a1 * ic1 + a2 * v3;
+      const float v2 = ic2 + a2 * ic1 + a3 * v3;
+      ic1 = fz(2 * v1 - ic1);
+      ic2 = fz(2 * v2 - ic2);
+      const float y = low ? v2 : x - kk * v1 - v2;
+      buf[i * 2 + c] = x + (y - x) * m;
+    }
+  }
+}
+
 void reset_none(FxUnit&) {}
 void reset_delay(FxUnit& u) { u.time_s = -1; }
 
 // ---- registry ----------------------------------------------------------------------------------------
-//        kind, name, param, synced, tail, release, colour, wet, param, beats
+//        kind, name, param, synced, tail, release, colour, wet, param, beats, param2, param3, slug
 const FxDef kDefs[] = {
-    {{EffectKind::None, "None", "", false, false, false, false, 0, 0, 1}, nullptr, reset_none, false},
-    {{EffectKind::Echo, "Echo", "feedback", true, true, false, false, 0.5f, 0.5f, 0.5f}, echo_proc, reset_delay, false},
-    {{EffectKind::PingPong, "Ping Pong", "feedback", true, true, false, false, 0.5f, 0.5f, 0.5f}, ping_proc, reset_delay, false},
-    {{EffectKind::Spiral, "Spiral", "pitch drift", true, true, false, false, 0.5f, 0.5f, 0.75f}, spiral_proc, reset_delay, false},
-    {{EffectKind::Reverb, "Reverb", "decay", false, true, false, false, 0.4f, 0.5f, 1.0f}, reverb_proc, reverb_reset, false},
-    {{EffectKind::Flanger, "Flanger", "feedback", true, false, false, false, 1.0f, 0.7f, 4.0f}, flanger_proc, reset_none, false},
-    {{EffectKind::Phaser, "Phaser", "feedback", true, false, false, false, 1.0f, 0.6f, 4.0f}, phaser_proc, reset_none, false},
-    {{EffectKind::LowCutEcho, "Low Cut Echo", "cut frequency", true, true, false, false, 0.5f, 0.3f, 0.5f}, lowcut_proc, reset_delay, false},
-    {{EffectKind::FilterSweep, "Filter Sweep", "resonance", true, false, false, false, 1.0f, 0.4f, 2.0f}, filter_sweep_proc, reset_none, false},
-    {{EffectKind::Roll, "Roll", "", true, false, false, false, 1.0f, 0.5f, 0.25f}, roll_proc, reset_none, false},
-    {{EffectKind::Transform, "Transform", "gate length", true, false, false, false, 1.0f, 0.5f, 0.25f}, transform_proc, reset_none, false},
-    {{EffectKind::Pitch, "Pitch", "pitch (0.5 = none, +-12 st)", false, false, false, false, 1.0f, 0.75f, 1.0f}, pitch_proc, reset_none, false},
-    {{EffectKind::Crusher, "Crusher", "crush amount", false, false, false, false, 1.0f, 0.5f, 1.0f}, crush_proc, reset_none, false},
-    {{EffectKind::VinylBrake, "Vinyl Brake", "", true, false, true, false, 1.0f, 0.5f, 1.0f}, brake_proc, reset_none, false},
-    {{EffectKind::Backspin, "Backspin", "", true, false, true, false, 1.0f, 0.5f, 1.0f}, spin_proc, reset_none, true},
-    {{EffectKind::ColorNoise, "Noise", "", false, false, false, true, 1.0f, 0.5f, 1.0f}, noise_proc, reset_none, false},
-    {{EffectKind::ColorDubEcho, "Dub Echo", "", true, true, false, true, 0.5f, 0.5f, 0.75f}, dub_proc, reset_delay, false},
-    {{EffectKind::ColorCrush, "Crush", "", false, false, false, true, 1.0f, 0.5f, 1.0f}, crush_proc, reset_none, false},
-    {{EffectKind::ColorPitch, "Pitch", "", false, false, false, true, 1.0f, 0.5f, 1.0f}, pitch_proc, reset_none, false},
-    {{EffectKind::ColorSpace, "Space", "", false, true, false, true, 0.4f, 0.7f, 1.0f}, reverb_proc, reverb_reset, false},
+    {{EffectKind::None, "None", "", false, false, false, false, 0, 0, 1, "", "", "none"}, nullptr, reset_none, false},
+    {{EffectKind::Echo, "Echo", "feedback", true, true, false, false, 0.5f, 0.5f, 0.5f, "", "", "echo"}, echo_proc, reset_delay, false},
+    {{EffectKind::PingPong, "Ping Pong", "feedback", true, true, false, false, 0.5f, 0.5f, 0.5f, "", "", "ping_pong"}, ping_proc, reset_delay, false},
+    {{EffectKind::Spiral, "Spiral", "pitch drift", true, true, false, false, 0.5f, 0.5f, 0.75f, "", "", "spiral"}, spiral_proc, reset_delay, false},
+    {{EffectKind::Reverb, "Reverb", "decay", false, true, false, false, 0.4f, 0.5f, 1.0f, "", "", "reverb"}, reverb_proc, reverb_reset, false},
+    {{EffectKind::Flanger, "Flanger", "feedback", true, false, false, false, 1.0f, 0.7f, 4.0f, "", "", "flanger"}, flanger_proc, reset_none, false},
+    {{EffectKind::Phaser, "Phaser", "feedback", true, false, false, false, 1.0f, 0.6f, 4.0f, "", "", "phaser"}, phaser_proc, reset_none, false},
+    {{EffectKind::LowCutEcho, "Low Cut Echo", "cut frequency", true, true, false, false, 0.5f, 0.3f, 0.5f, "", "", "low_cut_echo"}, lowcut_proc, reset_delay, false},
+    {{EffectKind::FilterSweep, "Filter Sweep", "resonance", true, false, false, false, 1.0f, 0.4f, 2.0f, "", "", "filter_sweep"}, filter_sweep_proc, reset_none, false},
+    {{EffectKind::Roll, "Roll", "", true, false, false, false, 1.0f, 0.5f, 0.25f, "", "", "roll"}, roll_proc, reset_none, false},
+    {{EffectKind::Transform, "Transform", "gate length", true, false, false, false, 1.0f, 0.5f, 0.25f, "", "", "transform"}, transform_proc, reset_none, false},
+    {{EffectKind::Pitch, "Pitch", "pitch (0.5 = none, +-12 st)", false, false, false, false, 1.0f, 0.75f, 1.0f, "", "", "pitch"}, pitch_proc, reset_none, false},
+    {{EffectKind::Crusher, "Crusher", "crush amount", false, false, false, false, 1.0f, 0.5f, 1.0f, "", "", "crusher"}, crush_proc, reset_none, false},
+    {{EffectKind::VinylBrake, "Vinyl Brake", "", true, false, true, false, 1.0f, 0.5f, 1.0f, "", "", "vinyl_brake"}, brake_proc, reset_none, false},
+    {{EffectKind::Backspin, "Backspin", "", true, false, true, false, 1.0f, 0.5f, 1.0f, "", "", "backspin"}, spin_proc, reset_none, true},
+    {{EffectKind::ColorNoise, "Noise", "", false, false, false, true, 1.0f, 0.5f, 1.0f, "", "", "color_noise"}, noise_proc, reset_none, false},
+    {{EffectKind::ColorDubEcho, "Dub Echo", "", true, true, false, true, 0.5f, 0.5f, 0.75f, "", "", "color_dub_echo"}, dub_proc, reset_delay, false},
+    {{EffectKind::ColorCrush, "Crush", "", false, false, false, true, 1.0f, 0.5f, 1.0f, "", "", "color_crush"}, crush_proc, reset_none, false},
+    {{EffectKind::ColorPitch, "Pitch", "", false, false, false, true, 1.0f, 0.5f, 1.0f, "", "", "color_pitch"}, pitch_proc, reset_none, false},
+    {{EffectKind::ColorSpace, "Space", "", false, true, false, true, 0.4f, 0.7f, 1.0f, "", "", "color_space"}, reverb_proc, reverb_reset, false},
+    {{EffectKind::Isolator, "Isolator", "low", false, false, false, false, 1.0f, 0.5f, 1.0f, "mid", "high", "isolator"}, isolator_proc, reset_none, false},
+    {{EffectKind::Slicer, "Slicer", "density", true, false, false, false, 1.0f, 0.5f, 0.25f, "rotation", "gate length", "slicer"}, slicer_proc, reset_none, false},
+    {{EffectKind::BuildUp, "Build Up", "amount", true, true, false, false, 1.0f, 0.5f, 0.5f, "", "", "build_up"}, buildup_proc, reset_delay, false},
+    {{EffectKind::Filter, "Filter", "knob (0.5 = off, low-pass below, high-pass above)", false, false, false, false, 1.0f, 0.5f, 1.0f, "resonance", "", "filter"}, filter_proc, reset_none, false},
 };
 static_assert(sizeof(kDefs) / sizeof(kDefs[0]) == static_cast<std::size_t>(EffectKind::Count), "one table row per EffectKind");
 
@@ -552,7 +736,7 @@ const FxDef& def_of(EffectKind k) {
 }
 
 bool unit_active(const FxUnit& u, const FxDef& d) {
-  if (u.on || u.on_s > 1e-4f || d.always_run) return true;
+  if (u.on || u.on_s > 1e-4f || u.hold || d.always_run) return true;
   return d.info.tail && u.quiet < u.cap + 8192;
 }
 
@@ -577,12 +761,40 @@ void run_unit(FxUnit& u, const FxCtx& cx, float* buf, int n) {
   u.prev_on = u.on;
 }
 
+// Kinds that keep no delay memory get a small allocation (a chain may hold eight units).
+bool small_memory(EffectKind k) {
+  switch (k) {
+    case EffectKind::Isolator: case EffectKind::Slicer: case EffectKind::Filter: case EffectKind::Transform:
+    case EffectKind::FilterSweep: case EffectKind::Phaser:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void apply_defaults(FxUnit& u, const FxDef& dd) {
+  u.on = false;
+  u.wet = u.wet_s = dd.info.default_wet;
+  u.param = u.param_s = dd.info.default_param;
+  u.param2 = u.param2_s = u.kind == EffectKind::Filter ? 0.3f : 0.5f;
+  u.param3 = u.param3_s = 0.5f;
+  u.beats = dd.info.default_beats;
+  u.seconds = 0;
+  u.hold = false;
+}
+
 }  // namespace
 
 int effect_count() { return static_cast<int>(EffectKind::Count) - 1; }
 const EffectInfo& effect_info_at(int i) { return kDefs[1 + std::clamp(i, 0, effect_count() - 1)].info; }
 const EffectInfo* effect_info(EffectKind k) {
   return static_cast<std::size_t>(k) < static_cast<std::size_t>(EffectKind::Count) ? &kDefs[static_cast<std::size_t>(k)].info : nullptr;
+}
+const char* effect_slug(EffectKind k) { return def_of(k).info.slug; }
+EffectKind effect_from_slug(const std::string& slug) {
+  for (const FxDef& d : kDefs)
+    if (d.info.kind != EffectKind::None && slug == d.info.slug) return d.info.kind;
+  return EffectKind::None;
 }
 
 void FxUnit::clear() {
@@ -596,45 +808,82 @@ void FxUnit::clear() {
   env_in = 0;
   quiet = cap * 8;
   on_s = 0;
-  prev_on = rise = false;
+  prev_on = rise = hold = false;
   def_of(kind).reset(*this);
 }
 
-void FxBus::prepare(double sr) {
+void fx_unit_prepare(FxUnit& u, double sr) {
   std::int64_t cap = 1;
-  while (static_cast<double>(cap) < sr * 2.5) cap <<= 1;
-  FxUnit* all[kFxSlots + 1];
-  for (int i = 0; i < kFxSlots; ++i) all[i] = &slot[i];
-  all[kFxSlots] = &colour;
-  std::uint32_t seed = 0x9E3779B9u;
-  for (FxUnit* u : all) {
-    if (u->sr == sr && u->cap == cap && !u->mem.empty()) continue;
-    u->sr = sr;
-    u->cap = cap;
-    u->acap = 16384;
-    u->mem.assign(static_cast<std::size_t>(cap) * 2, 0.0f);
-    u->aux.assign(static_cast<std::size_t>(u->acap) * 2, 0.0f);
-    u->rng = seed += 0x6D2B79F5u;
-    u->clear();
+  const double secs = small_memory(u.kind) ? 0.05 : 2.5;
+  while (static_cast<double>(cap) < sr * secs) cap <<= 1;
+  if (u.sr == sr && u.cap == cap && !u.mem.empty()) return;
+  u.sr = sr;
+  u.cap = cap;
+  u.acap = small_memory(u.kind) ? 64 : 16384;
+  u.mem.assign(static_cast<std::size_t>(cap) * 2, 0.0f);
+  u.aux.assign(static_cast<std::size_t>(u.acap) * 2, 0.0f);
+  u.clear();
+}
+
+FxUnit* fx_make_unit(EffectKind kind, double sr, std::uint32_t seed) {
+  if (static_cast<std::size_t>(kind) >= static_cast<std::size_t>(EffectKind::Count)) kind = EffectKind::None;
+  FxUnit* u = new FxUnit;
+  u->kind = kind;
+  u->rng = seed | 1u;
+  fx_unit_prepare(*u, sr);
+  apply_defaults(*u, def_of(kind));
+  return u;
+}
+
+bool fx_unit_busy(const FxUnit& u) {
+  if (u.kind == EffectKind::None) return false;
+  const FxDef& d = def_of(u.kind);
+  return u.on || u.on_s > 1e-4f || u.hold || (d.info.tail && u.quiet < u.cap + 8192);
+}
+
+void fx_unit_info(const FxUnit& u, FxUnitInfo& o) {
+  o.id = u.id;
+  o.kind = u.kind;
+  o.on = u.on ? 1 : 0;
+  o.legacy_slot = static_cast<std::int8_t>(u.legacy);
+  o.wet = u.wet;
+  o.param = u.param;
+  o.param2 = u.param2;
+  o.param3 = u.param3;
+  o.beats = u.beats;
+  o.seconds = u.seconds;
+}
+
+void fx_unit_set(FxUnit& u, FxField f, double v) {
+  const float x = static_cast<float>(v);
+  switch (f) {
+    case FxField::On: u.on = v > 0.5; break;
+    case FxField::Wet: u.wet = std::clamp(x, 0.0f, 1.0f); break;
+    case FxField::Param: u.param = std::clamp(x, 0.0f, 1.0f); break;
+    case FxField::Beats: u.beats = std::clamp(x, 1.0f / 16, 16.0f); break;
+    case FxField::Seconds: u.seconds = v > 0 ? std::min(v, 10.0) : 0; break;
+    case FxField::Param2: u.param2 = std::clamp(x, 0.0f, 1.0f); break;
+    case FxField::Param3: u.param3 = std::clamp(x, 0.0f, 1.0f); break;
+    default: break;
+  }
+}
+
+// ---- FxBus (colour unit only) ------------------------------------------------------------------------------
+void FxBus::prepare(double sr) {
+  if (colour.sr != sr || colour.mem.empty()) {
+    colour.rng = 0x9E3779B9u + 0x6D2B79F5u * 4u;
+    fx_unit_prepare(colour, sr);
   }
 }
 
 void FxBus::select(int slot_index, EffectKind kind) {
-  FxUnit& u = slot_index >= kFxSlots ? colour : slot[std::max(0, slot_index)];
+  if (slot_index < kFxSlots) return;
   const FxDef& d = def_of(kind);
-  if (kind != EffectKind::None && d.info.colour != (slot_index >= kFxSlots)) kind = EffectKind::None;
-  const FxDef& dd = def_of(kind);
-  u.kind = kind;
-  u.on = false;
-  u.wet = u.wet_s = dd.info.default_wet;
-  u.param = u.param_s = dd.info.default_param;
-  u.beats = dd.info.default_beats;
-  u.seconds = 0;
-  u.clear();
-}
-
-void FxBus::run_slots(float* buf, int n, const FxCtx& cx) {
-  for (FxUnit& u : slot) run_unit(u, cx, buf, n);
+  if (kind != EffectKind::None && !d.info.colour) kind = EffectKind::None;
+  colour.kind = kind;
+  apply_defaults(colour, def_of(kind));
+  fx_unit_prepare(colour, colour.sr);
+  colour.clear();
 }
 
 void FxBus::run_colour(float* buf, int n, const FxCtx& cx, float knob) {
@@ -654,24 +903,218 @@ void FxBus::run_colour(float* buf, int n, const FxCtx& cx, float knob) {
 }
 
 bool FxBus::busy() const {
-  for (const FxUnit& u : slot) {
-    if (u.kind == EffectKind::None) continue;
-    const FxDef& d = def_of(u.kind);
-    if (u.on || u.on_s > 1e-4f || (d.info.tail && u.quiet < u.cap + 8192)) return true;
+  return colour.kind != EffectKind::None &&
+         (colour.on_s > 1e-4f || (def_of(colour.kind).info.tail && colour.quiet < colour.cap + 8192));
+}
+
+// ---- chains -----------------------------------------------------------------------------------------------------
+namespace {
+bool in_state(const FxChainState* s, const FxUnit* u) {
+  if (!s) return false;
+  for (int i = 0; i < s->count; ++i)
+    if (s->unit[i] == u) return true;
+  return false;
+}
+}  // namespace
+
+void FxChainRT::retire(FxUnit* u, FxChainState* s, FxGarbageRing& gar) {
+  if (!gar.push(FxGarbage{u, s})) ++leaked;  // never block the audio thread; a leak beats a stall
+}
+
+void FxChainRT::install(FxChainState* next, FxGarbageRing& gar) {
+  if (pending) {  // an edit arrived before the previous one took effect: the older one never ran
+    for (int i = 0; i < pending->count; ++i) {
+      FxUnit* u = pending->unit[i];
+      if (!in_state(next, u) && !in_state(cur, u)) retire(u, nullptr, gar);
+    }
+    retire(nullptr, pending, gar);
   }
-  if (colour.kind != EffectKind::None && (colour.on_s > 1e-4f || (def_of(colour.kind).info.tail && colour.quiet < colour.cap + 8192)))
-    return true;
+  pending = next;
+  if (immediate) do_swap(gar);
+}
+
+void FxChainRT::do_swap(FxGarbageRing& gar) {
+  FxChainState* old = cur;
+  cur = pending;
+  pending = nullptr;
+  phase = 0;
+  if (old) {
+    for (int i = 0; i < old->count; ++i) {
+      FxUnit* u = old->unit[i];
+      if (in_state(cur, u)) continue;
+      bool placed = false;
+      if (u->kind != EffectKind::None && def_of(u->kind).info.tail && !immediate) {  // a delay or reverb rings out
+        u->on = false;
+        u->hold = false;
+        for (FxUnit*& g : ghost)
+          if (!g) {
+            g = u;
+            placed = true;
+            break;
+          }
+      }
+      if (!placed) retire(u, nullptr, gar);
+    }
+    retire(nullptr, old, gar);
+  }
+}
+
+bool FxChainRT::busy() const {
+  if (pending) return true;
+  for (const FxUnit* g : ghost)
+    if (g) return true;
+  if (cur)
+    for (int i = 0; i < cur->count; ++i)
+      if (fx_unit_busy(*cur->unit[i])) return true;
   return false;
 }
 
-void FxBus::view(FxSlotView* out) const {
-  for (int i = 0; i < kFxSlots; ++i) {
-    out[i].kind = slot[i].kind;
-    out[i].on = slot[i].on;
-    out[i].wet = slot[i].wet;
-    out[i].param = slot[i].param;
-    out[i].beats = slot[i].beats;
+FxUnit* FxChainRT::find_id(int id) const {
+  for (const FxChainState* s : {pending, cur}) {
+    if (!s) continue;
+    for (int i = 0; i < s->count; ++i)
+      if (s->unit[i]->id == id) return s->unit[i];
   }
+  return nullptr;
+}
+FxUnit* FxChainRT::find_legacy(int slot) const {
+  for (const FxChainState* s : {pending, cur}) {
+    if (!s) continue;
+    for (int i = 0; i < s->count; ++i)
+      if (s->unit[i]->legacy == slot) return s->unit[i];
+  }
+  return nullptr;
+}
+
+void FxChainRT::view(FxChainInfo& o) const {
+  const FxChainState* s = pending ? pending : cur;
+  o = FxChainInfo{};
+  o.exists = (cur || pending) ? 1 : 0;
+  o.bypass = bypass ? 1 : 0;
+  o.wet = wet;
+  if (!s) return;
+  o.rev = s->rev;
+  o.count = s->count;
+  for (int i = 0; i < s->count; ++i) fx_unit_info(*s->unit[i], o.unit[i]);
+}
+
+void FxChainRT::view_slots(FxSlotView* out) const {
+  for (int i = 0; i < kFxSlots; ++i) {
+    const FxUnit* u = find_legacy(i);
+    out[i] = FxSlotView{};
+    out[i].wet = 0;
+    out[i].param = 0;
+    if (u) {
+      out[i].kind = u->kind;
+      out[i].on = u->on;
+      out[i].wet = u->wet;
+      out[i].param = u->param;
+      out[i].beats = u->beats;
+    }
+  }
+}
+
+void FxChainRT::collect(std::vector<FxUnit*>& units, std::vector<FxChainState*>& states) const {
+  for (const FxChainState* s : {cur, pending}) {
+    if (!s) continue;
+    for (int i = 0; i < s->count; ++i) units.push_back(s->unit[i]);
+  }
+  if (cur) states.push_back(cur);
+  if (pending) states.push_back(pending);
+  for (FxUnit* g : ghost)
+    if (g) units.push_back(g);
+}
+
+void FxChainRT::run(float* buf, int n, const FxCtx& cx, FxGarbageRing& gar) {
+  for (int off = 0; off < n; off += kFxBlock) {
+    const int m = std::min(kFxBlock, n - off);
+    FxCtx c = cx;
+    c.beat_pos += static_cast<double>(off) / cx.bf;
+    run_block(buf + static_cast<std::size_t>(off) * 2, m, c, gar);
+  }
+}
+
+void FxChainRT::run_block(float* buf, int n, const FxCtx& cx, FxGarbageRing& gar) {
+  float g0 = 1, g1 = 1;
+  if (pending) {
+    // A structural edit dips the chain to the dry signal over one block, swaps, and comes back over the next, so a
+    // reorder or a removal never steps the output. An idle chain swaps at once.
+    bool idle = !cur || cur->count == 0;
+    if (!idle) {
+      idle = true;
+      for (int i = 0; i < cur->count && idle; ++i) idle = !fx_unit_busy(*cur->unit[i]);
+    }
+    if (idle || immediate || phase == 1) {
+      const bool ramp_up = phase == 1;
+      do_swap(gar);
+      if (ramp_up) g0 = 0;
+    } else {
+      phase = 1;
+      g1 = 0;
+    }
+  }
+  bool ghosts = false;
+  for (const FxUnit* g : ghost) ghosts = ghosts || g;
+  const bool units = cur && cur->count > 0;
+  if (!units && !ghosts) return;
+  if (bypass && act <= 0.0f) return;  // fully bypassed: the buffer is not touched at all
+
+  float dry[kFxBlock * 2];
+  std::memcpy(dry, buf, sizeof(float) * 2 * static_cast<std::size_t>(n));
+  if (units)
+    for (int i = 0; i < cur->count; ++i) run_unit(*cur->unit[i], cx, buf, n);
+  if (ghosts) {
+    float zero[kFxBlock * 2];
+    for (FxUnit*& g : ghost) {
+      if (!g) continue;
+      std::memset(zero, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
+      g->on = false;
+      run_unit(*g, cx, zero, n);
+      for (int i = 0; i < n * 2; ++i) buf[i] += zero[i];
+      if (!fx_unit_busy(*g)) {
+        retire(g, nullptr, gar);
+        g = nullptr;
+      }
+    }
+  }
+  const float step = static_cast<float>(1.0 / (0.008 * cx.sr));
+  const float kw = static_cast<float>(1.0 - std::exp(-1.0 / (0.02 * cx.sr)));
+  const float target = bypass ? 0.0f : 1.0f;
+  const float inv = 1.0f / static_cast<float>(n);
+  for (int i = 0; i < n; ++i) {
+    act += std::clamp(target - act, -step, step);
+    wet_s += (wet - wet_s) * kw;
+    if (std::fabs(wet - wet_s) < 1e-6f) wet_s = wet;
+    const float gs = g0 + (g1 - g0) * (static_cast<float>(i) * inv);
+    const float m = act * wet_s * gs;
+    if (m >= 1.0f) continue;
+    buf[i * 2] = dry[i * 2] + (buf[i * 2] - dry[i * 2]) * m;
+    buf[i * 2 + 1] = dry[i * 2 + 1] + (buf[i * 2 + 1] - dry[i * 2 + 1]) * m;
+  }
+}
+
+double fx_bench_ns_per_block(EffectKind kind, int block_frames, double sample_rate, int blocks) {
+  FxUnit* u = fx_make_unit(kind, sample_rate, 1234);
+  u->on = true;
+  std::vector<float> buf(static_cast<std::size_t>(block_frames) * 2);
+  FxCtx cx;
+  cx.sr = sample_rate;
+  cx.bf = 60.0 / 120.0 * sample_rate;
+  std::uint32_t r = 1;
+  double sum = 0;
+  for (int b = 0; b < blocks + 8; ++b) {
+    for (std::size_t i = 0; i < buf.size(); ++i) {
+      r = r * 1664525u + 1013904223u;
+      buf[i] = 0.3f * (static_cast<float>(r >> 9) / 4194304.0f - 1.0f);
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    run_unit(*u, cx, buf.data(), block_frames);
+    const auto t1 = std::chrono::steady_clock::now();
+    cx.beat_pos += block_frames / cx.bf;
+    if (b >= 8) sum += static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+  }
+  delete u;
+  return sum / std::max(1, blocks);
 }
 
 }  // namespace deckhand

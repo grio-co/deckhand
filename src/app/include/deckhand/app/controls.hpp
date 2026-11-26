@@ -34,6 +34,21 @@ bool apply_control(IEngine& engine, std::string_view name, bool has_value, doubl
 bool build_control(const IEngine& engine, std::string_view name, bool has_value, double value, std::vector<Command>& out,
                    std::string& error);
 
+// ---- effect chain controls (protocol 5) --------------------------------------------------------------------------------
+// <target>.chain.<verb>[.<n>] where <target> is deck1..deck4, mixer (master), mic, sampler or deckN.stemM (M 1..8):
+//   insert[.pos] / insert_on[.pos]  value = effect number (insert_on starts the unit on); pos is 0-based, default the end
+//   remove.<id> (trigger)  move.<id> (value = new index)  replace.<id> (value = effect number)
+//   unit.on|wet|param|param2|param3|beats|seconds.<id>  (value)      bypass (0/1)   wet (0..1)   clear (trigger)
+//   save (returns the preset JSON in `text`)   load (the preset JSON is passed as `text`)
+// Chain edits are applied at once and cannot be scheduled.
+bool is_chain_control(std::string_view name);
+// `text` is the preset for load; `out_text` receives the preset of save and the new unit id for inserts (as a number).
+bool apply_chain_control(IEngine& engine, std::string_view name, bool has_value, double value, const std::string& text,
+                         std::string& out_text, std::string& error);
+// "deck1".."deck4", "master" ("mixer"), "mic", "sampler", "deck2.stem3" / "deck2stem3" -> engine target. False when unknown.
+bool parse_fx_target(std::string_view text, int& target);
+std::string fx_target_name(int target);  // inverse of parse_fx_target ("deck1", "master", "mic", "sampler", "deck2.stem3")
+
 // Current value of a control as shown by the engine (for skins and API reads). Returns false if
 // the control has no readable state.
 bool read_control(const IEngine& engine, std::string_view name, double& value);

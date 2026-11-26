@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <unordered_set>
 
 #include <chrono>
 #include <thread>
@@ -314,8 +315,26 @@ struct Engine::Impl {
   Snapshot<MixerView> mixer_view;
 
   // effects, sampler, taps
-  FxBus fxb[kMaxDecks];
-  FxBus master_fx;
+  FxBus fxb[kMaxDecks];              // colour unit + beat clock of each channel
+  FxChainRT chains[kFxTargetCount];  // effect chains (audio thread); channels 0..3, master, mic, sampler, stem buses
+  FxGarbageRing fx_garbage;          // units and chain states retired by the audio thread
+  Snapshot<FxChainInfo> chain_views[kFxTargetCount];
+  // Control-side description of every chain (never touched by the audio thread). Edits are made here, turned into a
+  // prepared FxChainState and handed over with Op::FxChainSwap. The FxUnit pointers are identities only.
+  struct ModelUnit {
+    FxUnitInfo info;
+    FxUnit* ptr = nullptr;
+  };
+  struct ChainModel {
+    int count = 0;
+    ModelUnit unit[kFxChainMax];
+    int next_id = 1;
+    std::uint32_t rev = 0;
+    bool exists = false, bypass = false;
+    float wet = 1.0f;
+  };
+  std::mutex chain_mx;
+  ChainModel models[kFxTargetCount];
   double master_bpm_manual = 0, master_bpm = 0;
   double master_clock = 0;
 
@@ -401,7 +420,13 @@ struct Engine::Impl {
   void prepare_audio() {
     for (Deck& d : decks) d.st.prepare(sr);
     for (FxBus& b : fxb) b.prepare(sr);
-    master_fx.prepare(sr);
+    for (int t = 0; t < kFxTargetCount; ++t) {
+      chains[t].immediate = t >= kFxTargetStemBase;
+      std::vector<FxUnit*> units;
+      std::vector<FxChainState*> states;
+      chains[t].collect(units, states);
+      for (FxUnit* u : units) fx_unit_prepare(*u, sr);
+    }
     mic.prepare(sr);
     if (mic_in.ready()) mic_in.set_out_rate(sr);
     std::size_t cap = 1;
@@ -779,8 +804,7 @@ struct Engine::Impl {
   bool exc_active(const Deck& d) const { return d.touching || d.loop_active || d.reverse || d.hold_slot >= 0; }
   FxUnit* fx_unit(int target, int slot) {
     if (slot < 0 || slot >= kFxSlots) return nullptr;
-    if (target == kFxMaster) return &master_fx.slot[slot];
-    if (target >= 0 && target < kMaxDecks) return &fxb[target].slot[slot];
+    if (target == kFxMaster || (target >= 0 && target < kMaxDecks)) return chains[target].find_legacy(slot);
     return nullptr;
   }
   static EffectKind color_kind(int c) {
@@ -830,14 +854,27 @@ struct Engine::Impl {
           fxb[di].select(kFxSlots, color_kind(dp->color));
         }
         return true;
-      case Op::FxSelect: {
-        FxBus* b = c.deck == kFxMaster ? &master_fx : (c.deck < kMaxDecks ? &fxb[c.deck] : nullptr);
-        if (b && c.i >= 0 && c.i < kFxSlots) {
-          const int k = static_cast<int>(c.d);
-          b->select(c.i, k > 0 && k < static_cast<int>(EffectKind::Count) ? static_cast<EffectKind>(k) : EffectKind::None);
+      case Op::FxSelect: return true;  // structural: Engine::send turns it into a chain edit before the queue
+      case Op::FxChainSwap:
+        if (c.chain) {
+          if (c.deck < kFxTargetCount) chains[c.deck].install(c.chain, fx_garbage);
+          else fx_garbage.push(FxGarbage{nullptr, c.chain});
         }
         return true;
-      }
+      case Op::FxUnitSet:
+        if (c.deck < kFxTargetCount) {
+          const int field = (c.i >> 16) & 0xFF;
+          if (FxUnit* u = chains[c.deck].find_id(c.i & 0xFFFF)) {
+            if (field < static_cast<int>(FxField::Count)) fx_unit_set(*u, static_cast<FxField>(field), field == static_cast<int>(FxField::Seconds) ? c.d : static_cast<double>(c.f));
+          }
+        }
+        return true;
+      case Op::FxChainSet:
+        if (c.deck < kFxTargetCount) {
+          if (c.i == 0) chains[c.deck].bypass = c.f > 0.5f;
+          else chains[c.deck].wet = std::clamp(c.f, 0.0f, 1.0f);
+        }
+        return true;
       case Op::FxEnable: if (FxUnit* u = fx_unit(c.deck, c.i)) u->on = c.f > 0.5f; return true;
       case Op::FxWet: if (FxUnit* u = fx_unit(c.deck, c.i)) u->wet = std::clamp(c.f, 0.0f, 1.0f); return true;
       case Op::FxParam: if (FxUnit* u = fx_unit(c.deck, c.i)) u->param = std::clamp(c.f, 0.0f, 1.0f); return true;
@@ -1547,17 +1584,17 @@ struct Engine::Impl {
       if (!d.trk) {
         d.peak = 0;
         d.g_master_prev = 0;
-        if (!fxb[di].busy()) continue;
+        if (!fxb[di].busy() && !chains[di].busy()) continue;
         std::memset(buf, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));  // let effect tails ring out
         const FxCtx cx = make_ctx(d, fxb[di], n);
-        fxb[di].run_slots(buf, n, cx);
+        chains[di].run(buf, n, cx, fx_garbage);
         for (int i = 0; i < n * 2; ++i) master[i] += buf[i] * d.fader * d.fader;
         continue;
       }
       render_deck(d, di, buf, n);
       const FxCtx cx = make_ctx(d, fxb[di], n);
       process_channel(d, di, buf, n, cx);
-      fxb[di].run_slots(buf, n, cx);
+      chains[di].run(buf, n, cx, fx_garbage);
       const float xf = (di % 2 == 0) ? std::min(1.0f, 2.0f * (1.0f - crossfader)) : std::min(1.0f, 2.0f * crossfader);
       const float gm1 = d.fader * d.fader * xf, gm0 = d.g_master_prev;
       const float gc1 = d.pfl ? 1.0f : 0.0f, gc0 = d.g_cue_prev;
@@ -1618,17 +1655,25 @@ struct Engine::Impl {
     for (const Deck& d : decks)
       if (d.trk && d.playing && d.bpm_now > 0) { lead = &d; break; }
     if (master_bpm <= 0 && lead) master_bpm = lead->bpm_now * lead->tempo_mult;
-    render_sampler(master, n);
+    FxCtx mcx;  // master tempo context: master bus, sampler and microphone chains
     {
-      FxCtx cx;
-      cx.sr = sr;
+      mcx.sr = sr;
       const double bpm = master_bpm > 0 ? master_bpm : 120.0;
-      cx.bf = 60.0 / bpm * sr;
+      mcx.bf = 60.0 / bpm * sr;
       const GridSection* s = lead ? section_at(*lead) : nullptr;
-      cx.beat_pos = s && s->bpm > 0 ? (lead->pos - s->first_beat_frame) / beat_frames(*lead) : master_clock;
-      master_clock += n / cx.bf;
-      master_fx.run_slots(master, n, cx);
+      mcx.beat_pos = s && s->bpm > 0 ? (lead->pos - s->first_beat_frame) / beat_frames(*lead) : master_clock;
+      master_clock += n / mcx.bf;
     }
+    if (chains[kFxTargetSampler].active()) {  // the sampler bus has its own chain: render it apart, then mix it in
+      float sb[kChunk * 2];
+      std::memset(sb, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
+      render_sampler(sb, n);
+      chains[kFxTargetSampler].run(sb, n, mcx, fx_garbage);
+      for (int i = 0; i < n * 2; ++i) master[i] += sb[i];
+    } else {
+      render_sampler(master, n);
+    }
+    chains[kFxMaster].run(master, n, mcx, fx_garbage);
 
     // microphone channel: its own clock-joined input (or the offline feed), processed, mixed into the master bus
     float micb[kChunk * 2], duck[kChunk];
@@ -1646,6 +1691,7 @@ struct Engine::Impl {
         mic_in_use.store(false, std::memory_order_release);
       }
       mic.process(src, micb, duck, n);
+      chains[kFxTargetMic].run(micb, n, mcx, fx_garbage);
     }
     const float mon1 = mic.monitor ? 1.0f : 0.0f, mon0 = mic_mon_prev;
     mic_mon_prev = mon1;
@@ -1730,7 +1776,7 @@ struct Engine::Impl {
       v.key_shift = d.key_shift;
       v.auto_gain_db = d.autogain_db;
       v.color_fx = d.color;
-      fxb[di].view(v.fx);
+      chains[di].view_slots(v.fx);
       if (d.trk) {
         v.track_id = d.trk->track_id;
         v.position = d.pos;
@@ -1771,7 +1817,13 @@ struct Engine::Impl {
     m.master_level = master_level;
     m.peak_left = peak_l;
     m.peak_right = peak_r;
-    master_fx.view(m.fx);
+    chains[kFxMaster].view_slots(m.fx);
+    for (int t = 0; t < kFxTargetCount; ++t) {
+      if (!chains[t].used()) continue;
+      FxChainInfo ci;
+      chains[t].view(ci);
+      chain_views[t].write(ci);
+    }
     m.sampler_level = sampler_level;
     m.metro_level = metro_level;
     m.master_bpm = master_bpm;
@@ -1800,6 +1852,323 @@ struct Engine::Impl {
       sampler_views[k].write(sv);
     }
     mixer_view.write(m);
+  }
+
+
+  // ---- effect chains: control side (non-real-time threads; chain_mx) ---------------------------------------------
+  static bool legacy_target(int t) { return (t >= 0 && t < kMaxDecks) || t == kFxMaster; }
+  static int model_find(const ChainModel& m, int id) {
+    for (int i = 0; i < m.count; ++i)
+      if (m.unit[i].info.id == id) return i;
+    return -1;
+  }
+  static int model_find_legacy(const ChainModel& m, int slot) {
+    for (int i = 0; i < m.count; ++i)
+      if (m.unit[i].info.legacy_slot == slot) return i;
+    return -1;
+  }
+  static FxChainInfo model_info(const ChainModel& m) {
+    FxChainInfo o;
+    o.exists = m.exists ? 1 : 0;
+    o.bypass = m.bypass ? 1 : 0;
+    o.wet = m.wet;
+    o.count = m.count;
+    o.rev = m.rev;
+    for (int i = 0; i < m.count; ++i) o.unit[i] = m.unit[i].info;
+    return o;
+  }
+  static void info_set(FxUnitInfo& u, FxField f, double v) {
+    const float x = static_cast<float>(v);
+    switch (f) {
+      case FxField::On: u.on = v > 0.5 ? 1 : 0; break;
+      case FxField::Wet: u.wet = std::clamp(x, 0.0f, 1.0f); break;
+      case FxField::Param: u.param = std::clamp(x, 0.0f, 1.0f); break;
+      case FxField::Beats: u.beats = std::clamp(x, 1.0f / 16, 16.0f); break;
+      case FxField::Seconds: u.seconds = v > 0 ? std::min(v, 10.0) : 0; break;
+      case FxField::Param2: u.param2 = std::clamp(x, 0.0f, 1.0f); break;
+      case FxField::Param3: u.param3 = std::clamp(x, 0.0f, 1.0f); break;
+      default: break;
+    }
+  }
+  bool push_cmd(const Command& c) {
+    std::lock_guard<std::mutex> lock(send_mutex);
+    return commands.push(c);
+  }
+  FxUnit* new_unit(EffectKind kind, int target, int id, int legacy, std::vector<FxUnit*>& created, ModelUnit& out) {
+    FxUnit* u = fx_make_unit(kind, sr, 0x9E3779B9u + 0x85EBCA6Bu * static_cast<std::uint32_t>(target * 65536 + id));
+    u->id = id;
+    u->legacy = legacy;
+    created.push_back(u);
+    fx_unit_info(*u, out.info);
+    out.ptr = u;
+    return u;
+  }
+  static int model_new_id(ChainModel& m) {
+    for (int tries = 0; tries < 65536; ++tries) {
+      const int id = m.next_id;
+      m.next_id = m.next_id >= 65535 ? 1 : m.next_id + 1;
+      if (model_find(m, id) < 0) return id;
+    }
+    return 0;
+  }
+
+  FxChainInfo chain_info(int t) {
+    std::lock_guard<std::mutex> lk(chain_mx);
+    const ChainModel& m = models[t];
+    if (m.exists) {
+      const FxChainInfo snap = chain_views[t].read();
+      if (snap.exists && snap.rev == m.rev) return snap;  // what the audio thread is really running (incl. scheduled edits)
+    }
+    return model_info(m);
+  }
+
+  // `legacy`: the fixed slot an Insert (or a Replace of a unit that has none) tags the unit with, -1 for none.
+  bool chain_edit(const FxChainEdit& e, FxChainResult& r, int legacy = -1) {
+    r = FxChainResult{};
+    if (!fx_target_valid(e.target)) {
+      r.error = "no such effect chain";
+      return false;
+    }
+    const int t = e.target;
+    if (e.verb == FxChainVerb::Get || e.verb == FxChainVerb::Save) {
+      r.info = chain_info(t);
+      if (e.verb == FxChainVerb::Save) r.text = fx_chain_to_json(r.info);
+      r.ok = true;
+      return true;
+    }
+    if (static_cast<int>(e.verb) >= static_cast<int>(FxChainVerb::Count)) {
+      r.error = "unknown chain operation";
+      return false;
+    }
+    std::lock_guard<std::mutex> lk(chain_mx);
+    ChainModel& live = models[t];
+    ChainModel m = live;
+    std::vector<FxUnit*> created;
+    bool structural = false;
+    bool set_chain_after = false;
+    auto fail = [&](const std::string& msg) {
+      r.error = msg;
+      for (FxUnit* u : created) delete u;
+      r.info = model_info(live);
+      r.ok = false;
+      return false;
+    };
+    const auto kind_ok = [](EffectKind k) { return k != EffectKind::None && static_cast<int>(k) < static_cast<int>(EffectKind::Count); };
+    switch (e.verb) {
+      case FxChainVerb::Insert: {
+        if (!kind_ok(e.kind)) return fail("unknown effect");
+        if (m.count >= kFxChainMax) return fail("a chain holds at most 8 effects");
+        const int id = model_new_id(m);
+        if (!id) return fail("no free unit id");
+        const int pos = e.pos < 0 || e.pos > m.count ? m.count : e.pos;
+        ModelUnit mu;
+        FxUnit* u = new_unit(e.kind, t, id, legacy, created, mu);
+        if (e.value > 0.5) {
+          fx_unit_set(*u, FxField::On, 1);
+          fx_unit_info(*u, mu.info);
+        }
+        for (int i = m.count; i > pos; --i) m.unit[i] = m.unit[i - 1];
+        m.unit[pos] = mu;
+        ++m.count;
+        r.id = id;
+        structural = true;
+        break;
+      }
+      case FxChainVerb::Remove: {
+        const int i = model_find(m, e.id);
+        if (i < 0) return fail("no such effect in the chain");
+        for (int k = i; k + 1 < m.count; ++k) m.unit[k] = m.unit[k + 1];
+        --m.count;
+        structural = true;
+        break;
+      }
+      case FxChainVerb::Move: {
+        const int i = model_find(m, e.id);
+        if (i < 0) return fail("no such effect in the chain");
+        const int to = std::clamp(e.pos, 0, m.count - 1);
+        const ModelUnit mu = m.unit[i];
+        for (int k = i; k + 1 < m.count; ++k) m.unit[k] = m.unit[k + 1];
+        for (int k = m.count - 1; k > to; --k) m.unit[k] = m.unit[k - 1];
+        m.unit[to] = mu;
+        structural = i != to;
+        if (!structural) {  // nothing to do
+          r.info = model_info(live);
+          r.ok = true;
+          return true;
+        }
+        break;
+      }
+      case FxChainVerb::Replace: {
+        if (!kind_ok(e.kind)) return fail("unknown effect");
+        const int i = model_find(m, e.id);
+        if (i < 0) return fail("no such effect in the chain");
+        const bool was_on = m.unit[i].info.on != 0;
+        const int tag = m.unit[i].info.legacy_slot;
+        ModelUnit mu;
+        FxUnit* u = new_unit(e.kind, t, e.id, legacy >= 0 ? legacy : tag, created, mu);
+        if (was_on && legacy < 0) {
+          fx_unit_set(*u, FxField::On, 1);
+          fx_unit_info(*u, mu.info);
+        }
+        m.unit[i] = mu;
+        r.id = e.id;
+        structural = true;
+        break;
+      }
+      case FxChainVerb::Clear:
+        m.count = 0;
+        structural = live.count > 0;
+        break;
+      case FxChainVerb::Load: {
+        FxChainInfo spec;
+        std::string perr;
+        if (!fx_chain_from_json(e.text, spec, perr)) return fail("bad preset: " + perr);
+        m.count = 0;
+        for (int i = 0; i < spec.count; ++i) {
+          const FxUnitInfo& su = spec.unit[i];
+          const int id = model_new_id(m);
+          ModelUnit mu;
+          FxUnit* u = new_unit(su.kind, t, id, -1, created, mu);
+          fx_unit_set(*u, FxField::On, su.on ? 1 : 0);
+          fx_unit_set(*u, FxField::Wet, su.wet);
+          fx_unit_set(*u, FxField::Param, su.param);
+          fx_unit_set(*u, FxField::Param2, su.param2);
+          fx_unit_set(*u, FxField::Param3, su.param3);
+          fx_unit_set(*u, FxField::Beats, su.beats);
+          fx_unit_set(*u, FxField::Seconds, su.seconds);
+          u->wet_s = u->wet;
+          u->param_s = u->param;
+          u->param2_s = u->param2;
+          u->param3_s = u->param3;
+          fx_unit_info(*u, mu.info);
+          m.unit[m.count++] = mu;
+        }
+        m.bypass = spec.bypass != 0;
+        m.wet = spec.wet;
+        structural = true;
+        set_chain_after = true;
+        break;
+      }
+      case FxChainVerb::Set: {
+        const int i = model_find(m, e.id);
+        if (i < 0) return fail("no such effect in the chain");
+        if (e.field < 0 || e.field >= static_cast<int>(FxField::Count)) return fail("unknown effect parameter");
+        if (!std::isfinite(e.value)) return fail("not a number");
+        Command c;
+        c.op = Op::FxUnitSet;
+        c.deck = static_cast<std::uint8_t>(t);
+        c.i = (e.field << 16) | e.id;
+        c.f = static_cast<float>(e.value);
+        c.d = e.value;
+        if (!push_cmd(c)) return fail("engine command queue full");
+        info_set(live.unit[i].info, static_cast<FxField>(e.field), e.value);
+        r.id = e.id;
+        r.info = model_info(live);
+        r.ok = true;
+        return true;
+      }
+      case FxChainVerb::SetChain: {
+        if ((e.field != 0 && e.field != 1) || !std::isfinite(e.value)) return fail("unknown chain parameter");
+        Command c;
+        c.op = Op::FxChainSet;
+        c.deck = static_cast<std::uint8_t>(t);
+        c.i = e.field;
+        c.f = static_cast<float>(e.value);
+        if (!push_cmd(c)) return fail("engine command queue full");
+        if (e.field == 0) live.bypass = e.value > 0.5;
+        else live.wet = std::clamp(static_cast<float>(e.value), 0.0f, 1.0f);
+        live.exists = live.exists || live.bypass || live.wet != 1.0f;
+        r.info = model_info(live);
+        r.ok = true;
+        return true;
+      }
+      default: return fail("unknown chain operation");
+    }
+    if (structural) {
+      auto* st = new FxChainState;
+      st->count = m.count;
+      m.rev = live.rev + 1;
+      st->rev = m.rev;
+      for (int i = 0; i < m.count; ++i) st->unit[i] = m.unit[i].ptr;
+      m.exists = true;
+      Command c;
+      c.op = Op::FxChainSwap;
+      c.deck = static_cast<std::uint8_t>(t);
+      c.chain = st;
+      if (!push_cmd(c)) {
+        delete st;
+        return fail("engine command queue full");
+      }
+      if (set_chain_after) {
+        Command b;
+        b.op = Op::FxChainSet;
+        b.deck = static_cast<std::uint8_t>(t);
+        b.i = 0;
+        b.f = m.bypass ? 1.0f : 0.0f;
+        push_cmd(b);
+        b.i = 1;
+        b.f = m.wet;
+        push_cmd(b);
+      }
+      live = m;
+    }
+    r.info = model_info(live);
+    r.ok = true;
+    return true;
+  }
+
+  // Op::FxSelect on a fixed slot: insert, replace or remove the unit tagged with that slot.
+  void legacy_select(const Command& c) {
+    if (!legacy_target(c.deck) || c.i < 0 || c.i >= kFxSlots) return;
+    int k = static_cast<int>(c.d);
+    EffectKind kind = k > 0 && k < static_cast<int>(EffectKind::Count) ? static_cast<EffectKind>(k) : EffectKind::None;
+    if (kind != EffectKind::None && effect_info(kind)->colour) kind = EffectKind::None;  // colour effects belong to Op::ColorFx
+    FxChainEdit e;
+    e.target = c.deck;
+    FxChainResult r;
+    int idx, pos = 0;
+    {
+      std::lock_guard<std::mutex> lk(chain_mx);
+      const ChainModel& m = models[c.deck];
+      idx = model_find_legacy(m, c.i);
+      if (idx >= 0) {
+        e.id = m.unit[idx].info.id;
+      } else {
+        for (int i = 0; i < m.count; ++i)
+          if (m.unit[i].info.legacy_slot >= 0 && m.unit[i].info.legacy_slot < c.i) pos = i + 1;
+      }
+    }
+    if (kind == EffectKind::None) {
+      if (idx < 0) return;
+      e.verb = FxChainVerb::Remove;
+    } else if (idx >= 0) {
+      e.verb = FxChainVerb::Replace;
+      e.kind = kind;
+    } else {
+      e.verb = FxChainVerb::Insert;
+      e.kind = kind;
+      e.pos = pos;
+    }
+    if (!chain_edit(e, r, c.i)) DH_LOG(Warn, "effect slot %d: %s", c.i + 1, r.error.c_str());
+  }
+  // FxEnable / FxWet / FxParam / FxTime on a fixed slot: keep the control-side description in step.
+  void legacy_update(const Command& c) {
+    if (!legacy_target(c.deck) || c.i < 0 || c.i >= kFxSlots) return;
+    std::lock_guard<std::mutex> lk(chain_mx);
+    ChainModel& m = models[c.deck];
+    const int i = model_find_legacy(m, c.i);
+    if (i < 0) return;
+    FxUnitInfo& u = m.unit[i].info;
+    switch (c.op) {
+      case Op::FxEnable: info_set(u, FxField::On, c.f > 0.5f ? 1 : 0); break;
+      case Op::FxWet: info_set(u, FxField::Wet, c.f); break;
+      case Op::FxParam: info_set(u, FxField::Param, c.f); break;
+      case Op::FxTime:
+        info_set(u, FxField::Beats, c.f);
+        info_set(u, FxField::Seconds, c.d > 0 ? c.d : 0);
+        break;
+      default: break;
+    }
   }
 
   void render(float* out, std::uint32_t frames, const float* mic_frames = nullptr) {
@@ -1978,10 +2347,32 @@ Engine::~Engine() {
   close_input();
   Command c;
   impl_->rec.abort();
+  std::unordered_set<FxUnit*> fx_units;
+  std::unordered_set<FxChainState*> fx_states;
   while (impl_->commands.pop(c)) {
     delete c.track;
     delete c.sample;
+    if (c.op == Op::FxChainSwap && c.chain) {
+      fx_states.insert(c.chain);
+      for (int i = 0; i < c.chain->count; ++i) fx_units.insert(c.chain->unit[i]);
+    }
   }
+  for (const FxChainRT& rt : impl_->chains) {
+    std::vector<FxUnit*> us;
+    std::vector<FxChainState*> ss;
+    rt.collect(us, ss);
+    fx_units.insert(us.begin(), us.end());
+    fx_states.insert(ss.begin(), ss.end());
+  }
+  {
+    FxGarbage g;
+    while (impl_->fx_garbage.pop(g)) {
+      if (g.unit) fx_units.insert(g.unit);
+      if (g.state) fx_states.insert(g.state);
+    }
+  }
+  for (FxUnit* u : fx_units) delete u;
+  for (FxChainState* st : fx_states) delete st;
   for (auto& sl : impl_->sampler_slots) delete sl.s;
   { LoadedSample* ls = nullptr; while (impl_->sample_garbage.pop(ls)) delete ls; }
   for (Deck& d : impl_->decks) delete d.trk;
@@ -2118,6 +2509,13 @@ int Engine::output_channels() const { return impl_->channels; }
 std::uint32_t Engine::sample_rate() const { return impl_->sr; }
 
 void Engine::send(const Command& c) {
+  if (c.op >= Op::FxSelect && c.op <= Op::FxParam) {  // the fixed slots are a view onto the default chain
+    if (c.op == Op::FxSelect) {
+      impl_->legacy_select(c);
+      return;
+    }
+    impl_->legacy_update(c);
+  }
   std::lock_guard<std::mutex> lock(impl_->send_mutex);
   if (!impl_->commands.push(c)) {
     DH_LOG(Warn, "engine command queue full; dropped a command");
@@ -2171,7 +2569,7 @@ std::uint64_t Engine::clock_at_wall(std::chrono::steady_clock::time_point t) con
 
 std::uint64_t Engine::schedule(const Command& c, const Schedule& when) {
   Impl& s = *impl_;
-  if (c.op == Op::Load || c.op == Op::SamplerLoad || c.op >= Op::SchedInsert || c.track || c.sample) return 0;
+  if (c.op == Op::Load || c.op == Op::SamplerLoad || c.op == Op::FxSelect || c.op >= Op::SchedInsert || c.track || c.sample) return 0;  // FxSelect is structural: it builds an effect and cannot run on the audio thread
   if (when.kind > ScheduleKind::DeckBeat) return 0;
   if (when.kind != ScheduleKind::ClockFrame && when.deck >= kMaxDecks) return 0;
   if (when.kind == ScheduleKind::DeckBeat && when.relative && !(when.beat > 0)) return 0;
@@ -2280,12 +2678,24 @@ DeckView Engine::deck(int index) const { return impl_->deck_views[std::clamp(ind
 MixerView Engine::mixer() const { return impl_->mixer_view.read(); }
 bool Engine::poll(EngineEvent& out) { return impl_->events.pop(out); }
 
+bool Engine::fx_chain_edit(const FxChainEdit& edit, FxChainResult& result) { return impl_->chain_edit(edit, result); }
+
+FxChainInfo Engine::fx_chain(int target) const {
+  if (!fx_target_valid(target)) return FxChainInfo{};
+  return impl_->chain_info(target);
+}
+
 void Engine::collect_garbage() {
   impl_->poll_input();
   LoadedTrack* t = nullptr;
   while (impl_->garbage.pop(t)) delete t;
   LoadedSample* ls = nullptr;
   while (impl_->sample_garbage.pop(ls)) delete ls;
+  FxGarbage g;
+  while (impl_->fx_garbage.pop(g)) {
+    delete g.unit;
+    delete g.state;
+  }
 }
 
 void Engine::configure_offline(std::uint32_t sample_rate, int channels) {
@@ -2375,5 +2785,85 @@ std::size_t Engine::feed_input(const float* interleaved_stereo, std::size_t fram
 
 void Engine::render_with_input(float* out, const float* in, std::uint32_t frames) { impl_->render(out, frames, in); }
 
+
+}  // namespace deckhand
+
+namespace deckhand {
+
+namespace {
+FxChainEdit edit_of(FxChainVerb v, int target) {
+  FxChainEdit e;
+  e.verb = v;
+  e.target = target;
+  return e;
+}
+}  // namespace
+
+int IEngine::fx_insert(int target, EffectKind kind, int pos, bool on) {
+  FxChainEdit e = edit_of(FxChainVerb::Insert, target);
+  e.kind = kind;
+  e.pos = pos;
+  e.value = on ? 1 : 0;
+  FxChainResult r;
+  return fx_chain_edit(e, r) ? r.id : 0;
+}
+bool IEngine::fx_remove(int target, int id) {
+  FxChainEdit e = edit_of(FxChainVerb::Remove, target);
+  e.id = id;
+  FxChainResult r;
+  return fx_chain_edit(e, r);
+}
+bool IEngine::fx_move(int target, int id, int pos) {
+  FxChainEdit e = edit_of(FxChainVerb::Move, target);
+  e.id = id;
+  e.pos = pos;
+  FxChainResult r;
+  return fx_chain_edit(e, r);
+}
+int IEngine::fx_replace(int target, int id, EffectKind kind) {
+  FxChainEdit e = edit_of(FxChainVerb::Replace, target);
+  e.id = id;
+  e.kind = kind;
+  FxChainResult r;
+  return fx_chain_edit(e, r) ? r.id : 0;
+}
+bool IEngine::fx_set(int target, int id, FxField field, double value) {
+  FxChainEdit e = edit_of(FxChainVerb::Set, target);
+  e.id = id;
+  e.field = static_cast<int>(field);
+  e.value = value;
+  FxChainResult r;
+  return fx_chain_edit(e, r);
+}
+bool IEngine::fx_chain_bypass(int target, bool bypass) {
+  FxChainEdit e = edit_of(FxChainVerb::SetChain, target);
+  e.field = 0;
+  e.value = bypass ? 1 : 0;
+  FxChainResult r;
+  return fx_chain_edit(e, r);
+}
+bool IEngine::fx_chain_wet(int target, double wet) {
+  FxChainEdit e = edit_of(FxChainVerb::SetChain, target);
+  e.field = 1;
+  e.value = wet;
+  FxChainResult r;
+  return fx_chain_edit(e, r);
+}
+bool IEngine::fx_chain_clear(int target) {
+  FxChainResult r;
+  return fx_chain_edit(edit_of(FxChainVerb::Clear, target), r);
+}
+std::string IEngine::fx_chain_save(int target) {
+  FxChainResult r;
+  return fx_chain_edit(edit_of(FxChainVerb::Save, target), r) ? r.text : std::string();
+}
+bool IEngine::fx_chain_load(int target, const std::string& json, std::string* error) {
+  FxChainEdit e = edit_of(FxChainVerb::Load, target);
+  e.text = json;
+  FxChainResult r;
+  const bool ok = fx_chain_edit(e, r);
+  if (error) *error = r.error;
+  return ok;
+}
 
 }  // namespace deckhand

@@ -32,7 +32,9 @@ static void test_backups() {
 #ifdef DECKHAND_VENDORED_SQLITE
     CHECK(lib.search_indexed());
 #endif
-    CHECK(s.step() && s.i64(0) == kLibrarySchemaVersion);
+    CHECK(s.step() && s.i64(0) == kLibrarySchemaVersion && kLibrarySchemaVersion == 6);
+    Stmt cols(lib.db(), "SELECT count(*) FROM pragma_table_info('tracks') WHERE name IN ('file_size', 'content_hash')");
+    CHECK(cols.step() && cols.i64(0) == 2);  // schema 6: duplicate finder columns
     if (!lib.search_indexed()) std::puts("note: this SQLite build has no FTS5; search index tests run on the fallback");
   }
   CHECK(library_backups(db).empty());  // a new library needs no copy

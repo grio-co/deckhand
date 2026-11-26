@@ -24,6 +24,7 @@
 #include "deckhand/app/capi.h"
 #include "deckhand/app/controls.hpp"
 #include "deckhand/app/keymap.hpp"
+#include "deckhand/app/stems_service.hpp"
 #include "deckhand/app/stream_bridge.hpp"
 #include "deckhand/audio/engine.hpp"
 #include "deckhand/audio/grid_edit.hpp"
@@ -242,6 +243,9 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   // For the API: the effective keymap as JSON, and replacing the user's overrides (a .dhkeys text; "" resets to the defaults).
   std::string keymap_json();
   bool keymap_set_user(const std::string& dhkeys_text, std::vector<std::string>& warnings, std::string& error);
+  std::string api_keymap_json() override { return keymap_json(); }
+  bool api_keymap_set(const std::string& t, std::vector<std::string>& w, std::string& e) override { return keymap_set_user(t, w, e); }
+  StemService* api_stems() override { return stems_.get(); }
   void open_file(const std::string& path, float x, float y);
   void audio_route() { audio_recheck_ = true; }
   const dh_frame* frame();
@@ -451,7 +455,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   Rect inner_rect() const;
 
   // ---- overlays (app_panels.cpp) ----------------------------------------------------
-  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart, Shortcuts };
+  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart, Shortcuts, Tools };
   bool overlay_open() const { return panel_ != Panel::None; }
   void open_panel(Panel p);
   void close_panel();
@@ -472,6 +476,8 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void draw_learn(const Rect& m);
   void draw_tags(const Rect& m);
   void draw_relink(const Rect& m);
+  void draw_tools(const Rect& m);  // app_tools.cpp: stem models, trash, edit history, duplicates
+  void tools_reload();
   void draw_export_menu(const Rect& m);
   void draw_add_menu(const Rect& m);
   void draw_cue_edit(const Rect& m);
@@ -547,6 +553,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::unique_ptr<HidIO> hid_;
   std::unique_ptr<HubApi> hub_;
   std::thread signal_thread_;
+  std::unique_ptr<StemService> stems_;  // before api_: the bridge is destroyed first
   std::unique_ptr<ApiBridge> api_;
   std::unique_ptr<StreamBridge> stream_;
   gfx::DrawList dl_;
@@ -694,6 +701,12 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   bool import_ok_ = false;
   float width_px_ = 1280, height_px_ = 800, scale_ = 1, inset_[4] = {0, 0, 0, 0};
   bool touch_ = false;
+  int tools_tab_ = 0, tools_dup_left_ = 0, tools_dup_confirm_ = -1;
+  std::vector<StemModelRow> tools_models_;
+  std::vector<DeletedTrack> tools_trash_;
+  std::vector<TrackEditRecord> tools_edits_;
+  std::vector<DuplicateGroup> tools_dups_;
+  std::string tools_licence_id_, tools_install_seen_;
   std::string status_note_;  // UI thread; shown via set_status on the next frame
   double now_ = 0;
   DeckView views_[kMaxDecks];

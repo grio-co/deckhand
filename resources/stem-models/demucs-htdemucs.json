@@ -1,0 +1,37 @@
+{
+ "format": "deckhand-stems-catalogue/1",
+ "id": "demucs-htdemucs",
+ "name": "Demucs v4 (htdemucs) - faster",
+ "kind": "demucs",
+ "summary": "Hybrid Transformer Demucs, one model. Four stems: vocals, drums, bass, other.",
+ "stems": [
+  "vocals",
+  "drums",
+  "bass",
+  "other"
+ ],
+ "quality": "Upstream README reports 9.00 dB SDR on MUSDB18-HQ for htdemucs.",
+ "speed": "One model pass per chunk: about four times faster than htdemucs_ft.",
+ "files": [
+  {
+   "name": "955717e8-8726e21a.th",
+   "url": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th",
+   "size": 84141911,
+   "sha256": "8726e21a993978c7ba086d3872e7608d7d5bfca646ca4aca459ffda844faa8b4"
+  }
+ ],
+ "licence": {
+  "summary": "The Demucs model weights are not covered by the MIT licence and are provided only for scientific purposes (statement by the Demucs author in the upstream issue tracker). They were trained on MUSDB18-HQ, which is academic-use data. You are responsible for checking that your use, including any paid performance or commercial use, is within those terms.",
+  "statement_source": "https://github.com/facebookresearch/demucs/issues/327",
+  "code_licence": "MIT",
+  "weights_licence": "research use only; not MIT; terms not otherwise published",
+  "restriction": "research-only",
+  "link": "https://github.com/facebookresearch/demucs/blob/main/LICENSE",
+  "training_data": "MUSDB18-HQ plus 800 additional licensed songs (upstream README)"
+ },
+ "upstream_url": "https://github.com/facebookresearch/demucs",
+ "install": {
+  "supported": true,
+  "note": "Downloads the checkpoint, converts it on this machine with the committed skeleton, deletes the download. Runs only in builds that include ONNX Runtime (stems_available())."
+ }
+}

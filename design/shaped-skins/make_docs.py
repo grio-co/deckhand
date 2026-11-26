@@ -1,0 +1,131 @@
+"""Generates notes.md per concept, README.md and index.html (standard library only)."""
+import os, html
+here = os.path.dirname(os.path.abspath(__file__))
+NEED = {
+ 'shaped_win': 'Per-window transparency with shaped hit-testing (alpha-based hit = alpha, cut-out holes such as handle gaps and reel spokes; docs/SKINS.md has the outline polygon, limit 256 points, but the shell still shows a rectangle)',
+ 'float_win': 'Multiple independent floating windows with remembered positions, optional snapping/docking to each other (browser, sampler, effects etc. are separate skin windows)',
+ 'drag': 'Drag-region declaration per window (move by the body or the grip motif; no title bar)',
+ 'ring_jog': 'Annular/round jog widget: ring hit-test, rotating position marker, progress arc, centre area that passes clicks to the waveform or text inside',
+ 'clip': 'Waveform, text and widget clipping to a circle or polygon (eye, lens, porthole) instead of a rectangle',
+ 'path_slider': 'Sliders and knob chains that travel along a bezier/arc path with matching hit-testing (tentacles, orbits, roots, crossfader smile)',
+ 'rot_widget': 'Rotated widgets (pads and buttons following a ring or a fan)',
+ 'arc_meter': 'Arc-shaped segmented meters bound to a level (beacon bulb, sun)',
+ 'state_swap': 'Two-state shell (closed/open) with animated transform of grouped widgets and swapping of window layouts',
+ 'compact': 'Compact/expanded window modes with remembered positions (switch between a tiny shell and the full skin, docks that appear on demand)',
+ 'edge': 'Screen-edge docking and auto-hide for a tall narrow window',
+}
+ALL = ['shaped_win', 'float_win', 'drag']
+C = [
+ dict(n='01', d='01-boombox', name='Boombox', style='Chunky chrome and graphite, carry handle, speaker cones', win='Boombox + cassette browser + tape-door sampler', dens='Medium', hard='Handle gap and annular jog', use=(4, 'big, familiar, labelled'), build=4, silh='Wide rounded body with an arched carry handle (see-through gap) and a telescopic antenna',
+  idea='A ghetto-blaster whose two speaker cones are the platters: the rubber surround is the jog ring, the dust cap shows deck letter and BPM. A tape-style display in the middle carries both waveforms, the mixer sits between the cones, and the browser is a floating cassette.',
+  rows=[('Left / right cone', 'Jog (surround ring with marker and progress arc), dust cap read-out'), ('Display (centre top)', 'Two stacked waveform lanes with cues and a shared playhead'), ('Top corners', 'Play / cue / sync, title, artist, BPM, key, time'), ('Cone sides', 'Tempo fader + range'),
+        ('Under cones', 'Loop in/out/size, 8 hot-cue pads in one row'), ('Centre column', 'Two channel strips (trim, EQ, filter, fader, meter, cue), master, headphone, master meter'), ('Base strip', 'Crossfader'), ('Floating cassette', 'Track browser'), ('Floating tape door', 'Sampler, REC, settings / skin / language')],
+  anim='Cones pump with the kick (scale 1.0 to 1.02 on beat); surround marker turns with the platter; antenna ball blinks on beat.',
+  float='Cassette (browser) and tape-door (sampler, REC, app buttons) float below; status pill.', shapes='Browser: cassette with screws and a trapezoid base. Sampler: cassette-door plate.',
+  needs=['shaped_win', 'float_win', 'drag', 'ring_jog', 'clip'], extra='Handle gap needs a hole in the window shape.', hardu='Easier: large familiar layout, everything labelled. Harder: wide (1460 px) body.'),
+ dict(n='02', d='02-octopus', name='Octopus', style='Bioluminescent deep-sea purple, glowing eyes', win='Octopus + clam browser + bubble sampler', dens='Dense, organic', hard='Path sliders on tapered tentacles', use=(2, 'curved faders and knob chains are unusual to read'), build=2, silh='Mantle dome with two eyes and eight tapering tentacles curling downward',
+  idea='The two eyes are the decks (jog ring around a read-out), a brow-plate carries both waveforms in stacked lanes, and the tentacles are the controls: the outer pair are tempo sliders, the next pair carry the EQ knobs strung along them, the third pair are curved channel faders, and the inner pair hold loop buttons like suckers.',
+  rows=[('Eyes', 'Jog ring and deck read-out (title, BPM, key, time)'), ('Brow', 'Stacked A / B waveforms with cue flags and playhead'), ('Under the eyes', 'Hot-cue pads, play / cue / sync'), ('Funnel (centre)', 'Master, headphone level, headphone mix, master meter'),
+        ('Tentacles 1 / 8', 'Tempo path sliders + range'), ('Tentacles 2 / 7', 'Trim, high, mid, low, filter knobs along the path'), ('Tentacles 3 / 6', 'Channel fader (path), meter, cue'), ('Tentacles 4 / 5', 'Loop in/out/size buttons'), ('Beak smile', 'Crossfader on a curved path'),
+        ('Floating clam', 'Track browser'), ('Floating bubbles', 'Sampler, settings / skin / language')],
+  anim='Tentacles sway on a slow sine, tips curl on the beat, eyes pulse with channel level, bubbles drift up.',
+  float='Clam-shell browser and a bubble cluster with the sampler.', shapes='Browser: scalloped clam. Sampler: three translucent bubbles.',
+  needs=['shaped_win', 'float_win', 'drag', 'ring_jog', 'clip', 'path_slider'], extra='Tapered tentacle art can be sprites; sliders need path hit-testing.', hardu='Harder: faders curve and EQ knobs are spread out; pads are far from the transport. Easier: eyes are huge targets.'),
+ dict(n='03', d='03-scarab', name='Scarab (closed / open)', style='Iridescent beetle shell, gold trim', win='Open beetle + closed compact form + dung-ball browser', dens='Dense when open', hard='Closed / open shell states', use=(3, 'wide shells, two states to learn'), build=3, silh='Beetle seen from above with two huge elytra swung open, head, legs; closed form is a single oval',
+  idea='A scarab whose wing cases open to reveal the mixer: open, each elytra is a deck (jog, waveform, pads, loops, transport, tempo) and the abdomen between them is the mixer; closed, the shell shrinks to a compact two-deck player. Both states are drawn in the mockup; the browser is a rolling dung ball.',
+  rows=[('Left elytra / right elytra (open)', 'Jog, read-out, waveform lane, 8 hot-cue pads, loop in/out/size, transport, tempo + range'), ('Pronotum (shield)', 'Master, headphone level / mix, master meter, mic'), ('Abdomen', 'Two channel strips, crossfader, REC, sampler pads, settings / skin / language'),
+        ('Closed shell (floating)', 'Mini waveform and play / cue for each deck, crossfader, OPEN hinge'), ('Dung ball (floating)', 'Track browser')],
+  anim='Elytra swing from 0 to about 70 degrees about the hinge when OPEN is pressed (container rotate with children); closed shell breathes; wing shine sweeps on beat.',
+  float='Closed compact beetle (alternate state of the main window) and a circular dung-ball browser.', shapes='Browser: round ball. Closed state: single oval with seam.',
+  needs=['shaped_win', 'float_win', 'drag', 'ring_jog', 'clip', 'state_swap', 'compact'], extra='Two layouts of the same skin window with an animated transition.', hardu='Easier: very large jogs and pads. Harder: wide when open and the mixer is far from the transport.'),
+ dict(n='04', d='04-reel-to-reel', name='Reel-to-Reel', style='Champagne metal and black faceplate, analogue tape', win='Tape machine + tape-box browser + tape-loop cartridge', dens='Medium', hard='Reels with see-through spokes', use=(4, 'conventional plinth, big reels'), build=4, silh='Two huge reels flanking a head tower over a plinth with feet',
+  idea='Each deck is a reel: the hub is the jog and read-out, the rim carries a position arc, and the visible tape pack shrinks as the track plays. The tower between the reels is the tape head with both waveforms as two tape runs; the plinth holds the mixer and per-deck controls.',
+  rows=[('Reels', 'Jog hub with marker, title / BPM / time, rim position arc, tape-pack remaining time'), ('Head tower window', 'Two waveform runs A / B, playhead on the head'), ('Tower top', 'Master, headphone, master meter'), ('Plinth left / right', 'Tempo, 8 hot-cue pads, transport, loop in/out/size'),
+        ('Plinth centre', 'Two channel rows, crossfader, mic, REC'), ('Floating tape box', 'Track browser'), ('Floating tape-loop cartridge', 'Sampler, settings / skin / language')],
+  anim='Reels turn with the platter, the pack radius follows remaining time, VU-lit master meter.',
+  float='Tape-box browser and a stadium-shaped tape-loop cartridge.', shapes='Browser: tape box with flap. Sampler: stadium cartridge with hubs.',
+  needs=['shaped_win', 'float_win', 'drag', 'ring_jog', 'clip'], extra='Spoke cut-outs are holes in the reel sprite.', hardu='Easier: plinth is a conventional layout. Harder: the waveform window is small and the reels cover the corners.'),
+ dict(n='05', d='05-satellite', name='Satellite', style='Gold foil, silver hub, blue solar cells, space', win='Satellite + solar-array browser + probe-pod sampler', dens='Medium, clean', hard='Almost none (chamfered panels)', use=(4, 'clear regions, wide spacing'), build=5, silh='Central hub with antenna and two chamfered solar wings on truss arms',
+  idea='A satellite: the two solar wings are the decks (jog, pads, loops, transport, tempo) and the hub between them is the mixer with the shared waveform display on top. A detached solar array is the browser and a probe pod holds the sampler.',
+  rows=[('Left / right solar wing', 'Jog + read-out, 8 pads, loop in/out/size, key shift, transport, tempo + range'), ('Hub display', 'Two stacked waveforms'), ('Hub body', 'Two channel strips, master, headphone, master meter, crossfader'), ('Under the hub', 'Mic, REC'),
+        ('Floating solar array', 'Track browser'), ('Floating probe pod', 'Sampler, settings / skin / language')],
+  anim='Wings tilt a few degrees toward the louder deck, antenna LED blinks on beat, cell grid shimmers.',
+  float='Solar-array browser on hinge arms and a rounded probe pod.', shapes='Browser: tilted solar panel. Sampler: rounded-square pod with porthole.',
+  needs=['shaped_win', 'float_win', 'drag', 'ring_jog', 'clip'], extra='Mostly rectangles with chamfered corners: closest to the default skin.', hardu='Easier: every block has plenty of room. Harder: wide (1480 px) spread.'),
+ dict(n='06', d='06-spectacles', name='Spectacles', style='Tortoiseshell frames and gold rims, retro optics', win='Glasses + case browser + lens-cloth tray', dens='Medium', hard='Round lens clipping', use=(3, 'arms are narrow, bridge mixer is tall'), build=4, silh='Two round lenses joined by a tall bridge plate, vertical temple arms and bifocal tabs',
+  idea='Twin round lenses are the platters (rim = jog, glass = waveform and read-out) and the tall bridge between them is the mixer. Bifocal tabs below each lens hold pads, loops and transport; the temple arms are vertical tempo sliders.',
+  rows=[('Lenses', 'Jog rim, waveform with cues, title, artist, BPM, key, time, remaining'), ('Bridge', 'Two channel strips, master, headphone, meter, crossfader, mic'), ('Bifocal tabs', '8 hot-cue pads, loop in/out/size, key shift, transport'), ('Temple arms', 'Tempo + range'),
+        ('Floating case', 'Track browser'), ('Floating lens-cloth tray', 'Sampler, REC, settings / skin / language')],
+  anim='Lens glints sweep on beat, rims rotate with the platter, bridge LEDs follow channel level.',
+  float='Glasses case (browser) and a wavy-edged cloth tray.', shapes='Browser: hard case with strap. Tray: wavy-edged cloth.',
+  needs=['shaped_win', 'float_win', 'drag', 'ring_jog', 'clip'], extra='Lens shapes are two circles plus rectangles.', hardu='Easier: huge round waveform with read-out inside. Harder: mixer is a tall narrow strip in the middle.'),
+ dict(n='07', d='07-orrery', name='Orrery', style='Brass instrument, graduated ring, starry dome', win='Circular dome + scroll browser + hex sampler', dens='Dense, concentric', hard='Polar placement and arc sliders', use=(3, 'rotated pads and curved sliders need learning'), build=2, silh='A single big brass ring (the only circular main window of the set)',
+  idea='A brass orrery: the sun is the master with an arc meter, two planets are the decks, hot-cue pads ride the outer ring turned to follow it, EQ knobs orbit above each planet and the channel faders and tempo sliders are arcs. The crossfader is the lower orbit.',
+  rows=[('Planets', 'Jog ring, waveform lane, title, BPM, time'), ('Orbit above each planet', 'Trim, high, mid, low, filter knobs'), ('Arc on the sun side', 'Channel fader, meter, cue'), ('Arc below the planet', 'Tempo + range'), ('Outer ring', '8 hot-cue pads per deck (rotated along the ring)'),
+        ('Sun', 'Master, arc meter, headphone level / mix'), ('Lower orbit', 'Crossfader on an arc'), ('Dome base', 'Transport, loop, mic, REC'), ('Floating scroll', 'Track browser'), ('Floating hex tile', 'Sampler, settings / skin / language')],
+  anim='Planets rotate slowly with the platter, outer ring ticks scroll with the beat, sun arc follows the master level.',
+  float='Scroll browser with brass rollers and a hexagonal sampler tile.', shapes='Browser: scroll. Sampler: hexagon.',
+  needs=['shaped_win', 'float_win', 'drag', 'ring_jog', 'clip', 'path_slider', 'rot_widget', 'arc_meter'], extra='Pad ring is eight rotated buttons per deck.', hardu='Harder: sliders are arcs and pads are rotated. Easier: concentric grouping is easy to learn and the dome is one compact shape.'),
+ dict(n='08', d='08-lighthouse', name='Lighthouse (tall and narrow)', style='Stripe-painted tower, beacon, harbour', win='Tower (640 x 1950) + boat browser', dens='Dense, vertical', hard='Edge docking', use=(3, 'long vertical travel but never wide'), build=4, silh='Tall narrow tower (about 4.6 wide to 1 high) for the screen edge, with a gallery and a lantern',
+  idea='A lighthouse designed to live at a screen edge: the lantern is the master with a beacon-bulb arc meter, then deck A, the mixer, deck B and a door at the base, stacked top to bottom. A sailing boat floats beside it as the browser with the sampler on its sail.',
+  rows=[('Lantern', 'Beacon arc meter, master knob, headphone level / mix'), ('Gallery', 'Mic, talk, level'), ('Deck A section', 'Waveform, jog read-out, tempo, transport, 8 pads, loop, key shift'), ('Mixer section', 'Two channel strips, channel meters, crossfader'), ('Deck B section', 'Same as deck A'),
+        ('Door', 'REC, settings / skin / language'), ('Floating boat', 'Track browser'), ('Floating sail', 'Sampler')],
+  anim='Beam sweeps with the beat, bulb ring follows master level, waves lap under the boat.',
+  float='A boat (browser hull, sampler on the sail) and a status pill.', shapes='Browser: hull. Sampler: sail triangle.',
+  needs=['shaped_win', 'float_win', 'drag', 'ring_jog', 'arc_meter', 'edge'], extra='Tower is rectangles; edge docking and auto-hide are the real requirement.', hardu='Easier: one narrow column, little pointer travel horizontally. Harder: decks stack, so waveforms cannot be compared side by side.'),
+ dict(n='09', d='09-pebble', name='Pebble (compact pocket mode)', style='Soft stone, two accent colours', win='Pebble (740 x 330) + hot-cue dock + loop dock + mix dock + picker', dens='Minimal', hard='Compact/expanded mode switch', use=(3, 'tiny at 1x by design, extras live in docks'), build=5, silh='A smooth pebble with a thumb dent, small enough for a screen corner',
+  idea='An extremely compact two-deck player: two mini platters with play inside, a two-lane waveform, BPMs, crossfader and cue / sync, all at 1x with 28 px minimum targets. Everything else (hot cues, loops, EQ and faders, browser) lives in small docks that appear on demand beside it.',
+  rows=[('Mini platters', 'Jog (ring marker) with play'), ('Under platters', 'Cue, sync per deck'), ('Centre', 'Two waveform lanes, both BPMs, crossfader, master and headphone knobs, EXPAND'), ('Hot-cue dock (floating)', '4 pads per deck'),
+        ('Loop dock (floating)', 'Loop in/out/size and tempo nudge'), ('Mix dock (floating)', 'Trim, EQ, filter, channel fader, meter, cue per channel'), ('Picker (floating)', 'Search and track list')],
+  anim='Platters tick, thumb dent glows with the beat, docks slide out from the pebble edge.',
+  float='Four docks: hot-cue pill, loop pill, mix dock and track picker.', shapes='All pill-shaped, same stone material, each with grip dots.',
+  needs=['shaped_win', 'float_win', 'drag', 'ring_jog', 'compact'], extra='Mini mode and the full skin share bindings; the docks are normal skin windows.', hardu='Easier to park in a corner and glance at. Harder: no pads or EQ on the pebble itself, small targets.'),
+ dict(n='10', d='10-mushrooms', name='Mushroom Cluster', style='Spotted toadstools on a mossy mound', win='Three mushrooms + bracket-fungus browser + spore sampler', dens='Dense, organic', hard='Fan of rotated gill pads, root slider', use=(2, 'organic spacing, rotated pads'), build=2, silh='Two big caps with a small purple cap between them, flared stems, mossy ground',
+  idea='Two big toadstools are the decks: the cap face holds the platter, title and waveform, and the gills underneath fan out as the eight hot-cue pads. Stems carry transport, loops and tempo; the small purple mushroom in between is the mixer, and the crossfader runs along the roots.',
+  rows=[('Big caps', 'Jog, BPM, key, time, title, artist, waveform lane'), ('Gills', '8 hot-cue pads per deck (fan, rotated)'), ('Stems', 'Transport, key shift, loop, key lock / quantise / slip / reverse, pad modes, tempo + range'), ('Small cap', 'Master, headphone, level meter'),
+        ('Small stem', 'Two channel strips with EQ, faders, meters, cue'), ('Roots', 'Crossfader on a curve'), ('Floating bracket fungus', 'Track browser'), ('Floating spore cluster', 'Sampler, settings / skin / language')],
+  anim='Caps squash on the kick, spores drift from the gills, stem rings glow with channel level.',
+  float='A bracket-fungus shelf (browser) and a spore-bubble cluster (sampler).', shapes='Browser: half-moon bracket fungus. Sampler: translucent spore bubbles.',
+  needs=['shaped_win', 'float_win', 'drag', 'ring_jog', 'clip', 'path_slider', 'rot_widget'], extra='Cap domes with a scalloped underside are sprites with alpha hit-testing.', hardu='Harder: pads are fanned and rotated, controls spread over stems. Easier: giant caps and clear colour coding.'),
+ dict(n='11', d='11-owl', name='Predator Owl', style='Night/ember owl (plus an ice palette), glowing eyes, feather buttons', win='Owl + perch browser + shed-feather FX + pellet sampler', dens='Dense', hard='Alpha hit-testing of feather and talon shapes', use=(3, 'feather pads are big but fanned and tilted'), build=2, silh='Head-on bird of prey with ear tufts, spread wings with fanned primaries, and talons reaching down',
+  idea='A menacing owl mid-strike: heavy angled brow slabs carry the deck read-outs, two enormous glowing eyes are the decks (iris = jog ring, pupil = centre, one waveform band running through both eyes), the hooked beak holds the master knob, the chest is the mixer, the spread wings carry rows of feather-shaped buttons, and each foot is a set of four talon-toes for load, sync, play and cue.',
+  rows=[('Eyes', 'Jog (glowing iris ring with marker and progress arc), BPM, key, time, remaining, waveform band through both eyes with cues and playheads'), ('Brow slabs', 'Title and artist per deck'), ('Beak', 'Master knob; headphone level / mix beside it'),
+        ('Upper chest', 'Crossfader'), ('Chest', 'Two channel strips (trim, EQ, filter, fader, meters, cue) and master meter'), ('Primaries (8 per wing)', 'Hot-cue pads as feather-shaped buttons'), ('Coverts / leading edge', 'Tempo slider along the leading edge, range, loop in/out/size, beat jump, key shift'),
+        ('Talons (each foot)', 'Load, sync, play, cue as four big toes'), ('Floating perch', 'Track browser'), ('Floating shed feather', 'Effects: three slots per deck'), ('Floating pellet', 'Sampler, settings / skin / language')],
+  anim='Eyes glow with channel level and the pupils dilate on the kick; primaries flare slightly on pad hits; claws flex on transport press; ear tufts twitch on beat.',
+  float='Perch branch (browser), shed feather (effects) and a pellet (sampler); status pill.', shapes='Browser: log with end rings. Effects: shed feather. Sampler: pellet oval. Ice palette is in mockup-ice.png.',
+  needs=['shaped_win', 'float_win', 'drag', 'ring_jog', 'clip', 'path_slider', 'rot_widget'], extra='Feather and talon buttons are rotated shaped widgets with alpha hit-testing; gaps between flight feathers are transparent.', hardu='Easier: talon transport and feather pads are huge. Harder: fanned, tilted pads and a wide wingspan; tempo sliders are curved.'),
+]
+def needs_md(c):
+    return '\n'.join('- ' + NEED[k] for k in c['needs']) + '\n- Concept-specific: ' + c['extra']
+for c in C:
+    t = '# %s\n\n**Idea.** %s\n\n**Silhouette:** %s. **Style:** %s. **Windows:** %s.\n\n## Control map\n| Part | Controls |\n|---|---|\n%s\n\n**Animates.** %s\n\n## Windows\n%s Shapes: %s\nEverything outside the silhouette is transparent (`mockup-transparent.png`; `mockup.png` shows it over a wallpaper).\n\n## How it would be built with the skin engine\nOne main skin window with a `shape` outline (alpha/outline hit-testing), art as sprites in an atlas, widgets (`jog`, `waveform`, `pads`, `knob`, `fader`, `meter`, `browser`) placed with `free` anchors; each floating module is its own `window`. Buildability today: %d/5 (5 = easiest).\n\n## Engine needs (today it lacks)\n%s\n\n## Usability\n%s\n' % (
+        c['name'], c['idea'], c['silh'], c['style'], c['win'], '\n'.join('| %s | %s |' % r for r in c['rows']), c['anim'], c['float'], c['shapes'], c['build'], needs_md(c), c['hardu'])
+    open(os.path.join(here, c['d'], 'notes.md'), 'w').write(t)
+cnt = {}
+for c in C:
+    for k in c['needs']:
+        cnt[k] = cnt.get(k, 0) + 1
+order = ALL + [k for k in sorted(cnt, key=lambda k: (-cnt[k], list(NEED).index(k))) if k not in ALL]
+needs_list = '\n'.join('%d. %s - %d of 11' % (i + 1, NEED[k], cnt[k]) for i, k in enumerate(order))
+byb = sorted(C, key=lambda c: -c['build'])
+R = '# DeckHand shaped skins: eleven non-skull concepts\n\nEvery mockup is the main player as one shaped window on a transparent canvas (`mockup-transparent.png`; `mockup.png` is the same over a wallpaper), with the browser, sampler and other modules as separate floating windows in the same theme and a grip motif. All art is original and generated by `NN-name/make.py` with the shared `lib.py` (standard library; rendered with headless Chrome).\n\n'
+for c in C:
+    R += '## %s %s\n%s Silhouette: %s. Floating: %s Usability %d/5, buildability %d/5.\n\n' % (c['n'], c['name'], c['idea'], c['silh'], c['float'], c['use'][0], c['build'])
+R += '## Most buildable with the current engine\n' + ', '.join('%s %s (%d/5)' % (c['n'], c['name'], c['build']) for c in byb[:4]) + ' - mostly chamfered rectangles, rings and standard widgets; 07, 02 and 10 depend on path sliders and rotated widgets.\n\n## Consolidated engine needs, by how many concepts need them\n' + needs_list + '\n'
+open(os.path.join(here, 'README.md'), 'w').write(R)
+def tr(c):
+    return '<tr><td>%s %s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%d/5 %s</td><td>%d/5</td></tr>' % (c['n'], html.escape(c['name']), html.escape(c['silh']), html.escape(c['win']), c['dens'], html.escape(c['style']), html.escape(c['hard']), c['use'][0], html.escape(c['use'][1]), c['build'])
+secs = ''.join('<section id="c%s"><h2>%s %s</h2><img src="%s/mockup.png" alt="%s"><p>%s</p><div class="cols"><div><h3>Control map</h3><table class="m"><tr><th>Part</th><th>Controls</th></tr>%s</table></div><div><h3>Floating windows</h3><p>%s %s</p><h3>Animates</h3><p>%s</p><h3>Engine needs</h3><ul>%s</ul><h3>Usability</h3><p>%s</p><p><a href="%s/mockup-transparent.png">transparent PNG</a> &middot; <a href="%s/notes.md">notes</a></p></div></div></section>' % (
+    c['n'], c['n'], html.escape(c['name']), c['d'], html.escape(c['name']), html.escape(c['idea']), ''.join('<tr><td>%s</td><td>%s</td></tr>' % (html.escape(a), html.escape(b)) for a, b in c['rows']), html.escape(c['float']), html.escape(c['shapes']), html.escape(c['anim']),
+    ''.join('<li>%s</li>' % html.escape(NEED[k]) for k in c['needs']) + '<li>%s</li>' % html.escape(c['extra']), html.escape(c['hardu']), c['d'], c['d']) for c in C)
+page = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DeckHand shaped skins</title><style>
+:root{--bg:#f4f4f6;--fg:#15161a;--card:#fff;--line:#d5d6dc;--acc:#0a6cff}
+@media(prefers-color-scheme:dark){:root{--bg:#14161b;--fg:#e8e9ee;--card:#1d2027;--line:#343842;--acc:#5aa2ff}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,Helvetica,Arial,sans-serif}main{max-width:1280px;margin:0 auto;padding:24px 16px}
+table{border-collapse:collapse;width:100%;background:var(--card)}th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top;font-size:13px}
+section{background:var(--card);border:1px solid var(--line);border-radius:12px;margin:28px 0;padding:16px}section img{width:100%;max-width:800px;display:block;margin:0 auto;border-radius:8px}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:20px}@media(max-width:900px){.cols{grid-template-columns:1fr}}.m td:first-child{white-space:nowrap;font-weight:600}h3{margin:12px 0 4px;font-size:14px}a{color:var(--acc)}
+</style></head><body><main><h1>DeckHand shaped skins</h1><p>Eleven non-skull directions. Each player is one shaped, transparent window (shown over a wallpaper); the browser, sampler and other modules float separately. <a href="contact-sheet.png">Contact sheet</a>.</p><h2>Comparison</h2><table><tr><th>Concept</th><th>Silhouette</th><th>Windows</th><th>Density</th><th>Style</th><th>Hardest engine requirement</th><th>Usability</th><th>Buildable now</th></tr>''' + ''.join(tr(c) for c in C) + '</table><p><b>Every concept needs, first:</b> ' + '; '.join(html.escape(NEED[k]) for k in ALL) + '.</p>' + secs + '<h2>Consolidated engine needs</h2><ol>' + ''.join('<li>%s (%d of 11)</li>' % (html.escape(NEED[k]), cnt[k]) for k in order) + '</ol></main></body></html>'
+open(os.path.join(here, 'index.html'), 'w').write(page)
+print('docs ok')

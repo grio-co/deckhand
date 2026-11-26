@@ -109,6 +109,11 @@ App::App(const dh_platform& platform, const dh_config& config)
     post(j);
   }
 
+  stems_ = std::make_unique<StemService>(data_dir_, resource_dir_, [this] {
+    for (int i = 0; i < kMaxDecks; ++i)
+      if (engine_->deck(i).playing) return true;
+    return false;
+  });
   api_ = std::make_unique<ApiBridge>(*this, data_dir_);
   stream_ = std::make_unique<StreamBridge>(*engine_, data_dir_, [this](int deck, TrackRow& row) {
     std::lock_guard<std::mutex> lock(state_mutex_);
@@ -133,6 +138,7 @@ App::App(const dh_platform& platform, const dh_config& config)
 
 App::~App() {
   api_.reset();  // stop outside callers first
+  stems_.reset();
   stream_.reset();
   quit_ = true;
   job_cv_.notify_all();
@@ -566,10 +572,18 @@ void App::run_job(Library& lib, const Job& j) {
     case Job::ClearHotCue: lib.clear_hot_cue(j.track_id, j.slot); break;
     case Job::SaveGrid:
       if (j.ms >= 0) {  // an edited grid: sections, the track's tempo, and the lock that keeps analysis away from it
-        lib.replace_beatgrid(j.track_id, j.grid);
-        lib.set_bpm(j.track_id, j.ms);
+        // One journal batch (undoable) for grid, tempo and lock. Cues are only proposed here (setting cues_follow_grid:
+        // ask | always | never): moving them needs the API call (POST .../cues/follow-grid) until the panel has a confirm.
+        const CueFollow mode = cue_follow_from(lib.setting("cues_follow_grid", "ask"));
+        const GridCommit c = lib.commit_grid(j.track_id, j.grid, j.ms, j.flag, mode == CueFollow::Never ? CueFollow::Never : CueFollow::Ask);
+        if (!c.proposal.moves.empty()) {
+          lib.set_setting("cues_follow_pending", std::to_string(j.track_id) + ":" + std::to_string(c.batch_id));
+          set_status(std::to_string(c.proposal.moves.size()) + " cues sit on the old grid; move them with the cues/follow-grid API call (edit batch " +
+                     std::to_string(c.batch_id) + ")");
+        }
+      } else {
+        lib.set_grid_locked(j.track_id, j.flag);
       }
-      lib.set_grid_locked(j.track_id, j.flag);
       break;
     case Job::SaveMemCues: lib.replace_memory_cues(j.track_id, j.cues); break;
     case Job::SaveHotStyle: {
@@ -610,6 +624,8 @@ void App::run_job(Library& lib, const Job& j) {
       }
       if (!ok) set_status(T("status.export_failed", {{"message", error}}));
       else if (res.missing_files) set_status(T("status.exported_missing", {{"tracks", res.tracks}, {"playlists", res.playlists}, {"missing", res.missing_files}}));
+      else if (res.converted > 0 || res.remaining_will_not_play > 0)
+        set_status(T("status.exported_report", {{"tracks", res.tracks}, {"converted", res.converted}, {"remaining", res.remaining_will_not_play}, {"path", j.path}}));
       else set_status(T("status.exported", {{"tracks", res.tracks}, {"playlists", res.playlists}, {"path", j.path}}));
       break;
     }

@@ -95,10 +95,27 @@ info:
     | `reverse` | toggle | 0/1 | Play backwards |
     | `color_fx` | value | 0 filter, 1 noise, 2 dub echo, 3 crush, 4 pitch, 5 space | Effect on the filter knob |
     | `auto_gain` | value | dB, -24..12 | Loudness trim |
-    | `fx<1..3>.select` | value | effect number 0..14 from `GET /v1/effects` (0 none; colour effects refused) | Choose effect |
+    | `fx<1..3>.select` | value | effect number 0..Count-1 from `GET /v1/effects` (0 none; colour effects refused). Choosing an effect builds it, so it cannot be scheduled (400) | Choose effect |
     | `fx<1..3>.on` | toggle | 0/1 | Effect on |
     | `fx<1..3>.wet` / `.param` | value | 0..1 | Level / effect parameter |
     | `fx<1..3>.time` | value | beats 0.0625..16 | Beat-synced time |
+
+    Effect chain controls (protocol 5): `<target>.chain.<verb>[.<n>]`, `<target>` = `deck1`..`deck4`, `mixer` (master),
+    `mic`, `sampler` or `deckN.stemM`. Applied at once, never scheduled (400). `<id>` is a unit id from `GET /v1/fx/chains/{target}`.
+
+    | Chain control | Kind | Value | Purpose |
+    |---|---|---|---|
+    | `insert` / `insert.<pos>` / `insert_on[.<pos>]` | value | effect number 1.. | Add a unit (at 0-based `pos`, default the end); `insert_on` starts it on. The reply has the new `id` |
+    | `remove.<id>` | trigger | none | Remove a unit (delay and reverb tails ring out) |
+    | `move.<id>` | value | new index | Move a unit |
+    | `replace.<id>` | value | effect number 1.. | Replace the effect, keeping place, id and on-state |
+    | `unit.on.<id>` | toggle | 0/1 | Unit on |
+    | `unit.wet.<id>` / `unit.param.<id>` / `unit.param2.<id>` / `unit.param3.<id>` | value | 0..1 | Unit parameters (names in `GET /v1/effects`) |
+    | `unit.beats.<id>` / `unit.seconds.<id>` | value | beats 0.0625..64 / seconds 0..60 (0 = use beats) | Unit time |
+    | `bypass` / `wet` | toggle / value | 0/1 / 0..1 | Whole chain bypass / chain wet-dry |
+    | `clear` | trigger | none | Remove every unit |
+    | `save` | trigger | none | The reply holds the chain preset in `preset` |
+    | `load` | trigger | body `text` = preset JSON | Replace the chain with a preset |
 
     | Mixer control | Kind | Value | Purpose |
     |---|---|---|---|
@@ -159,7 +176,8 @@ info:
     - `events`: discrete events, each an object with a `type`:
       `deck.loaded` and `deck.unloaded` (track changed), `deck.play` and `deck.pause`, each with
       `deck` set to a full `Deck` object; and `scheduled` with `scheduled_id`, `control`, `ok` and, on failure,
-      `error`, emitted when a scheduled command fires.
+      `error`, emitted when a scheduled command fires; `stems.install` (`model`, `state` running / done / failed /
+      cancelled, `progress` 0..1, `error`) and `stems.job` (`job`, `state`, `progress`, `error`) for stem separation.
 servers:
   - url: http://127.0.0.1:7373
     description: Default local server (plain HTTP, loopback only)
@@ -176,6 +194,8 @@ tags:
   - {name: Preparation, description: Beat grid editing, cues, saved loops and hot cue names / colours of the loaded track.}
   - {name: Preview, description: Pre-listen in the headphones without loading a deck.}
   - {name: Mixer}
+  - {name: Effect chains, description: "Ordered effect units per deck, master, microphone, sampler or stem."}
+  - {name: Stems, description: "Offline stem separation: models, queue and cache."}
   - {name: Controls}
   - {name: Schedule}
   - {name: Effects}
@@ -614,6 +634,341 @@ paths:
                 items: {$ref: "#/components/schemas/Effect"}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/fx/chains/{target}:
+    get:
+      tags: [Effect chains]
+      operationId: getFxChain
+      summary: An effect chain
+      description: |
+        Required scope: `read`. `target` is deck1..deck4, master, mic, sampler or deckN.stemM (M 1..8). Units are in processing order; `id` is stable for the life of the unit.
+      x-scope: read
+      parameters:
+        - {$ref: "#/components/parameters/FxTarget"}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/fx/chains/{target}/units:
+    post:
+      tags: [Effect chains]
+      operationId: insertFxUnit
+      summary: Add an effect unit
+      description: |
+        Required scope: `control:fx:{target}` (`control` covers it). Body: `effect` (slug or number from `GET /v1/effects`), optional `pos` (0-based, default the end) and `on`. Replies 201 with the chain and the new `id`; 409 when the chain is full (8 units) or the engine refuses.
+      x-scope: control:fx:{target}
+      parameters:
+        - {$ref: "#/components/parameters/FxTarget"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {effect: ping_pong, pos: 0, on: true}
+      responses:
+        "201": {description: Unit added, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/fx/chains/{target}/units/{id}:
+    patch:
+      tags: [Effect chains]
+      operationId: editFxUnit
+      summary: Change an effect unit
+      description: |
+        Required scope: `control:fx:{target}`. Any of `on`, `wet`, `param`, `param2`, `param3` (0..1), `beats` (0.0625..64), `seconds` (0..60, 0 = use beats) and `effect` (replaces the effect, resetting the other fields first). Replies with the chain.
+      x-scope: control:fx:{target}
+      parameters:
+        - {$ref: "#/components/parameters/FxTarget"}
+        - {name: id, in: path, required: true, description: Unit id from the chain., schema: {type: integer, minimum: 1}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {on: true, wet: 0.4, param: 0.7}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Effect chains]
+      operationId: removeFxUnit
+      summary: Remove an effect unit
+      description: |
+        Required scope: `control:fx:{target}`.
+      x-scope: control:fx:{target}
+      parameters:
+        - {$ref: "#/components/parameters/FxTarget"}
+        - {name: id, in: path, required: true, description: Unit id from the chain., schema: {type: integer, minimum: 1}}
+      responses:
+        "204": {description: Done.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/fx/chains/{target}/units/{id}/move:
+    post:
+      tags: [Effect chains]
+      operationId: moveFxUnit
+      summary: Move an effect unit
+      description: |
+        Required scope: `control:fx:{target}`. Body: `pos`, the new 0-based index (clamped).
+      x-scope: control:fx:{target}
+      parameters:
+        - {$ref: "#/components/parameters/FxTarget"}
+        - {name: id, in: path, required: true, description: Unit id from the chain., schema: {type: integer, minimum: 1}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {pos: 0}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/fx/chains/{target}/settings:
+    put:
+      tags: [Effect chains]
+      operationId: setFxChainSettings
+      summary: Chain bypass and wet / dry
+      description: |
+        Required scope: `control:fx:{target}`. Body: `bypass` (boolean) and/or `wet` (0..1).
+      x-scope: control:fx:{target}
+      parameters:
+        - {$ref: "#/components/parameters/FxTarget"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {bypass: false, wet: 1.0}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/fx/chains/{target}/preset:
+    get:
+      tags: [Effect chains]
+      operationId: getFxChainPreset
+      summary: Save a chain as a preset
+      description: |
+        Required scope: `read`. Returns the preset object (version, bypass, wet and the units without ids); store it wherever you like.
+      x-scope: read
+      parameters:
+        - {$ref: "#/components/parameters/FxTarget"}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Effect chains]
+      operationId: putFxChainPreset
+      summary: Replace a chain with a preset
+      description: |
+        Required scope: `control:fx:{target}`. The body is a preset object as `GET .../preset` returns it. Replies with the chain.
+      x-scope: control:fx:{target}
+      parameters:
+        - {$ref: "#/components/parameters/FxTarget"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {v: 1, bypass: false, wet: 1, fx: [{type: echo, on: true, wet: 0.5, param: 0.5}]}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/keymap:
+    get:
+      tags: [Settings]
+      operationId: getKeymap
+      summary: The keyboard shortcuts in effect
+      description: |
+        Required scope: `read`. Every binding (chord, context, control, mode, description, whether it is a user override) and the warnings from the last load.
+      x-scope: read
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Settings]
+      operationId: setKeymap
+      summary: Replace the user keyboard shortcut overrides
+      description: |
+        Required scope: `admin`. The body is the `.dhkeys` text as a JSON string or an object with `text`; an empty text resets to the shipped defaults. Replies with the parse `warnings`; 400 when nothing could be read.
+      x-scope: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {text: "# my shortcuts"}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/stems/status:
+    get:
+      tags: [Stems]
+      operationId: getStemsStatus
+      summary: Stem separation status
+      description: |
+        Required scope: `read`. `available` is false when the build has no separation runtime (`why_not` says so); then installing and queueing answer 409. The queue pauses by itself while any deck plays and resumes when all are stopped (`paused_while_playing`). Also the cache size and cap, the jobs and the running install.
+      x-scope: read
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/stems/models:
+    get:
+      tags: [Stems]
+      operationId: listStemModels
+      summary: Stem models
+      description: |
+        Required scope: `read`. The catalogue with the licence text of each model and whether it is installed. Show the licence before installing.
+      x-scope: read
+      responses:
+        "200": {description: Models, content: {application/json: {schema: {type: array, items: {type: object}}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/stems/models/{id}/install:
+    post:
+      tags: [Stems]
+      operationId: installStemModel
+      summary: Install a stem model
+      description: |
+        Required scope: `admin`. Body: `accept_licence: true` (without it, 400 with the licence text). Downloads, verifies and converts on a worker thread: 202 now, progress on the `events` topic (`stems.install`) and in `GET /v1/stems/status`. 409 when the build cannot separate stems, another install is running or the model cannot be installed yet.
+      x-scope: admin
+      parameters:
+        - {name: id, in: path, required: true, description: Model id from the catalogue., schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {accept_licence: true}
+      responses:
+        "202": {description: Started, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/stems/models/{id}:
+    delete:
+      tags: [Stems]
+      operationId: removeStemModel
+      summary: Remove an installed stem model
+      description: |
+        Required scope: `admin`. Stops the queue use of the model first. Cached stems stay.
+      x-scope: admin
+      parameters:
+        - {name: id, in: path, required: true, description: Model id from the catalogue., schema: {type: string}}
+      responses:
+        "204": {description: Done.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/stems/queue:
+    post:
+      tags: [Stems]
+      operationId: queueStems
+      summary: Separate tracks in the background
+      description: |
+        Required scope: `library:write`. Body: `track_ids` or `playlist_id`; `force` repeats tracks that are already separated. 202 with `queued` (track and job) and `skipped` (track and reason). 409 when the build cannot separate stems or no model is installed.
+      x-scope: library:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {track_ids: [12, 13]}
+      responses:
+        "202": {description: Queued, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/stems/queue/pause:
+    post:
+      tags: [Stems]
+      operationId: pauseStems
+      summary: Pause the stem queue
+      description: |
+        Required scope: `library:write`. The running chunk finishes first.
+      x-scope: library:write
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/stems/queue/resume:
+    post:
+      tags: [Stems]
+      operationId: resumeStems
+      summary: Resume the stem queue
+      description: |
+        Required scope: `library:write`. The queue still waits while a deck is playing.
+      x-scope: library:write
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/stems/queue/{job}:
+    delete:
+      tags: [Stems]
+      operationId: cancelStemJob
+      summary: Cancel a queued or running stem job
+      description: |
+        Required scope: `library:write`.
+      x-scope: library:write
+      parameters:
+        - {name: job, in: path, required: true, description: Job number., schema: {type: integer, minimum: 1}}
+      responses:
+        "204": {description: Done.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/tracks/{id}/stems:
+    get:
+      tags: [Stems]
+      operationId: getTrackStems
+      summary: Stems of a track
+      description: |
+        Required scope: `library:read`. `cached` (with `bytes`, `model`) and whether a separation is `queued` or running (`job`, `state`, `progress`). Clearing the `stems` kind in `POST /v1/library/analysis/strip` evicts the cache entry.
+      x-scope: library:read
+      parameters:
+        - {name: id, in: path, required: true, description: Track id., schema: {type: integer}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/sampler/{slot}/load:
     post:
       tags: [Sampler]
@@ -862,6 +1217,137 @@ paths:
               schema: {$ref: "#/components/schemas/UndoResult"}
         "404": {$ref: "#/components/responses/NotFound"}
         "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks/{id}/grid:
+    parameters:
+      - {name: id, in: path, required: true, description: Track id., schema: {type: integer, format: int64, minimum: 0}}
+    post:
+      tags: [Library]
+      operationId: setTrackGrid
+      summary: Replace a track's beat grid, cues following
+      description: "Required scope: `library:write`. Journalled as one edit batch together with the tempo, the lock and (by `cues_follow`) the cues, so one undo restores all. Cues that sat on the old grid (within 15 ms of a beat, half or quarter beat) keep their beat position under the new grid; loops keep their length in beats; off-grid cues stay and are listed. Halving or doubling the tempo leaves positions alone. `cues_follow` ask (the default, setting `cues_follow_grid`) only proposes the moves and returns `batch_id` for the follow-grid call; always moves them now; never leaves them."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, description: "sections [{first_beat_ms, bpm 30-300, bar_beat 1-4}], bpm (tempo to store, default the first section's), lock (bool), cues_follow (ask|always|never), dry_run (bool). Response: batch_id, grid_changed, cues_follow, cues_applied, cues {moves, off_grid, unchanged, no_grid, tolerance_ms}."}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks/{id}/cues/follow-grid:
+    parameters:
+      - {name: id, in: path, required: true, description: Track id., schema: {type: integer, format: int64, minimum: 0}}
+    post:
+      tags: [Library]
+      operationId: followGrid
+      summary: Move the cues of an earlier grid edit
+      description: "Required scope: `library:write`. Second call of the ask flow: moves the cues for the grid edit of `batch_id`, inside that same batch (one undo restores grid and cues). 409 when already moved or when the grid was edited again since."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, description: "batch_id (from the grid edit). Response: batch_id, cues {moves, off_grid, unchanged}."}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/analysis/strip:
+    post:
+      tags: [Library]
+      operationId: stripAnalysis
+      summary: Clear derived analysis data for many tracks
+      description: "Required scope: `library:write`. Clears only the chosen kinds (grid [with tempo], key, loudness, waveform, first_sound [load cue and first sound], phrases, vocals, stems); never tags, cues, playlists or the main cue. Locked grids are skipped unless `force`; a key set by hand is skipped unless `force`. phrases and vocals hold no data yet (no-op); stems reports not available. One edit batch: undo restores grid, tempo, key and grid lock; loudness, waveform cache and first-sound/load cue are not undoable (the next analysis re-creates them)."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, description: "kinds [..], and one selection: ids [..] | playlist_id and/or search | all true; force (bool), dry_run (bool). Response: counts per kind, skipped_grid_locked, skipped_user_key, notes, batch_id."}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/duplicates:
+    get:
+      tags: [Library]
+      operationId: listDuplicates
+      summary: Duplicate groups
+      description: "Required scope: `library:read`. Query: mode (exact|likely|all), same_bpm=1, same_key=1, duration_ms (tolerance, default 2000), limit. exact = identical file bytes (content hash; hashes fill in via POST /v1/library/duplicates/hash, `hash_pending` says how many are left); likely = same normalised artist and title, length within the tolerance, with a confidence and the differences (format, bitrate, sample_rate, duration, size, bpm, key). `suggested_keep` and `suggestion_reason` are advice only."
+      x-scope: "library:read"
+      responses:
+        "200":
+          description: Groups.
+          content:
+            application/json:
+              schema: {type: object}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/duplicates/hash:
+    post:
+      tags: [Library]
+      operationId: hashDuplicates
+      summary: Hash a batch of files
+      description: "Required scope: `library:write`. Does a bounded amount of work (file sizes first, then contents of files that share a size with another track); call until `remaining` is 0. Never runs when the library opens."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, description: "limit (1-500, default 50). Response: sized, hashed, missing, remaining."}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/duplicates/merge:
+    post:
+      tags: [Library]
+      operationId: mergeDuplicates
+      summary: Merge duplicate tracks into one
+      description: "Required scope: `library:write`. Playlists get the kept track in place of the removed ones (never twice in one playlist); cues, loops and grid are copied where the kept track has none (`copy_cues`: missing, all, none); play history is combined; tags, rating, colour and analysis values fill where empty; the removed tracks go to the trash (restorable). Audio files are never deleted or moved. One edit batch covers tags, cues and grid; playlists, history and trash are not undone by it (restore the removed tracks from the trash instead)."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, description: "keep_id, remove_ids [..], options {copy_cues, fill_metadata, combine_history, dry_run}. Response: counts, fields_filled, batch_id, removed."}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/NotFound"}
         default: {$ref: "#/components/responses/Error"}
 
   /v1/library/trash:
@@ -1344,7 +1830,7 @@ paths:
                 include_grid: {type: boolean}
       responses:
         "200":
-          description: Counts: tracks, playlists, cues, files.
+          description: "Counts: tracks, playlists, cues, files."
           content:
             application/json:
               schema: {type: object, additionalProperties: true}
@@ -1617,6 +2103,12 @@ components:
         operation's `x-scope`; see the Scopes section of the API description. WebSocket clients may instead
         use the `Sec-WebSocket-Protocol: deckhand.v1, bearer.<token>` header.
   parameters:
+    FxTarget:
+      name: target
+      in: path
+      required: true
+      description: Effect chain, deck1..deck4, master, mic, sampler or deckN.stemM (M 1..8).
+      schema: {type: string}
     Deck:
       name: deck
       in: path
@@ -1972,6 +2464,9 @@ components:
         number: {type: integer, description: Value for `fxN.select`.}
         name: {type: string}
         param: {type: string, description: What the `param` control does for this effect.}
+        param2: {type: string, description: What `param2` does ("" = unused).}
+        param3: {type: string, description: What `param3` does ("" = unused).}
+        slug: {type: string, description: Stable identifier used by chain presets and the chain routes.}
         beat_synced: {type: boolean}
         colour_only: {type: boolean, description: Only usable through `color_fx`, not selectable into a slot.}
         release: {type: boolean}

@@ -3,6 +3,7 @@
 // serialized use (SQLite full-mutex mode); callers keep queries short.
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -74,7 +75,8 @@ struct TrackEdit {
 struct TrackEditRecord {
   std::int64_t id = 0, track_id = 0;
   std::int64_t batch_id = 0;  // edits made by one operation share it
-  std::string field;          // title, artist, album, genre, key, comment, rating, year, color, bpm, grid_locked
+  std::string field;          // title, artist, album, genre, key, comment, rating, year, color, bpm, grid_locked, and the
+                              // whole-set fields "grid" (tempo sections) and "cues" (every cue and loop), see grid_text()
   std::optional<std::string> old_value, new_value;
   std::int64_t edited_at = 0;  // unix seconds
   std::string source;          // 'user' | 'api' | 'import' | 'sync' | 'undo'
@@ -97,9 +99,12 @@ struct DeletedTrack {
 
 // Names the origin of the library edits made on this thread while it lives ('user' when no scope is open), and groups
 // them into one journal batch. Scopes nest: an inner scope keeps the outer source and batch unless `force` is set.
+struct ResumeBatch {};
 class EditScope {
  public:
   explicit EditScope(const char* source, bool force = false);
+  // Continues an earlier journal batch (so one undo_batch covers both): later edits on this thread join `batch`.
+  EditScope(const char* source, ResumeBatch, std::int64_t batch);
   ~EditScope();
   EditScope(const EditScope&) = delete;
   EditScope& operator=(const EditScope&) = delete;
@@ -109,6 +114,111 @@ class EditScope {
   std::int64_t saved_batch_ = 0;
   int saved_depth_ = 0;
   bool forced_ = false;
+};
+
+// ---- cues that follow the grid -------------------------------------------------------------------------------------
+// Compact text forms of a grid and of a whole cue set, as the edit journal stores them (round-trip exactly).
+std::string grid_text(const std::vector<BeatSection>& grid);
+std::vector<BeatSection> grid_from_text(const std::string& text);
+std::string cues_text(const std::vector<Cue>& cues);
+std::vector<Cue> cues_from_text(const std::string& text);
+
+enum class CueFollow { Ask, Always, Never };  // setting "cues_follow_grid"
+CueFollow cue_follow_from(const std::string& text, CueFollow fallback = CueFollow::Ask);
+const char* cue_follow_name(CueFollow f);
+constexpr double kCueGridToleranceMs = 15;
+
+struct CueMove {
+  Cue before, after;
+  double beats = 0;  // position in beats from the first beat of its tempo section (old grid)
+};
+struct CueFollowProposal {
+  std::vector<CueMove> moves;     // on the old grid, and the new grid puts that beat somewhere else
+  std::vector<Cue> off_grid;      // not within the tolerance of a beat, half or quarter beat of the old grid: stay put
+  std::vector<Cue> unchanged;     // on the grid and the new grid puts them in the same place (halve / double, bar shift)
+  bool no_grid = false;           // the old or the new grid is empty: nothing can be mapped
+  double tolerance_ms = kCueGridToleranceMs;
+};
+// Pure: which cues of `cues` move when the grid changes from `old_grid` to `new_grid`. A loop keeps its length in beats.
+CueFollowProposal propose_cue_follow(const std::vector<Cue>& cues, const std::vector<BeatSection>& old_grid,
+                                     const std::vector<BeatSection>& new_grid, double tolerance_ms = kCueGridToleranceMs);
+
+struct GridCommit {
+  std::int64_t batch_id = 0;  // journal batch of the whole edit; undo_batch() restores grid, tempo, lock and cues together
+  bool grid_changed = false;
+  CueFollow mode = CueFollow::Never;
+  bool applied = false;       // the cue moves were made (mode Always)
+  CueFollowProposal proposal; // what moves (applied, or offered under Ask)
+};
+enum class FollowStatus { Ok, NoGridEdit, AlreadyApplied, Conflict };
+struct FollowResult {
+  FollowStatus status = FollowStatus::NoGridEdit;
+  CueFollowProposal proposal;
+  std::int64_t batch_id = 0;
+};
+
+// ---- analysis removal -------------------------------------------------------------------------------------------------
+struct StripKinds {
+  bool grid = false, key = false, loudness = false, waveform = false, first_sound = false, phrases = false, vocals = false, stems = false;
+};
+struct StripResult {
+  bool dry_run = false;
+  std::int64_t batch_id = 0;
+  int tracks = 0;           // looked at
+  int tracks_changed = 0;   // at least one thing cleared
+  std::map<std::string, int> cleared;  // kind -> tracks it was cleared on (or would be)
+  int skipped_grid_locked = 0;         // grid left alone: locked and not forced
+  int skipped_user_key = 0;            // key left alone: the user set it by hand and not forced
+  std::vector<std::string> notes;      // kinds not available / nothing to do, and which kinds undo does not restore
+};
+
+// ---- duplicates ------------------------------------------------------------------------------------------------------
+struct DuplicateMember {
+  TrackRow row;
+  std::int64_t file_size = 0;  // 0 unknown
+  int sample_rate = 0;
+  bool lossless = false;
+  int cue_count = 0;
+  bool has_grid = false;
+};
+struct DuplicateGroup {
+  std::string kind;                    // "exact" (same bytes) | "likely" (same artist, title and length)
+  double confidence = 0;               // 1 for exact
+  std::vector<DuplicateMember> members;
+  std::vector<std::string> differences;  // which of format, bitrate, sample_rate, duration, size, bpm, key differ
+  std::int64_t suggested_keep = 0;     // a suggestion only: nothing is merged without merge_duplicates()
+  std::string suggestion_reason;
+};
+struct DuplicateOptions {
+  bool exact = true, likely = true;
+  double duration_tolerance_ms = 2000;
+  bool same_bpm = false, same_key = false;  // likely: also require equal tempo (within 0.5) / key
+  std::size_t limit = 0;                    // groups returned, 0 = all
+};
+struct HashProgress {
+  int sized = 0, hashed = 0, missing = 0;  // done by this call
+  int remaining = 0;                        // tracks still without a size, plus same-size candidates still without a hash
+};
+struct MergeOptions {
+  enum class Cues { Missing, All, None };
+  Cues cues = Cues::Missing;  // Missing: copy cues / loops / grid only where the kept track has none; All: also add what it lacks
+  bool fill_metadata = true;  // tags, rating, colour, year, tempo, key where the kept track has none
+  bool combine_history = true;
+  bool dry_run = false;
+};
+struct MergeResult {
+  bool ok = false;
+  std::string error;
+  bool dry_run = false;
+  std::int64_t batch_id = 0;   // journal batch (tags, cues, grid). Playlists, history and trash are not part of it.
+  std::int64_t kept = 0;
+  std::vector<std::int64_t> removed;
+  int playlists_repointed = 0, playlists_already_had = 0;
+  int hot_cues_copied = 0, memory_cues_copied = 0, loops_copied = 0;
+  bool grid_copied = false;
+  int history_moved = 0;
+  std::vector<std::string> fields_filled;
+  std::vector<std::string> warnings;
 };
 
 struct HistoryEntry {
@@ -196,6 +306,25 @@ class Library {
   void set_main_cue_ms(std::int64_t track_id, std::optional<double> ms);
   void set_analysis_cues(std::int64_t track_id, std::optional<double> load_cue_ms, std::optional<double> first_sound_ms);
   void replace_beatgrid(std::int64_t track_id, const std::vector<BeatSection>& grid);
+  // A hand-edited grid, as one journalled batch: sections, tempo (`bpm`, when given), lock (when given) and, by `mode`,
+  // the cues that follow it (Always: moved now; Ask: only proposed, apply_cue_follow() moves them; Never: left).
+  GridCommit commit_grid(std::int64_t track_id, const std::vector<BeatSection>& grid, std::optional<double> bpm,
+                         std::optional<bool> lock, CueFollow mode, double tolerance_ms = kCueGridToleranceMs,
+                         bool dry_run = false);
+  // Second call of the Ask flow: moves the cues for the grid edit of journal batch `batch_id`, inside that same batch.
+  FollowResult apply_cue_follow(std::int64_t track_id, std::int64_t batch_id, double tolerance_ms = kCueGridToleranceMs);
+  // Replaces every cue and loop of the track (hot, memory, loops); journalled as one "cues" row.
+  void replace_all_cues(std::int64_t track_id, const std::vector<Cue>& cues);
+
+  // Removes derived data only (never tags, cues, playlists, the main cue). One journal batch; key, tempo, grid and lock
+  // are undoable, loudness, waveform cache, first-sound / load-cue are not (analysis re-creates them).
+  StripResult strip_analysis(const std::vector<std::int64_t>& ids, const StripKinds& kinds, bool force = false, bool dry_run = false);
+
+  // Duplicates. hash_pending() does a bounded amount of work (file sizes first, then content hashes of files that share a
+  // size with another track); call it until `remaining` is 0 (limit 0 only counts). Nothing runs when the library opens.
+  HashProgress hash_pending(int limit = 50);
+  std::vector<DuplicateGroup> find_duplicates(const DuplicateOptions& options = {});
+  MergeResult merge_duplicates(std::int64_t keep_id, const std::vector<std::int64_t>& remove_ids, const MergeOptions& options = {});
 
   // Tags, analysis results, file location.
   void edit_track(std::int64_t track_id, const TrackEdit& edit);
@@ -277,6 +406,8 @@ class Library {
   void tracked(std::int64_t track_id, const char* source, const std::function<void()>& change);
   UndoResult undo_records(const std::vector<TrackEditRecord>& newest_first);
   int undo_one(const TrackEditRecord& e);  // 0 restored, 1 conflict, 2 track gone
+  int undo_whole(const TrackEditRecord& e);  // the "grid" and "cues" rows
+  void apply_cue_moves(std::int64_t track_id, const std::vector<Cue>& before, const CueFollowProposal& p);
   std::vector<TrackEditRecord> read_edits(const char* where, std::int64_t arg, int limit, bool include_analysis = true);
   bool use_fts(const std::string& search) const;
   std::string search_pattern(const std::string& search) const;

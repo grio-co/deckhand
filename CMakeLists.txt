@@ -203,6 +203,39 @@ else()
   target_compile_definitions(dh_app PRIVATE DECKHAND_WITH_API=0)
 endif()
 
+# ---- stem separation (offline, cached; see docs/STEMS.md) ---------------------------------------------------
+# The module itself is plain C++ and always builds. DECKHAND_WITH_STEMS=OFF compiles it as a stub (stems_available() is
+# false, separate() fails). The ONNX Runtime backend is added automatically when third_party/onnxruntime is present
+# (scripts/fetch-stems-runtime.sh); without it the default build and CI are unchanged.
+option(DECKHAND_WITH_STEMS "Build offline stem separation (disabled = stub)" ON)
+set(DH_ORT_DIR ${CMAKE_SOURCE_DIR}/third_party/onnxruntime)
+if(EXISTS ${DH_ORT_DIR}/include/onnxruntime_cxx_api.h)
+  set(_dh_onnx_default ON)
+else()
+  set(_dh_onnx_default OFF)
+endif()
+option(DECKHAND_WITH_ONNX "Link ONNX Runtime for stem models (auto-OFF when third_party/onnxruntime is absent)" ${_dh_onnx_default})
+dh_lib(stems     DEPS core)
+if(NOT DECKHAND_WITH_STEMS)
+  target_compile_definitions(dh_stems PUBLIC DECKHAND_STEMS_DISABLED=1)
+endif()
+if(DECKHAND_WITH_STEMS AND DECKHAND_WITH_ONNX)
+  if(NOT EXISTS ${DH_ORT_DIR}/include/onnxruntime_cxx_api.h)
+    message(WARNING "DECKHAND_WITH_ONNX is ON but third_party/onnxruntime is missing: building without it")
+  else()
+    find_library(DH_ORT_LIB NAMES onnxruntime HINTS ${DH_ORT_DIR}/lib NO_DEFAULT_PATH REQUIRED)
+    target_include_directories(dh_stems SYSTEM PRIVATE ${DH_ORT_DIR}/include)
+    target_compile_definitions(dh_stems PUBLIC DECKHAND_WITH_ONNX=1)
+    target_link_libraries(dh_stems PUBLIC ${DH_ORT_LIB})
+    if(NOT WIN32)
+      target_link_options(dh_stems PUBLIC "-Wl,-rpath,${DH_ORT_DIR}/lib")
+    endif()
+  endif()
+endif()
+target_link_libraries(dh_app PUBLIC dh_stems)
+add_executable(deckhand-stems tools/deckhand_stems.cpp)
+target_link_libraries(deckhand-stems dh_stems)
+
 # ---- platform glue (C APIs shared by macOS and iOS) ---------------------------
 if(APPLE)
   file(GLOB apple_srcs CONFIGURE_DEPENDS platform/apple/*.cpp)
@@ -263,6 +296,7 @@ add_executable(deckhandctl src/cli/main.cpp ${DH_CONSOLE_RC})
 target_link_libraries(deckhandctl dh_library dh_import dh_audio dh_services dh_api dh_platform)
 
 file(GLOB test_srcs CONFIGURE_DEPENDS tests/test_*.cpp)
+list(FILTER test_srcs EXCLUDE REGEX "test_stems\\.cpp$")  # test_stems depends on dh_stems only (below)
 foreach(t ${test_srcs})
   get_filename_component(n ${t} NAME_WE)
   add_executable(${n} ${t} ${DH_CONSOLE_RC})
@@ -274,6 +308,10 @@ endforeach()
 if(TARGET test_keymap)
   target_link_libraries(test_keymap dh_app)
 endif()
+add_executable(test_stems tests/test_stems.cpp ${DH_CONSOLE_RC})
+target_link_libraries(test_stems dh_stems)
+target_compile_definitions(test_stems PRIVATE DH_STEMS_TEST_DIR="${CMAKE_SOURCE_DIR}/tools/stems_test_models" DH_STEMS_MODELS_DIR="${CMAKE_SOURCE_DIR}/third_party/models")
+add_test(NAME test_stems COMMAND test_stems WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # ---- Linux platform tests (decoder, ALSA sequencer, text rasteriser) -------------------------
 if(UNIX AND NOT APPLE)
@@ -310,7 +348,8 @@ if(UNIX AND NOT APPLE)
       COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/controllers ${DH_SHARE}/controllers
       COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/lang ${DH_SHARE}/lang
       COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/skins ${DH_SHARE}/skins
-      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/keymaps ${DH_SHARE}/keymaps)
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/keymaps ${DH_SHARE}/keymaps
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/stem-models ${DH_SHARE}/stem-models)
     include(GNUInstallDirs)
     # deckhand-engine must sit beside deckhand: the app starts it from its own folder (ARCHITECTURE.md, "Engine process").
     install(TARGETS deckhand deckhand-engine deckhandctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -323,7 +362,7 @@ if(UNIX AND NOT APPLE)
             DESTINATION ${CMAKE_INSTALL_DATADIR}/icons FILES_MATCHING PATTERN "*.png")
     install(DIRECTORY ${CMAKE_SOURCE_DIR}/controllers/ DESTINATION ${CMAKE_INSTALL_DATADIR}/deckhand/controllers
             FILES_MATCHING PATTERN "*.dhmap")
-    install(DIRECTORY ${CMAKE_SOURCE_DIR}/resources/lang ${CMAKE_SOURCE_DIR}/resources/skins ${CMAKE_SOURCE_DIR}/resources/keymaps
+    install(DIRECTORY ${CMAKE_SOURCE_DIR}/resources/lang ${CMAKE_SOURCE_DIR}/resources/skins ${CMAKE_SOURCE_DIR}/resources/keymaps ${CMAKE_SOURCE_DIR}/resources/stem-models
             DESTINATION ${CMAKE_INSTALL_DATADIR}/deckhand)
   endif()
 endif()
@@ -364,11 +403,12 @@ if(WIN32)
       COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/controllers ${DH_SHARE}/controllers
       COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/lang ${DH_SHARE}/lang
       COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/skins ${DH_SHARE}/skins
-      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/keymaps ${DH_SHARE}/keymaps)
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/keymaps ${DH_SHARE}/keymaps
+      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/resources/stem-models ${DH_SHARE}/stem-models)
     # deckhand-engine must sit beside deckhand: the app starts it from its own folder.
     install(TARGETS deckhand deckhand-engine deckhandctl RUNTIME DESTINATION .)
     install(DIRECTORY ${CMAKE_SOURCE_DIR}/controllers/ DESTINATION share/deckhand/controllers FILES_MATCHING PATTERN "*.dhmap")
-    install(DIRECTORY ${CMAKE_SOURCE_DIR}/resources/lang ${CMAKE_SOURCE_DIR}/resources/skins ${CMAKE_SOURCE_DIR}/resources/keymaps DESTINATION share/deckhand)
+    install(DIRECTORY ${CMAKE_SOURCE_DIR}/resources/lang ${CMAKE_SOURCE_DIR}/resources/skins ${CMAKE_SOURCE_DIR}/resources/keymaps ${CMAKE_SOURCE_DIR}/resources/stem-models DESTINATION share/deckhand)
   endif()
 endif()
 

@@ -1,0 +1,3 @@
+# SHA-256 pins for official ONNX Runtime release assets (github.com/microsoft/onnxruntime/releases), "<sha256>  <file>".
+# EMPTY on purpose: the release page was unreachable (HTTP 404) when this was written, so no hash could be recorded.
+# Add the hashes after checking them against the release page, then scripts/fetch-stems-runtime.sh will install.

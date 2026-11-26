@@ -116,21 +116,20 @@ Sync
       clean-room; the answer here is fast, verified USB/SD export
 
 Gaps in the incumbent that DeckHand should close (owner's list, 2026-11-26)
-- [~] Pre-analysed stems with a disk cache (in progress; no model ships until one has clearly
-      permissive weights); then stems written to the USB stick as ordinary tracks for players
+- [~] Pre-analysed stems: cache, queue, installer and model catalogue exist; BLOCKED on an
+      inference runtime (the planned one is no longer published at its source); only one model has
+      a ready graph; no model ships; then stems written to the USB stick as ordinary tracks for players
       that cannot separate
 - [~] Fluid beat grid: drifting tempo, live drummers and tempo jumps become as many sections as
       needed (within ~10 ms on synthetic tests); untested on real recordings
-- [ ] Cues follow the grid: when the grid is shifted or re-anchored, offer to move hot cues, memory
-      cues and loops with it (per edit, undoable)
-- [ ] Remove analysis selectively across many tracks (grid, key, phrases, vocals, stems, waveform,
-      gain) without re-analysing the rest
+- [x] Cues follow the grid (API; the in-app confirm is still a status line only)
+- [x] Remove analysis selectively across many tracks (API and CLI)
 - [ ] Automix with per-track in/out points, play length, transition type and beat-matched hand-over;
       queue with "play next" insertion instead of append-only
-- [ ] Library clean-up: duplicate finder (same audio, different file or tags) with merge of cues and
-      playlists; opt-in metadata and key fill from an open music database
-- [ ] Effect chains: user-ordered chains with routing per deck/stem/master; host Audio Unit / VST3
-      plug-ins in the engine process (crash-isolated)
+- [x] Duplicate finder with merge (panel, API, CLI)
+- [ ] Opt-in metadata and key fill from an open music database
+- [~] Effect chains per deck/master/mic/sampler (engine, controls, API; no chain editor on screen
+      yet; stem buses stored but not processed); then Audio Unit / VST3 hosting in the engine process
 - [~] Any controller: open `.dhmap` mappings and learn exist; ship mappings for common controllers
       from other makers (each untested until someone has the hardware)
 - [x] No paid tiers: recording, two-player preparation, filters and sync are in the one free build
@@ -141,6 +140,11 @@ Beyond the list
       OBS integration; portable mode; no account, no subscription
 
 ## Known limits of the current build
+- The engine logs "UI heartbeat lost / UI attached" in pairs many times a minute while the Mac is
+  under heavy load (seen in a build from before these changes too); audio is unaffected, but the
+  detection threshold and the log volume need attention.
+- A second copy started on the same data folder fights the first for the engine; there is no
+  single-instance guard per data folder yet.
 - Tracks are decoded fully into memory.
 - Analysis can split a steady track at a long breakdown; such splits are merged when the tempo agrees.
 - HID controllers and MIDI learn are not supported yet.

@@ -368,7 +368,75 @@ std::vector<std::string> RemoteEngine::devices() {
   return out;
 }
 
+void RemoteEngine::invalidate_chain(int target) {
+  if (!fx_target_valid(target)) return;
+  std::lock_guard<std::mutex> lock(chain_mutex_);
+  chain_cache_[target].valid = false;
+}
+
+namespace {
+bool fx_chain_rpc_call(const FxChainEdit& e, std::vector<std::uint8_t>& payload) {
+  if (e.text.size() > 65535) return false;
+  Wr w;
+  w.u8(static_cast<std::uint8_t>(e.verb));
+  w.u8(static_cast<std::uint8_t>(e.target));
+  w.i32(e.id);
+  w.i32(e.pos);
+  w.u8(static_cast<std::uint8_t>(e.kind));
+  w.i32(e.field);
+  w.f64(e.value);
+  w.str(e.text);
+  payload = w.bytes();
+  return true;
+}
+}  // namespace
+
+bool RemoteEngine::fx_chain_edit(const FxChainEdit& edit, FxChainResult& result) {
+  result = FxChainResult{};
+  std::vector<std::uint8_t> payload, reply;
+  if (!fx_chain_rpc_call(edit, payload)) {
+    result.error = "request too large";
+    return false;
+  }
+  if (!rpc(kReqFxChain, payload, reply, 4000)) {
+    result.error = "the engine did not answer";
+    return false;
+  }
+  Rd rd(reply.data(), reply.size());
+  const bool ok = rd.u8() != 0;
+  result.id = rd.i32();
+  result.error = rd.str();
+  result.text = rd.str();
+  if (!get_chain_info(rd, result.info)) {
+    result = FxChainResult{};
+    result.error = "bad reply from the engine";
+    return false;
+  }
+  result.ok = ok;
+  if (fx_target_valid(edit.target)) {
+    std::lock_guard<std::mutex> lock(chain_mutex_);
+    chain_cache_[edit.target] = ChainCache{result.info, std::chrono::steady_clock::now(), true};
+  }
+  return ok;
+}
+
+FxChainInfo RemoteEngine::fx_chain(int target) const {
+  if (!fx_target_valid(target)) return FxChainInfo{};
+  {
+    std::lock_guard<std::mutex> lock(chain_mutex_);
+    const ChainCache& c = chain_cache_[target];
+    if (c.valid && std::chrono::steady_clock::now() - c.at < std::chrono::milliseconds(100)) return c.info;
+  }
+  FxChainEdit e;
+  e.verb = FxChainVerb::Get;
+  e.target = target;
+  FxChainResult r;
+  const_cast<RemoteEngine*>(this)->fx_chain_edit(e, r);
+  return r.info;
+}
+
 void RemoteEngine::send(const Command& c) {
+  if (c.op >= Op::FxSelect && c.op <= Op::FxParam) invalidate_chain(c.deck);
   const auto l = link();
   if (!l || c.track || c.sample || c.op == Op::Load || c.op == Op::SamplerLoad) {
     delete c.track;  // a Command owns its payload once handed to send()

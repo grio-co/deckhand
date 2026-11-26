@@ -27,6 +27,9 @@ full control API.
   ([docs/INTERCHANGE.md](docs/INTERCHANGE.md)).
 - Export check: names the files a club player will not read before you leave home, and can put a
   24-bit copy on the stick instead.
+- Effects: chains of up to eight effects in any order per deck, master, microphone and sampler.
+- Library tools: cues that follow a grid change, selective removal of analysis, duplicate finder
+  with merge, trash and edit history.
 - Keyboard: customisable shortcuts with two-handed defaults ([docs/SHORTCUTS.md](docs/SHORTCUTS.md)).
 - Decks: MP3, AAC, FLAC, WAV, AIFF; scrolling three-band waveforms with beat grid; cue, hot cues,
   loops, beat jump, tempo, beat sync, scratch and nudge; key lock and key shift; quantise; slip;

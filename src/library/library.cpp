@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -100,6 +102,11 @@ struct OptionalTx {
   explicit OptionalTx(Db& d) : db(d), own(sqlite3_get_autocommit(d.handle()) != 0) {
     if (own) db.exec("BEGIN IMMEDIATE");
   }
+  void rollback() {
+    if (!own) return;
+    db.exec("ROLLBACK");
+    own = false;
+  }
   void commit() {
     if (!own) return;
     db.exec("COMMIT");
@@ -168,6 +175,13 @@ EditScope::~EditScope() {
     g_edit.source = "user";
     g_edit.batch = 0;
   }
+}
+
+EditScope::EditScope(const char* source, ResumeBatch, std::int64_t batch)
+    : saved_source_(g_edit.source), saved_batch_(g_edit.batch), saved_depth_(g_edit.depth), forced_(true) {
+  g_edit.source = source;
+  g_edit.batch = batch;
+  ++g_edit.depth;
 }
 
 std::int64_t EditScope::batch() const { return g_edit.batch; }
@@ -254,6 +268,20 @@ void Library::migrate() {
     if (!has_column(db_, "trash_tracks", "deleted_at")) db_.exec("ALTER TABLE trash_tracks ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0;");
     tx.commit();
     DH_LOG(Info, "library migrated to schema %d (edit journal, trash)", 5);
+  }
+  if (version < 6) {
+    // Duplicate finder: size and content hash of the audio file (filled lazily by hash_pending, never on open).
+    Transaction tx(db_);
+    for (const char* t : {"tracks", "trash_tracks"}) {
+      if (!has_column(db_, t, "file_size")) db_.exec(std::string("ALTER TABLE ") + t + " ADD COLUMN file_size INTEGER;");
+      if (!has_column(db_, t, "content_hash")) db_.exec(std::string("ALTER TABLE ") + t + " ADD COLUMN content_hash TEXT;");
+    }
+    db_.exec(
+        "CREATE INDEX IF NOT EXISTS idx_tracks_file_size ON tracks(file_size);"
+        "CREATE INDEX IF NOT EXISTS idx_tracks_content_hash ON tracks(content_hash);"
+        "UPDATE schema_version SET version = 6;");
+    tx.commit();
+    DH_LOG(Info, "library migrated to schema %d (duplicate finder)", 6);
   }
   {
     // Substring search index (FTS5 trigram, case-insensitive) kept in step with `tracks` by triggers. Optional: an
@@ -660,7 +688,8 @@ std::optional<double> Library::gain_db(std::int64_t track_id) {
 }
 
 void Library::set_track_path(std::int64_t track_id, const std::string& abs_path) {
-  Stmt u(db_, "UPDATE OR IGNORE tracks SET root_id = ?1, rel_path = ?2, format = ?3 WHERE id = ?4");
+  // A different file: its size and hash are unknown again.
+  Stmt u(db_, "UPDATE OR IGNORE tracks SET root_id = ?1, rel_path = ?2, format = ?3, file_size = NULL, content_hash = NULL WHERE id = ?4");
   u.bind(1, kSystemRoot).bind(2, rel_of(abs_path)).bind(3, extension_of(abs_path)).bind(4, track_id);
   u.run();
 }
@@ -949,6 +978,7 @@ void Library::set_date_added(std::int64_t track_id, std::int64_t unix_seconds) {
 }
 
 int Library::undo_one(const TrackEditRecord& e) {
+  if (e.field == "grid" || e.field == "cues") return undo_whole(e);
   if (!is_edit_field(e.field)) return 1;
   const FieldValues now = edit_snapshot(e.track_id);
   if (now.empty()) return 2;
@@ -1553,5 +1583,7 @@ void Library::set_setting(const std::string& key, const std::string& value) {
   u.bind(1, key).bind(2, value);
   u.run();
 }
+
+#include "library_tools.inc"
 
 }  // namespace deckhand

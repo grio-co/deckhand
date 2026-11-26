@@ -3,10 +3,13 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "deckhand/audio/engine.hpp"
 
 namespace deckhand {
+
+class StemService;
 
 // Arguments of a track-preparation action (grid editing, cues, loops). Which fields an action reads is in docs/API.md.
 struct PrepArgs {
@@ -44,6 +47,16 @@ class ApiHost {
   // error when there is no headphone output and "preview on master" is off.
   virtual bool api_preview_load(std::int64_t track_id, bool play, std::string& error) = 0;
   virtual std::string api_preview_title() = 0;
+  // The effective keyboard shortcuts as JSON, and replacing the user's overrides with a .dhkeys text ("" resets them).
+  // Defaults: "not available".
+  virtual std::string api_keymap_json() { return {}; }
+  virtual bool api_keymap_set(const std::string& dhkeys_text, std::vector<std::string>& warnings, std::string& error) {
+    (void)dhkeys_text; (void)warnings;
+    error = "keyboard shortcuts are not available";
+    return false;
+  }
+  // Stem separation (models, queue, cache); null when the host has none.
+  virtual StemService* api_stems() { return nullptr; }
   virtual std::string api_status() = 0;
   virtual std::string api_audio_device() = 0;
   // Debug (admin scope): the windows the UI has (JSON array) and what a click at (x, y) of a window would do (JSON object).
