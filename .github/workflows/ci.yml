@@ -159,7 +159,10 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force screenshots | Out-Null
           $env:DECKHAND_RESOURCE_DIR = Join-Path $PWD "build-windows\share\deckhand"
-          & build-windows\Release\deckhand.exe --screenshot screenshots\windows.png --frames 60
+          # A GUI-subsystem exe: Start-Process -Wait, or PowerShell would not wait for it to write the file.
+          $p = Start-Process -FilePath build-windows\Release\deckhand.exe -Wait -PassThru -NoNewWindow `
+            -ArgumentList "--screenshot","screenshots\windows.png","--frames","60","--size","1280x800"
+          if ($p.ExitCode -ne 0) { Write-Host "deckhand exited with $($p.ExitCode)"; exit 1 }
           python scripts\check-screenshot.py screenshots\windows.png --size 1280x800
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload screenshot
