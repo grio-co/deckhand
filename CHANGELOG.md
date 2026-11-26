@@ -115,6 +115,8 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
   `--screenshot` canvas scales with `DECKHAND_SCALE`; quit on session end stops the helper.
 - Tests: the analysis speed check is a real-time-factor bound; the export test uses its own temp folder.
 - API server: a WebSocket close frame is no longer lost on Windows when the client is still sending.
+- `build-windows.ps1`: an existing build folder keeps its CMake generator, so configuring no
+  longer fails after a newer Visual Studio is installed.
 - Windows paths are no longer stored with a leading slash in the library and sync code.
 - The macOS build script no longer bundles a stale core library after a compile error.
 - iOS: the engine no longer overrides the audio session the shell configures.

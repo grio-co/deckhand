@@ -22,7 +22,7 @@ param(
   [switch]$Test,         # run ctest after building
   [switch]$Screenshot,   # run deckhand.exe --screenshot (needs a GPU or WARP) and write shell.png into the build folder
   [switch]$SkipDeps,     # do not run `vcpkg install` (already done)
-  [string]$Generator = ""  # CMake generator; default: the newest installed Visual Studio (2022 = 17, 2026 = 18)
+  [string]$Generator = ""  # CMake generator; default: the build folder's own, else the newest Visual Studio (17 or 18)
 )
 $ErrorActionPreference = "Stop"
 $Triplet = "x64-windows-static"
@@ -52,6 +52,13 @@ if (-not $SkipDeps) {
 $Prefix = Join-Path $VcpkgRoot "installed\$Triplet"
 
 # SQLCipher is vendored (third_party/sqlcipher) and compiled by CMake: only OpenSSL comes from vcpkg.
+$Build = if ([IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $Root $BuildDir }
+$Cache = Join-Path $Build "CMakeCache.txt"
+if (-not $Generator -and (Test-Path -LiteralPath $Cache)) {
+  # An existing build folder keeps its generator: CMake refuses to configure it with another one.
+  $line = Select-String -LiteralPath $Cache -Pattern '^CMAKE_GENERATOR:INTERNAL=(.+)$' | Select-Object -First 1
+  if ($line) { $Generator = $line.Matches[0].Groups[1].Value.Trim() }
+}
 if (-not $Generator) {
   $Generator = "Visual Studio 17 2022"
   $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -61,7 +68,6 @@ if (-not $Generator) {
   }
 }
 Write-Host "CMake generator: $Generator"
-$Build = if ([IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $Root $BuildDir }
 & $CmakeExe -S $Root -B $Build -G $Generator -A x64 `
   "-DCMAKE_TOOLCHAIN_FILE=$VcpkgRoot\scripts\buildsystems\vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$Triplet" `
   "-DCMAKE_PREFIX_PATH=$Prefix" "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" "-DOPENSSL_USE_STATIC_LIBS=ON"
