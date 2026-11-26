@@ -48,7 +48,8 @@ them in [CHANGELOG.md](CHANGELOG.md).
 - [ ] Windows on the real PC: WASAPI audio (incl. the Remote Desktop device), MIDI, HID, sleep/resume,
       DPI change while running; no UI-level single-instance guard yet
 - [x] Sync: passphrase encryption, tombstone clean-up (long-deleted details dropped at compaction)
-- [ ] Sync: passphrase encryption on iOS (no OpenSSL there); encryption never tried across two real computers;
+- [x] Sync: encrypted sync checked between a Mac and a Windows PC with test data (docs/SYNC.md)
+- [ ] Sync: passphrase encryption on iOS (no OpenSSL there);
       removing tombstones altogether needs per-device acknowledgements
 - [x] Sync grid locks, smart playlists and the browser settings
 - [ ] Preparation follow-ups: reorder
