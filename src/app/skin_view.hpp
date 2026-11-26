@@ -19,6 +19,7 @@ namespace deckhand::ui {
 
 struct Input {
   float x = 0, y = 0, scroll = 0;
+  float magnify = 0;  // trackpad pinch since the last frame: > 0 spreads (zoom in)
   bool down = false, pressed = false, released = false;
   int clicks = 0;
   bool shift = false;

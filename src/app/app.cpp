@@ -1327,6 +1327,7 @@ const dh_frame* App::frame() {
     in_.pressed = false;
     in_.clicks = 0;
     in_.scroll = 0;
+    in_.magnify = 0;
   }
   any_down_ = raw_.down;
 
@@ -1341,6 +1342,7 @@ const dh_frame* App::frame() {
   raw_.pressed = raw_.released = false;
   raw_.clicks = 0;
   raw_.scroll = 0;
+  raw_.magnify = 0;
 
   // ---- hand the frame to the shell ----------------------------------------------------------
   cmds_out_.clear();
@@ -1436,6 +1438,7 @@ void dh_app_pointer(dh_app* app, dh_ptr_kind kind, uint32_t, float x, float y, i
   app->app.pointer(kind, x, y, clicks);
 }
 void dh_app_scroll(dh_app* app, float, float, float, float dy) { app->app.scroll(dy); }
+void dh_app_zoom(dh_app* app, float, float, float magnification) { app->app.pinch(magnification); }
 void dh_app_key(dh_app* app, dh_key key, uint32_t mods) { app->app.key(key, mods); }
 void dh_app_text(dh_app* app, const char* utf8) { app->app.text(utf8); }
 bool dh_app_key_event(dh_app* app, uint32_t physical, uint32_t character, uint32_t mods, bool is_down, bool is_repeat) {
@@ -1458,6 +1461,9 @@ void dh_app_window_pointer(dh_app* app, uint32_t window, dh_ptr_kind kind, uint3
   app->app.window_pointer(window, kind, x, y, clicks);
 }
 void dh_app_window_scroll(dh_app* app, uint32_t window, float, float, float, float dy) { app->app.window_scroll(window, dy); }
+void dh_app_window_zoom(dh_app* app, uint32_t window, float, float, float magnification) {
+  app->app.window_pinch(window, magnification);
+}
 void dh_app_window_open_file(dh_app* app, uint32_t window, const char* path, float x, float y) {
   if (path) app->app.window_open_file(window, path, x, y);
 }

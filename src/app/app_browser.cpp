@@ -1,6 +1,7 @@
 // The track browser: configurable columns, multi-select, drag and drop onto playlists and inside a playlist, rating and
 // colour cells, the compatible-tracks filter, and the editors for columns and smart playlists.
 #include "app_impl.hpp"
+#include "column_order.hpp"
 
 #include <cctype>
 #include <cstring>
@@ -184,7 +185,7 @@ void App::draw_tracks(const Rect& table, const ui::Theme& th, const std::string&
   const float head_h = row_h + 2;
   dl_.rect(table.x, table.y, table.w, head_h, th.panel2);
 
-  // Header: click to sort (ascending, descending, natural); drag the right edge of a column to resize it.
+  // Header: click to sort (ascending, descending, natural); drag it to move the column; drag its right edge to resize.
   for (std::size_t i = 0; i < cols.size(); ++i) {
     const ColDef& c = *cols[i].def;
     const bool active = sort_ == c.key && c.key != SortKey::Default;
@@ -198,11 +199,30 @@ void App::draw_tracks(const Rect& table, const ui::Theme& th, const std::string&
       col_drag_ = static_cast<int>(i);
       col_drag_x_ = in_.x;
       col_drag_w_ = c.flex ? flex_w * cols[i].w / flex_sum : cols[i].w;
-    } else if (clicked({x0[i], table.y, x1[i] - x0[i] - 4, head_h}) && view_ != TreeItem::HistorySession && col_drag_ < 0) {
-      if (!active) { sort_ = c.key; sort_desc_ = false; }
-      else if (!sort_desc_) sort_desc_ = true;
-      else sort_ = SortKey::Default;
-      rows_dirty_ = true;
+    } else if (clicked({x0[i], table.y, x1[i] - x0[i] - 4, head_h}) && col_drag_ < 0) {
+      col_move_ = static_cast<int>(i);  // a click or the start of a move: decided on release
+      col_move_x_ = in_.x;
+      col_moving_ = false;
+    }
+  }
+  if (col_move_ >= static_cast<int>(cols.size()) || in_.x < -1000) col_move_ = -1;  // columns changed, or an overlay opened
+  if (col_move_ >= 0) {
+    const ColDef& c = *cols[static_cast<std::size_t>(col_move_)].def;
+    col_moving_ = col_moving_ || std::fabs(in_.x - col_move_x_) > 6;
+    const std::size_t slot = column_drop_slot(x0, x1, in_.x);
+    if (in_.down) {
+      if (col_moving_)
+        dl_.rect((slot < cols.size() ? x0[slot] : x1.back()) - 1, table.y + 1, 3, head_h - 2, th.accent);
+    } else {
+      if (col_moving_) {
+        if (move_column(bcols_, c.id, slot < cols.size() ? cols[slot].def->id : "")) save_browser_settings();
+      } else if (view_ != TreeItem::HistorySession) {  // history keeps its play order
+        if (sort_ != c.key || c.key == SortKey::Default) { sort_ = c.key; sort_desc_ = false; }
+        else if (!sort_desc_) sort_desc_ = true;
+        else sort_ = SortKey::Default;
+        rows_dirty_ = true;
+      }
+      col_move_ = -1;
     }
   }
   if (col_drag_ >= 0) {

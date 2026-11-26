@@ -96,6 +96,9 @@ void    dh_app_set_display(dh_app* app, float w_px, float h_px, float scale,
 void    dh_app_modifiers(dh_app* app, uint32_t mods);
 void    dh_app_pointer(dh_app* app, dh_ptr_kind kind, uint32_t id, float x_px, float y_px, int clicks);
 void    dh_app_scroll(dh_app* app, float x_px, float y_px, float dx_px, float dy_px);
+/* Trackpad pinch: the change in magnification since the last call (> 0 spreads). Zooms the waveform under the
+   pointer. Shells whose system reports a pinch as Ctrl + wheel need not call it. */
+void    dh_app_zoom(dh_app* app, float x_px, float y_px, float magnification);
 void    dh_app_key(dh_app* app, dh_key key, uint32_t mods);
 void    dh_app_text(dh_app* app, const char* utf8);
 /* A file was dropped or opened. x/y are where it was dropped (negative if not applicable). */
@@ -172,6 +175,7 @@ const dh_frame* dh_app_end_frame(dh_app* app);                       /* only upl
 
 void dh_app_window_pointer(dh_app* app, uint32_t window, dh_ptr_kind kind, uint32_t id, float x_px, float y_px, int clicks);
 void dh_app_window_scroll(dh_app* app, uint32_t window, float x_px, float y_px, float dx_px, float dy_px);
+void dh_app_window_zoom(dh_app* app, uint32_t window, float x_px, float y_px, float magnification);
 void dh_app_window_open_file(dh_app* app, uint32_t window, const char* path, float x_px, float y_px);
 
 typedef enum { DH_HIT_NONE = 0, DH_HIT_DRAG = 1, DH_HIT_CONTROL = 2, DH_HIT_RESIZE = 3, DH_HIT_SOLID = 4 } dh_hit;

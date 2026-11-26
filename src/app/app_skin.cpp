@@ -603,12 +603,16 @@ void App::draw_wave(int di, const Rect& r, const DeckView& v, const DeckInfo& in
   const auto x_of = [&](double seconds) { return cx + static_cast<float>((seconds - pos) * pt_per_sec); };
   const bool inside = r.contains(in_.x, in_.y);
 
-  // Zoom: the wheel over the waveform and the two small buttons in its corner (remembered per deck).
+  // Zoom: the wheel or a pinch over the waveform, and the two small buttons in its corner (remembered per deck).
   const Rect zout{r.x + r.w - 42, r.y + 2, 18, 16}, zin{r.x + r.w - 22, r.y + 2, 18, 16};
   bool on_button = false;
   if (inside && in_.scroll != 0) {
     set_wave_zoom(di, window * (in_.scroll > 0 ? 1.0 / 1.25 : 1.25));
     in_.scroll = 0;
+  }
+  if (inside && in_.magnify != 0) {
+    set_wave_zoom(di, window / std::clamp(1.0 + static_cast<double>(in_.magnify), 0.5, 2.0));
+    in_.magnify = 0;
   }
   if (clicked(zin)) { set_wave_zoom(di, window / 1.5); on_button = true; }
   if (clicked(zout)) { set_wave_zoom(di, window * 1.5); on_button = true; }

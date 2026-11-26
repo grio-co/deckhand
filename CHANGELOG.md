@@ -10,6 +10,8 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
   ribbon through both eyes, hot cues and stems on the teeth, the mixer in the open mouth, effects
   down the spine, and a ribcage library, femur sampler and bone trays as floating windows.
   Rendered offscreen only; not yet tried with a mouse.
+- Track table: drag a column header to move the column (a click still sorts).
+- macOS: pinch on a waveform to zoom it.
 - Stems: the Mel-Band RoFormer vocal model runs on the built-in engine (vocals within 1.5e-5 of
   the reference implementation), and a combined recipe uses it for vocals with Demucs for drums,
   bass and other; the four stems still sum to the input. About 0.7x real time on an Apple silicon

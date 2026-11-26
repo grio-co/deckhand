@@ -476,6 +476,7 @@ void App::draw_window_pass(Win& w) {
   w.raw.pressed = w.raw.released = false;
   w.raw.clicks = 0;
   w.raw.scroll = 0;
+  w.raw.magnify = 0;
   cur_win_ = nullptr;
   width_px_ = sv_w;
   height_px_ = sv_h;
@@ -573,6 +574,10 @@ void App::window_pointer(std::uint32_t id, dh_ptr_kind kind, float x, float y, i
 
 void App::window_scroll(std::uint32_t id, float dy) {
   if (Win* w = find_win(id)) w->raw.scroll += dy / win_eff_scale(*w);
+}
+
+void App::window_pinch(std::uint32_t id, float magnification) {
+  if (Win* w = find_win(id)) w->raw.magnify += magnification;
 }
 
 void App::window_open_file(std::uint32_t id, const std::string& path, float x, float y) {

@@ -118,6 +118,12 @@ public final class DeckHandView: MTKView, MTKViewDelegate {
   public override func mouseDragged(with event: NSEvent) { pointer(DH_PTR_MOVE, event, clicks: 0) }
   public override func mouseMoved(with event: NSEvent) { pointer(DH_PTR_MOVE, event, clicks: 0) }
 
+  public override func magnify(with event: NSEvent) {
+    guard let core else { return }
+    let p = convert(event.locationInWindow, from: nil)
+    dh_app_zoom(core, Float(p.x) * scale, Float(p.y) * scale, Float(event.magnification))
+  }
+
   public override func scrollWheel(with event: NSEvent) {
     guard let core else { return }
     let p = convert(event.locationInWindow, from: nil)

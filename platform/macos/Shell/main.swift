@@ -123,6 +123,10 @@ final class ShellView: NSView {
     dh_app_window_pointer(shell.core, windowID, DH_PTR_MOVE, 0, x, y, 0)
     shell.refreshClickThrough()
   }
+  override func magnify(with event: NSEvent) {
+    let (x, y) = pixels(event)
+    dh_app_window_zoom(shell.core, windowID, x, y, Float(event.magnification))
+  }
   override func scrollWheel(with event: NSEvent) {
     let (x, y) = pixels(event)
     let unit: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 12

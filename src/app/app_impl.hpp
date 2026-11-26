@@ -238,6 +238,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void set_modifiers(std::uint32_t mods) { mods_ = mods; }
   void pointer(dh_ptr_kind kind, float x, float y, int clicks);
   void scroll(float dy) { raw_.scroll += dy / (scale_ * fit_); }
+  void pinch(float magnification) { raw_.magnify += magnification; }
   void key(dh_key key, std::uint32_t mods);
   void text(const char* utf8);
   // Keyboard shortcuts (app_keys.cpp). key_event is the full-fidelity path (physical key, key-up, repeat); it returns true when
@@ -267,6 +268,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   const dh_frame* end_frame();
   void window_pointer(std::uint32_t id, dh_ptr_kind kind, float x, float y, int clicks);
   void window_scroll(std::uint32_t id, float dy);
+  void window_pinch(std::uint32_t id, float magnification);
   void window_open_file(std::uint32_t id, const std::string& path, float x, float y);
   dh_hit hit_test(std::uint32_t id, float x, float y);
   void window_drag(std::uint32_t id, dh_drag_kind kind, dh_drag_phase phase, float gx, float gy, std::uint32_t mods);
@@ -715,6 +717,9 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   } rdrag_;
   int col_drag_ = -1;
   float col_drag_x_ = 0, col_drag_w_ = 0;
+  int col_move_ = -1;  // header being pressed or dragged to a new place
+  float col_move_x_ = 0;
+  bool col_moving_ = false;
   struct PreviewInfo {
     std::int64_t id = 0;
     std::string title;
