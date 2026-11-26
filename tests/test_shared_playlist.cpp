@@ -177,7 +177,10 @@ int main() {
   CHECK(!sync_shared_playlist(b, pb, B->cfg).ok && titles(b, pb).size() == 5);
   CHECK(!join_shared_playlist(b, "nonexistent", B->cfg).ok);
 
-  fs::remove_all(dir);
+  A.reset();  // close both libraries first: Windows refuses to delete files that are still open
+  B.reset();
+  std::error_code ec;
+  fs::remove_all(dir, ec);
   std::puts("test_shared_playlist ok");
   return 0;
 }
