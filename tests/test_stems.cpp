@@ -11,7 +11,13 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#ifdef _WIN32
+#include <process.h>
+#define DH_GETPID _getpid
+#else
 #include <unistd.h>
+#define DH_GETPID ::getpid
+#endif
 
 #include "check.hpp"
 #include "deckhand/stems/cache.hpp"
@@ -33,7 +39,7 @@ static std::vector<Case>& run_list() { static std::vector<Case> v; return v; }
 
 static fs::path tmpdir(const char* tag) {
   static int n = 0;
-  fs::path p = fs::temp_directory_path() / ("dh_stems_test_" + std::string(tag) + "_" + std::to_string(::getpid()) + "_" + std::to_string(n++));
+  fs::path p = fs::temp_directory_path() / ("dh_stems_test_" + std::string(tag) + "_" + std::to_string(DH_GETPID()) + "_" + std::to_string(n++));
   fs::remove_all(p);
   fs::create_directories(p);
   return p;
