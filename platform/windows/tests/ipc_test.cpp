@@ -329,7 +329,14 @@ int ui_process(const std::string& data, const std::string& helper, const std::st
   }
   std::printf("READY %u\n", eng.engine_pid());
   std::fflush(stdout);
-  std::this_thread::sleep_for(std::chrono::seconds(180));
+  // Only one UI may be attached to an engine, so the test process cannot look at the engine itself while this one lives:
+  // this process reports the playhead with a system-wide monotonic timestamp instead (now_ns is comparable between processes).
+  for (int i = 0; i < 900; ++i) {
+    const DeckView d = eng.deck(0);
+    std::printf("POS %.3f %.1f %llu\n", d.position, d.sample_rate, static_cast<unsigned long long>(now_ns()));
+    std::fflush(stdout);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
   return 0;
 }
 
@@ -393,20 +400,34 @@ int test_ui_kill(const fs::path& dir, const std::string& helper) {
   o.helper_path = helper;
   o.null_audio = true;
   o.log_level = 2;
-  double p0 = 0, rate = 44100;
-  std::chrono::steady_clock::time_point t0;
-  {
-    RemoteEngine obs(o);
-    CHECK(obs.connect(err) && obs.attached_existing() && obs.engine_pid() == engine_pid);
-    CHECK(wait_for([&] { return obs.deck(0).loaded && obs.deck(0).playing && obs.deck(0).position > 4410; }, 5));
-    CHECK(obs.recorder_status().open);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1200));  // some audio in the recording before the kill
-    const DeckView d = obs.deck(0);
-    p0 = d.position;
-    rate = d.sample_rate;
-    t0 = std::chrono::steady_clock::now();
-    obs.detach();
-  }
+  // The last playhead the UI reported (complete lines only) and when.
+  struct Pos {
+    double frames = 0, rate = 44100;
+    std::uint64_t ns = 0;
+    int lines = 0;
+  };
+  auto last_pos = [&] {
+    Pos p;
+    const std::string t = slurp(log);
+    std::size_t at = 0;
+    while ((at = t.find("POS ", at)) != std::string::npos) {
+      const std::size_t end = t.find('\n', at);
+      if (end == std::string::npos) break;  // a line that was being written
+      unsigned long long ns = 0;
+      double f = 0, r = 0;
+      if (std::sscanf(t.c_str() + at, "POS %lf %lf %llu", &f, &r, &ns) == 3) {
+        p.frames = f;
+        p.rate = r;
+        p.ns = ns;
+        ++p.lines;
+      }
+      at = end;
+    }
+    return p;
+  };
+  CHECK(wait_for([&] { return last_pos().lines >= 8; }, 10));  // at least 1.5 s of audio, so the recording has content
+  const Pos before = last_pos();
+  CHECK(before.frames > 4410);
 
   HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, ui_pid);
   CHECK(h != nullptr);
@@ -416,14 +437,15 @@ int test_ui_kill(const fs::path& dir, const std::string& helper) {
   reap_child(ui_pid);
   CHECK(!process_alive(ui_pid));
   CHECK(process_alive(engine_pid));  // the engine is not tied to the UI's lifetime (no job object, no parent link)
+  const Pos last = last_pos();  // the final report, possibly newer than `before`
   std::this_thread::sleep_for(std::chrono::milliseconds(2500));  // nobody is attached for a while
 
   RemoteEngine back(o);
   CHECK(back.connect(err) && back.attached_existing() && back.engine_pid() == engine_pid);
   CHECK(wait_for([&] { return back.deck(0).loaded && back.deck(0).playing; }, 5));
   const DeckView d = back.deck(0);
-  const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-  const double advanced = (d.position - p0) / rate;
+  const double elapsed = static_cast<double>(now_ns() - last.ns) / 1e9;
+  const double advanced = (d.position - last.frames) / last.rate;
   note("ui kill: a new UI attached " + std::to_string(elapsed) + " s after the last reading; the deck advanced " +
        std::to_string(advanced) + " s");
   CHECK(std::fabs(advanced - elapsed) < 0.75);
@@ -434,10 +456,10 @@ int test_ui_kill(const fs::path& dir, const std::string& helper) {
   // The recording that was running when the UI died is still being written; the new UI ends it.
   back.record_close();
   CHECK(wait_for([&] { return !back.recorder_status().open; }, 10));
-  const double closed_after = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  const double closed_after = static_cast<double>(now_ns() - last.ns) / 1e9;
   const WavInfo w1 = read_wav(rec1);
-  note("ui kill: the recording that spanned the kill is a valid WAV of " + std::to_string(w1.seconds) + " s (UI died " +
-       std::to_string(closed_after) + " s before it was closed, started >= 1 s before that)");
+  note("ui kill: the recording that spanned the kill is a valid WAV of " + std::to_string(w1.seconds) + " s (its last report was " +
+       std::to_string(closed_after) + " s before the close; the recording began before that report)");
   CHECK(w1.valid && w1.seconds >= closed_after - 0.5);
 
   // An orderly quit finalises a recording that is still open, then leaves nothing behind.

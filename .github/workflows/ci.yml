@@ -138,6 +138,7 @@ jobs:
           ctest -C Release --output-on-failure --timeout 600
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Engine process check (real deckhand.exe, REST API)
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: scripts\windows\engine-check.ps1 -BuildDir build-windows -Config Release
       - name: Upload test logs
