@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, ci-setup, vendored-sqlite]
+    branches: [main, ci-setup]
   pull_request:
   workflow_dispatch:
 
