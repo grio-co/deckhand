@@ -25,6 +25,9 @@
 
 namespace deckhand::ipc {
 
+// 11: raw input tap (kReqInputTapEnable, Shared::input_tap and Header::input_tap_dropped: the capture device's frames for recording).
+// 10: sequencer steps can play a slice (SeqPatternData::slice grows StepSeqView; SeqStep's i carries a slice code in bits 8+; pattern
+//     text may carry "@<slice>"), four new EffectKinds (Riser, BandKill, Reverser, AutoPan) sit before Plugin, which moves up.
 // 9: effect plug-ins (EffectKind::Plugin, FxChainEdit::text carries the plug-in id, FxChainVerb::Set field >= kFxFieldPluginParam,
 //    kReqPluginOp side channel for parameter lists and state blobs; kReqFxChain reply timeout grows for plug-in loads).
 // 8: sampler slicing, scratch and the step sequencer (SamplerSlice / SamplerSliceTrigger / SamplerScratch / Seq* ops,
@@ -40,7 +43,7 @@ namespace deckhand::ipc {
 // 2: microphone channel (Mic* ops, MixerView fields, InputInfo snapshot, input requests, include-mic flags).
 // Bump whenever a wire layout or the meaning of a request changes: a UI that finds an engine with another version
 // asks it to quit and starts a fresh one (RemoteEngine::establish), and the segment's fingerprint covers the sizes.
-constexpr std::uint32_t kProtocolVersion = 9;
+constexpr std::uint32_t kProtocolVersion = 11;
 constexpr int kBlockSlots = 64;  // track / sample blocks in flight at once
 
 // What the OS hands out for a file or socket: a descriptor on POSIX, a HANDLE / SOCKET on Windows (-1 = none).
@@ -423,6 +426,7 @@ struct Header {
   std::atomic<std::uint64_t> engine_start_ns{0};
   std::atomic<std::uint64_t> clock_frames{0};
   std::atomic<std::uint64_t> stream_dropped{0};
+  std::atomic<std::uint64_t> input_tap_dropped{0};
   std::atomic<std::uint32_t> scheduled_count{0};
   std::atomic<std::uint32_t> rejected_commands{0};
 };
@@ -443,6 +447,7 @@ struct Shared {
   CmdRing<kCmdRingSize> cmd;
   SpscShared<WireEvent, kEventRingSize> events;
   StreamShared<kStreamFrames> stream;
+  StreamShared<kStreamFrames> input_tap;  // the raw capture frames, device rate
 };
 
 // Fills in a freshly created (zeroed) segment: header fingerprint, ring sequence numbers.
@@ -565,6 +570,7 @@ enum Req : std::uint8_t {
   kReqHubDevice,       // u8 verb: 0 options (str mapping, str DeviceOptions text) -> u8 ok, str the options as applied (text);
                        //   1 jog ticks (str mapping) -> f64; 2 reload the mappings -> u8 ok; 3 prefer (u16 n, str...) -> u8 ok;
                        //   4 switch decks (str mapping, i32 layer 0 / 1 / -1 toggle) -> u8 ok, i32 layer now
+  kReqInputTapEnable,  // u8 on
 };
 
 class Wr {

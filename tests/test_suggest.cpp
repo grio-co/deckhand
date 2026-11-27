@@ -268,7 +268,7 @@ void test_transitions_backfill_and_migration() {
   {
     Library lib(path);  // migrates 8 -> 10 and backfills from the history and the stored phrases
     Stmt s(lib.db(), "SELECT max(version) FROM schema_version");
-    CHECK(s.step() && s.i64(0) == 10 && kLibrarySchemaVersion == 10);
+    CHECK(s.step() && s.i64(0) == kLibrarySchemaVersion && kLibrarySchemaVersion == 11);
     CHECK(lib.transition(a, b)->count == 1 && lib.transition(b, c)->count == 1 && lib.transition(c, a)->count == 1);
     CHECK(!lib.transition(a, c));
     const std::string esql = "SELECT energy_intro, energy_outro FROM track_phrases WHERE track_id = " + std::to_string(a);

@@ -10,6 +10,7 @@
 namespace deckhand {
 
 struct FxUnit;
+struct FxCtx;
 
 struct PluginSlot {
   plugins::PluginInfo info;
@@ -25,7 +26,8 @@ bool fx_plugin_attach(FxUnit& u, const plugins::PluginInfo& info, double sr, std
 // Device rate changed: reopens the plug-in at the new rate keeping its state (non-real-time, device stopped).
 void fx_plugin_rate(FxUnit& u, double sr);
 // Real-time: runs the unit's plug-in in place.
-void fx_plugin_run(FxUnit& u, float* buf, int n);
+// The tempo (from cx.bf) and cx.beat_pos are handed to the plug-in as its host tempo and beat position.
+void fx_plugin_run(FxUnit& u, const FxCtx& cx, float* buf, int n);
 bool fx_plugin_busy(const FxUnit& u);
 // JSON for PluginOpKind::Info.
 std::string fx_plugin_info_json(const FxUnit& u);

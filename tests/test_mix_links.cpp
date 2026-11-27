@@ -257,7 +257,7 @@ void test_migration() {
   {
     Library lib(d.db());  // migrates 9 -> 10
     Stmt s(lib.db(), "SELECT max(version) FROM schema_version");
-    CHECK(s.step() && s.i64(0) == 10 && kLibrarySchemaVersion == 10);
+    CHECK(s.step() && s.i64(0) == kLibrarySchemaVersion && kLibrarySchemaVersion == 11);
     const auto ids = lib.track_ids(0, "");
     CHECK(ids.size() == 1);
     const auto b = add(lib, "b");

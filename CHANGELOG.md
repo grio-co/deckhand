@@ -6,6 +6,25 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Record from an input (vinyl): a panel (Cmd/Ctrl+Alt+Shift+V) with input chooser, level meter and
+  clip count, record/pause/stop to a crash-safe WAV (RF64 beyond 4 GB); after recording, the side
+  is split into tracks at the gaps with draggable split points, optional click repair, rumble
+  filter, DC removal, normalise and fades, and exported as tagged WAV or AIFF. "Export an edited
+  copy" of a library track. `deckhandctl capture`, 15 REST routes
+  ([docs/CAPTURE.md](docs/CAPTURE.md)). Tested on synthetic audio and a fake input only; no
+  FLAC export. Engine protocol 11.
+- Playlist trash: deleting a playlist, smart playlist or folder (also when the deletion arrives
+  through sync) moves it to a restorable trash with its contents, order and place in the tree;
+  undoable; rows in the trash panel, REST routes, `deckhandctl playlist-trash`. Library schema 11.
+- Four effects: Riser (builds over a set number of beats, returns to dry on the next beat when
+  released), Band Kill (three-band isolator with full kill), Reverser, Auto Pan. Unheard.
+- Sequencer steps can trigger a slice of a sliced sample (slice row in the sampler panel).
+- Hosted plug-ins receive the host tempo and beat position.
+- Sync: stored audio no playlist uses is removed after a grace period (`sync.audio_cleanup_days`,
+  default 30).
+- Vocal regions on the overview waveform; loop in/out buttons on the `skull` skin.
+- Tests that call every REST route added since the chain editor (196 operations in all).
+
 - Effect chain editor: a panel (CHAIN button on each deck, Cmd/Ctrl+Alt+Shift+C) to add, remove,
   reorder, switch and mix the effects of a deck, the master, the microphone, the sampler or a stem
   bus, with named presets. Never seen on screen.
@@ -231,6 +250,13 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 - Tests for the library, analysis, API, export, effects, scheduling, languages, skins and streaming.
 
 ### Fixed
+- Sync: a locked beat grid is no longer replaced by a re-analysis from another device.
+- Engine: the beat position given to chain effects was taken at the end of each rendered chunk,
+  so beat-locked effects drifted by the chunk size.
+- `DELETE /v1/library/trash` with a malformed `older_than_days` emptied the whole trash; it now
+  answers 400. The relocate scan route ran without the library lock. Relocate, relink and the
+  sync music folder rejected Windows paths.
+- `docs/openapi.yaml` now parses with a strict YAML parser.
 - Engine helper: a busy UI is no longer reported as lost after 3 s (now 10 s, or 1 s if the UI
   process is gone), and repeated loss/attach log lines are summarised.
 - Engine helper: a second controller-settings request could hang the helper's service thread.

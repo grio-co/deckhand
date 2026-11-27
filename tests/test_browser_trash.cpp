@@ -59,6 +59,27 @@ int main() {
     CHECK(empty_trash(lib) == 1);
     CHECK(lib.deleted_tracks().empty());
     CHECK(!lib.restore_track(b));
+
+    // playlist trash: its journal rows have track id 0 and must read as steps of their own
+    const std::int64_t pl = lib.create_playlist(0, "Mix", false);
+    const std::int64_t entry = lib.delete_playlist(pl);
+    CHECK(entry > 0);
+    auto recent = recent_history_steps(lib);
+    CHECK(!recent.empty() && is_playlist_trash_step(recent.front()) && recent.front().track_id == 0);
+    CHECK(playlist_trash_step_deleted(recent.front()) && playlist_trash_step_title(lib, recent.front()) == "Mix");
+    CHECK(lib.deleted_playlists().size() == 1);
+    CHECK(undo_step(lib, recent.front()).status == UndoStatus::Ok);  // undo = restore
+    CHECK(lib.deleted_playlists().empty());
+    recent = recent_history_steps(lib);
+    CHECK(is_playlist_trash_step(recent.front()) && !playlist_trash_step_deleted(recent.front()) && playlist_trash_step_title(lib, recent.front()) == "Mix");
+    const auto all = recent_history_steps(lib, 50);
+    for (const HistoryStep& h : all)
+      if (!is_playlist_trash_step(h)) CHECK(h.track_id != 0);
+    // the track trash purge takes the playlist trash with it
+    lib.delete_playlist(lib.playlists().front().id);
+    CHECK(lib.deleted_playlists().size() == 1);
+    empty_trash(lib);
+    CHECK(lib.deleted_playlists().empty());
   }
   fs::remove_all(dir, ec);
   std::puts("browser trash and history: all checks passed");

@@ -203,6 +203,7 @@ tags:
   - {name: Effects}
   - {name: Sampler}
   - {name: Recording}
+  - {name: Capture, description: "Recording from an analogue input, splitting a side into tracks, export (docs/CAPTURE.md)."}
   - {name: Library}
   - {name: History}
   - {name: Export}
@@ -1149,6 +1150,27 @@ paths:
         "400": {$ref: "#/components/responses/BadRequest"}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/library/tracks/{id}/export-edit:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+    post:
+      tags: [Capture]
+      operationId: exportEditedTrack
+      summary: Export an edited copy of a library track
+      description: "Required scope: `export`. Body: `out` (absolute file, .wav or .aiff), `start` and `end` in seconds (end 0 = to the end), `container` (wav or aiff), `bits` (16, 24 or 32; AIFF 16 or 24), `overwrite` and `cleanup` (`remove_dc`, `rumble_filter`, `rumble_hz`, `click_repair`, `normalise`, `target_lufs`, `fade_in_ms`, `fade_out_ms`; everything off by default). The original is never written to: 409 when `out` is the original or any existing file (unless `overwrite`)."
+      x-scope: "export"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/library/tracks/{id}/relink:
     post:
       tags: [Library]
@@ -1194,7 +1216,7 @@ paths:
       tags: [Settings]
       operationId: getSync
       summary: Sync settings and the result of the last run
-      description: "Required scope: `read`. `config` holds the sync switches, audio playlists, music folder and budgets; `last` the numbers of the last run (including `links_pending`, `analysis_applied` and the audio step)."
+      description: "Required scope: `read`. `config` holds the sync switches, audio playlists, music folder and budgets; `last` the numbers of the last run (including `links_pending`, `analysis_applied` and the audio step, whose `removed`, `freed_bytes` and `cleanup_pending` tell what the clean-up deleted and what still waits out its grace period). `config.audio_cleanup_days` is the clean-up delay."
       x-scope: "read"
       responses:
         "200": {description: OK, content: {application/json: {schema: {type: object}}}}
@@ -1218,7 +1240,7 @@ paths:
       tags: [Settings]
       operationId: putSyncConfig
       summary: Change the sync switches
-      description: "Required scope: `admin`. Any of mix_links, analysis, audio_playlists (playlist ids), music_folder, audio_budget_mb, audio_import_budget_mb, allow_unencrypted_audio (audio then goes unencrypted when no crypto library exists). The folder, name and passphrase are set through `/v1/settings/sync.folder` and friends."
+      description: "Required scope: `admin`. Any of mix_links, analysis, audio_playlists (playlist ids), music_folder, audio_budget_mb, audio_import_budget_mb, audio_cleanup_days (stored audio no playlist uses any more is removed after this many days: default 30, 0 = at once, negative = never), allow_unencrypted_audio (audio then goes unencrypted when no crypto library exists). The folder, name and passphrase are set through `/v1/settings/sync.folder` and friends."
       x-scope: "admin"
       requestBody:
         required: true
@@ -1456,6 +1478,248 @@ paths:
         "202": {$ref: "#/components/responses/ControlScheduled"}
         "400": {$ref: "#/components/responses/BadRequest"}
         "429": {$ref: "#/components/responses/RateLimited"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/capture/inputs:
+    get:
+      tags: [Capture]
+      operationId: getCaptureInputs
+      summary: Capture devices and the input that is open
+      description: "Required scope: `read`. `inputs` are the capture devices present (names for `device` in start); `current` is the input the engine has open."
+      x-scope: "read"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/capture:
+    get:
+      tags: [Capture]
+      operationId: getCapture
+      summary: Recording status
+      description: "Required scope: `read`. `state` is idle, recording, paused or stopped (a finished side is held for splitting and export). Level in dB: `peak_db` of the latest block, `hold_db` a decaying peak hold, `rms_db`; `clips` counts clipped samples; `dropped_frames` should stay 0."
+      x-scope: "read"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/capture/meter:
+    get:
+      tags: [Capture]
+      operationId: getCaptureMeter
+      summary: Level meter
+      description: "Required scope: `read`. The meter part of the status, for polling."
+      x-scope: "read"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/capture/start:
+    post:
+      tags: [Capture]
+      operationId: startCapture
+      summary: Start recording from an input
+      description: "Required scope: `control`. Body (all optional): `device` (a name from the inputs list, empty = the system default; the engine's microphone input is replaced while recording), `channel` (0..62, first channel), `stereo` (default true; false = one channel, recorded to both sides), `format` (pcm16, pcm24 default, float32) and `name` (file name without extension, default capture-date-time) in the capture folder. 409 when already recording or the input cannot be opened."
+      x-scope: "control"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/capture/pause:
+    post:
+      tags: [Capture]
+      operationId: pauseCapture
+      summary: Pause or resume
+      description: "Required scope: `control`. Body {\"paused\": true|false} (default true). Audio that arrives while paused is thrown away (between sides)."
+      x-scope: "control"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/capture/stop:
+    post:
+      tags: [Capture]
+      operationId: stopCapture
+      summary: Stop recording
+      description: "Required scope: `control`. Closes the file; the side can then be analysed and exported."
+      x-scope: "control"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/capture/load:
+    post:
+      tags: [Capture]
+      operationId: loadCapture
+      summary: Open an existing recording as the current side
+      description: "Required scope: `control`. Body {\"path\": absolute WAV file}. Not while recording."
+      x-scope: "control"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/capture/analyse:
+    post:
+      tags: [Capture]
+      operationId: analyseCapture
+      summary: Analyse the side for track boundaries
+      description: "Required scope: `control`. Reads the whole file (blocks). The optional body sets the split settings: `min_gap_s`, `min_track_s`, `min_depth_db`, `adapt_db`, `max_gap_spread_db`, `min_confidence`, `onset_db`, `fade_db`, `fade_tolerance_s`, `lead_in_pad_s`, `lead_out_pad_s`, `rumble_hz` (numbers within sane ranges, else 400)."
+      x-scope: "control"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/capture/splits:
+    get:
+      tags: [Capture]
+      operationId: getCaptureSplits
+      summary: Split points, pieces and the settings in use
+      description: "Required scope: `read`. `points` (index, frame, seconds, confidence, `user` for points the user added or moved), `pieces` (start, end, empty, title; `?contiguous=1` tiles the audible range with no lost frame), `settings`, and with `?envelope=N` the side's level envelope in N buckets (dB) for drawing. 409 before the analysis."
+      x-scope: "read"
+      parameters:
+      - {name: envelope, in: query, required: false, description: "number of envelope values (0..4000)", schema: {type: integer}}
+      - {name: contiguous, in: query, required: false, schema: {type: string, enum: ["0", "1"]}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Capture]
+      operationId: setCaptureSplitSettings
+      summary: Re-run the split detection with new settings
+      description: "Required scope: `control`. Body: any of `min_gap_s`, `min_track_s`, `min_depth_db`, `adapt_db`, `max_gap_spread_db`, `min_confidence`, `onset_db`, `fade_db`, `fade_tolerance_s`, `lead_in_pad_s`, `lead_out_pad_s`, `rumble_hz`. The user's own points stay; an automatic point the user removed is not brought back."
+      x-scope: "control"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Capture]
+      operationId: addCaptureSplit
+      summary: Add a split point
+      description: "Required scope: `control`. Body `frame` (whole number above 0) or `seconds`. 409 outside the recording or before the analysis. `index` in the answer is where it landed in the sorted list."
+      x-scope: "control"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/capture/splits/{index}:
+    parameters:
+      - {name: index, in: path, required: true, description: Position in the sorted list of split points., schema: {type: integer, minimum: 0}}
+    put:
+      tags: [Capture]
+      operationId: moveCaptureSplit
+      summary: Move a split point
+      description: "Required scope: `control`. Body `frame` or `seconds`. The point becomes a user point (indexes of later points can change: list again)."
+      x-scope: "control"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Capture]
+      operationId: removeCaptureSplit
+      summary: Remove a split point
+      description: "Required scope: `control`."
+      x-scope: "control"
+      responses:
+        "204": {description: Done.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/capture/tags:
+    put:
+      tags: [Capture]
+      operationId: setCaptureTags
+      summary: Names for the exported tracks
+      description: "Required scope: `control`. Body: `artist`, `album`, `genre`, `year`, `comment` (text) and `titles` (one per non-empty piece, in order; missing ones become Track NN)."
+      x-scope: "control"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/capture/export:
+    post:
+      tags: [Capture]
+      operationId: exportCapture
+      summary: Export the pieces of the side
+      description: "Required scope: `export`. Body: `dir` (absolute folder, created when missing), `contiguous` (true: pieces tile the audible range with no lost frame), `container` (wav or aiff), `bits` (16, 24 or 32; AIFF 16 or 24), `overwrite` and `cleanup` (`remove_dc`, `rumble_filter`, `rumble_hz`, `click_repair`, `normalise`, `target_lufs`, `fade_in_ms`, `fade_out_ms`; everything off by default). Files are named `NN - Artist - Title`. Existing files are kept unless `overwrite`; the answer lists every file with its own `ok`."
+      x-scope: "export"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
         default: {$ref: "#/components/responses/Error"}
 
   /v1/recording:
@@ -1813,7 +2077,7 @@ paths:
       tags: [Library]
       operationId: emptyTrash
       summary: Empty the trash for good
-      description: "Required scope: `admin`. Forgets every removed track (or those removed more than `older_than_days` ago). Cannot be undone."
+      description: "Required scope: `admin`. Forgets every removed track (or those removed more than `older_than_days` ago), and the deleted playlists of the same age (see `/v1/library/playlist-trash`). Cannot be undone."
       x-scope: "admin"
       parameters:
       - {name: older_than_days, in: query, required: false, description: "only older ones", schema: {type: string}}
@@ -1842,6 +2106,57 @@ paths:
                   id: {type: integer, format: int64}
         "404": {$ref: "#/components/responses/NotFound"}
         "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/playlist-trash:
+    get:
+      tags: [Library]
+      operationId: listPlaylistTrash
+      summary: Deleted playlists, folders and smart playlists that can still be restored
+      description: "Required scope: `library:read`. Deleting a playlist or folder (with everything in it) or a smart playlist moves it here; entries are kept 30 days. `kind` is playlist, folder or smart; `id` is the trash entry (not the playlist's old id, which is `old_id`); `playlists`, `folders` and `tracks` count what a restore brings back."
+      x-scope: "library:read"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        default: {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Library]
+      operationId: purgePlaylistTrash
+      summary: Forget deleted playlists for good
+      description: "Required scope: `admin`. Drops every entry, or those deleted more than `older_than_days` ago (a whole number; anything else is 400). Cannot be undone. `DELETE /v1/library/trash` drops these entries too."
+      x-scope: "admin"
+      parameters:
+      - {name: older_than_days, in: query, required: false, description: "only older ones", schema: {type: string}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/playlist-trash/{id}:
+    parameters:
+      - {name: id, in: path, required: true, description: Trash entry id from the list., schema: {type: integer, format: int64, minimum: 0}}
+    delete:
+      tags: [Library]
+      operationId: purgePlaylistTrashEntry
+      summary: Forget one deleted playlist for good
+      description: "Required scope: `admin`. Cannot be undone."
+      x-scope: "admin"
+      responses:
+        "204": {description: Done.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/playlist-trash/{id}/restore:
+    parameters:
+      - {name: id, in: path, required: true, description: Trash entry id from the list., schema: {type: integer, format: int64, minimum: 0}}
+    post:
+      tags: [Library]
+      operationId: restorePlaylist
+      summary: Restore a deleted playlist, folder or smart playlist
+      description: "Required scope: `library:write`. Contents, order, place in the tree, smart rules and a shared-playlist link come back. The old ids are reused when free; when the old folder is gone it goes to the top level, and a name already used there becomes `Name (restored)`. `id` in the answer is the restored playlist (or smart playlist)."
+      x-scope: "library:write"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
         default: {$ref: "#/components/responses/Error"}
 
   /v1/library/playlists:
@@ -2975,7 +3290,7 @@ paths:
                 track_ids: {type: array, items: {type: integer, format: int64}}
       responses:
         "200":
-          description: The report: profile, summary and one entry per track.
+          description: "The report: profile, summary and one entry per track."
           content:
             application/json:
               schema: {type: object, additionalProperties: true}
@@ -3529,7 +3844,7 @@ paths:
       tags: [Sampler]
       operationId: putSequencerPattern
       summary: Replace a pattern
-      description: "Required scope: `control`. Body `{"text": "dhseq1;..."}` replaces the whole pattern (400 when the text is not valid)."
+      description: "Required scope: `control`. Body `{\"text\": \"dhseq1;...\"}` replaces the whole pattern (400 when the text is not valid)."
       x-scope: control
       parameters:
         - {name: pattern, in: path, required: true, schema: {type: integer, format: int64}}
@@ -3553,13 +3868,13 @@ paths:
       tags: [Sampler]
       operationId: setSequencerStep
       summary: Set one step
-      description: "Required scope: `control`. Body: `step` (1..16) and `slot` (1..16) are required, `pattern` (1..8, default the one being played), `on` (default true), `velocity` (0..1, default: keep the cell's)."
+      description: "Required scope: `control`. Body: `step` (1..16) and `slot` (1..16) are required, `pattern` (1..8, default the one being played), `on` (default true), `velocity` (0..1, default: keep the cell's), `slice` (0 = the whole sample, 1..16 = that slice of a sliced slot; default: keep the cell's)."
       x-scope: control
       requestBody:
         required: true
         content:
           application/json:
-            schema: {type: object, required: [step, slot], properties: {pattern: {type: integer}, step: {type: integer}, slot: {type: integer}, on: {type: boolean}, velocity: {type: number}}}
+            schema: {type: object, required: [step, slot], properties: {pattern: {type: integer}, step: {type: integer}, slot: {type: integer}, on: {type: boolean}, velocity: {type: number}, slice: {type: integer, minimum: 0, maximum: 16}}}
       responses:
         "200":
           description: Done.
@@ -3575,7 +3890,7 @@ paths:
       tags: [Sampler]
       operationId: sequencerAction
       summary: Run, record, tempo, swing, select, queue or clear
-      description: "Required scope: `control`. `action` is one of `run` and `record` (body `{"on": true|false}`, none = toggle), `bpm` and `swing` (body `{"value": n}`; bpm 0 = follow the decks, swing 0..0.75), `select` (play pattern now) and `queue` (from the next bar), both with `{"pattern": 1..8}`, and `clear` (body `{"pattern": n}` or `{"all": true}`, none = the pattern being played; `slot` limits it to one slot). The same as the `seq.*` controls."
+      description: 'Required scope: `control`. `action` is one of `run` and `record` (body `{"on": true|false}`, none = toggle), `bpm` and `swing` (body `{"value": n}`; bpm 0 = follow the decks, swing 0..0.75), `select` (play pattern now) and `queue` (from the next bar), both with `{"pattern": 1..8}`, and `clear` (body `{"pattern": n}` or `{"all": true}`, none = the pattern being played; `slot` limits it to one slot). The same as the `seq.*` controls.'
       x-scope: control
       parameters:
         - {name: action, in: path, required: true, schema: {type: string, enum: [run, record, bpm, swing, select, queue, clear]}}
@@ -3616,7 +3931,7 @@ paths:
       tags: [Sampler]
       operationId: setSamplerSlices
       summary: Cut a slot into slices
-      description: "Required scope: `control`. Body `{"count": 0|8|16}` (0 = off). The same as `sampler.slot.<n>.slices`."
+      description: 'Required scope: `control`. Body `{"count": 0|8|16}` (0 = off). The same as `sampler.slot.<n>.slices`.'
       x-scope: control
       parameters:
         - {name: slot, in: path, required: true, schema: {type: integer, format: int64}}
@@ -3640,7 +3955,7 @@ paths:
       tags: [Sampler]
       operationId: triggerSamplerSlice
       summary: Play one slice
-      description: "Required scope: `control`. Plays slice `index` (1..16) of a sliced slot once. Optional body `{"velocity": 0..1}` (default full)."
+      description: 'Required scope: `control`. Plays slice `index` (1..16) of a sliced slot once. Optional body `{"velocity": 0..1}` (default full).'
       x-scope: control
       parameters:
         - {name: slot, in: path, required: true, schema: {type: integer, format: int64}}
@@ -3795,7 +4110,7 @@ paths:
       tags: [Library]
       operationId: linkDecks
       summary: Link two playheads
-      description: "Required scope: `library:write`. Body `{"from_deck": 1..4, "to_deck": 1..4}`: when the track on `from_deck` reaches its playhead, the track on `to_deck` starts from its own. 409 when a deck holds no library track."
+      description: 'Required scope: `library:write`. Body `{"from_deck": 1..4, "to_deck": 1..4}`: when the track on `from_deck` reaches its playhead, the track on `to_deck` starts from its own. 409 when a deck holds no library track.'
       x-scope: library:write
       requestBody:
         required: true

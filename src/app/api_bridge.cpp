@@ -3,6 +3,7 @@
 #include "deckhand/core/key_math.hpp"
 #include "deckhand/export/export_device.hpp"
 #include "deckhand/app/automix.hpp"
+#include "deckhand/app/capture_service.hpp"
 
 #ifndef DECKHAND_WITH_API
 #define DECKHAND_WITH_API 1
@@ -1999,6 +2000,8 @@ struct ApiBridge::Impl {
     // ---- trash ----
     s.add_route("DELETE", "/v1/library/trash", "admin", [this, q](const Request& r) {  // forgets deleted tracks for good
       const std::string days = q(r, "older_than_days");
+      if (!days.empty() && (days.size() > 6 || days.find_first_not_of("0123456789") != std::string::npos))
+        return Response::error(400, "older_than_days must be a whole number of days");  // "abc" or "-1" must not mean "everything"
       const int n = days.empty() ? 0 : static_cast<int>(std::clamp<long>(std::atol(days.c_str()), 0, 36500));
       int removed;
       {
@@ -2017,11 +2020,12 @@ struct ApiBridge::Impl {
       for (std::size_t i = 0; i < r.body["folders"].size(); ++i) {
         const std::string f = r.body["folders"].at(i).as_string();
         std::error_code ec;
-        if (f.empty() || f[0] != '/' || !std::filesystem::is_directory(f, ec)) return Response::error(400, "every folder must be an existing absolute directory");
+        if (!absolute_path(f) || !std::filesystem::is_directory(std::filesystem::u8path(f), ec)) return Response::error(400, "every folder must be an existing absolute directory");
         o.folders.push_back(f);
       }
       if (r.body.contains("duration_tolerance_ms")) o.duration_tolerance_ms = std::clamp(r.body["duration_tolerance_ms"].as_double(1500), 0.0, 60000.0);
       o.allow_name_only = r.body["allow_name_only"].as_bool(false);
+      std::lock_guard<std::mutex> lock(lib_mutex);  // the library is not thread-safe: the scan reads it like every other route
       return Response::ok(relocate_report_json(lib.relocate_scan(o)));
     });
     s.add_route("POST", "/v1/library/relocate/apply", "library:write", [this](const Request& r) {
@@ -2054,7 +2058,7 @@ struct ApiBridge::Impl {
       const std::string path = r.body["path"].as_string();
       if (!int_param(r, "id", id)) return Response::error(404, "no such track");
       std::error_code ec;
-      if (path.empty() || path[0] != '/' || !std::filesystem::is_regular_file(path, ec)) return Response::error(400, "path must be an existing absolute file");
+      if (!absolute_path(path) || !std::filesystem::is_regular_file(std::filesystem::u8path(path), ec)) return Response::error(400, "path must be an existing absolute file");
       RelocateResult res;
       {
         std::lock_guard<std::mutex> lock(lib_mutex);
@@ -2073,7 +2077,7 @@ struct ApiBridge::Impl {
       const std::string path = r.body["path"].as_string();
       if (!int_param(r, "id", id)) return Response::error(404, "no such track");
       std::error_code ec;
-      if (path.empty() || path[0] != '/' || !std::filesystem::is_regular_file(path, ec)) return Response::error(400, "path must be an existing absolute file");
+      if (!absolute_path(path) || !std::filesystem::is_regular_file(std::filesystem::u8path(path), ec)) return Response::error(400, "path must be an existing absolute file");
       std::lock_guard<std::mutex> lock(lib_mutex);
       if (!lib.track(id)) return Response::error(404, "no such track");
       return Response::ok(relocate_report_json(lib.relink_siblings(id, path)));
@@ -2098,6 +2102,7 @@ struct ApiBridge::Impl {
       c.set("audio_budget_mb", static_cast<std::int64_t>(std::atoll(lib.setting("sync.audio_budget_mb").c_str())));
       c.set("audio_import_budget_mb", static_cast<std::int64_t>(std::atoll(lib.setting("sync.audio_import_budget_mb").c_str())));
       c.set("allow_unencrypted_audio", lib.setting("sync.allow_unencrypted_audio", "0") == "1");
+      c.set("audio_cleanup_days", static_cast<std::int64_t>(audio_cleanup_days(lib.setting("sync.audio_cleanup_days"))));
       c.set("encryption_available", deckhand::sync::SyncEngine::encryption_available());
       j.set("config", std::move(c));
     }
@@ -2126,10 +2131,12 @@ struct ApiBridge::Impl {
         if (b.contains(k) && !b[k].is_bool()) return Response::error(400, std::string(k) + " must be true or false");
       for (const char* k : {"audio_budget_mb", "audio_import_budget_mb"})
         if (b.contains(k) && (!b[k].is_integer() || b[k].as_int() < 0 || b[k].as_int() > (1ll << 30))) return Response::error(400, std::string(k) + " must be a whole number of MiB, 0 = no limit");
+      if (b.contains("audio_cleanup_days") && (!b["audio_cleanup_days"].is_integer() || b["audio_cleanup_days"].as_int() > 36500))
+        return Response::error(400, "audio_cleanup_days must be a whole number of days: 0 = at once, negative = never");
       if (b.contains("music_folder")) {
         std::error_code ec;
         const std::string f = b["music_folder"].as_string();
-        if (!b["music_folder"].is_string() || (!f.empty() && (f[0] != '/' || !std::filesystem::is_directory(f, ec))))
+        if (!b["music_folder"].is_string() || (!f.empty() && (!absolute_path(f) || !std::filesystem::is_directory(std::filesystem::u8path(f), ec))))
           return Response::error(400, "music_folder must be an existing absolute directory, or \"\" for no import");
       }
       std::vector<std::int64_t> ids;
@@ -2155,10 +2162,409 @@ struct ApiBridge::Impl {
         flag("allow_unencrypted_audio", "sync.allow_unencrypted_audio");
         if (b.contains("audio_playlists")) lib.set_setting("sync.audio_playlists", format_id_list(ids));
         if (b.contains("music_folder")) lib.set_setting("sync.music_folder", b["music_folder"].as_string());
+        if (b.contains("audio_cleanup_days")) lib.set_setting("sync.audio_cleanup_days", std::to_string(b["audio_cleanup_days"].as_int()));
         if (b.contains("audio_budget_mb")) lib.set_setting("sync.audio_budget_mb", std::to_string(b["audio_budget_mb"].as_int()));
         if (b.contains("audio_import_budget_mb")) lib.set_setting("sync.audio_import_budget_mb", std::to_string(b["audio_import_budget_mb"].as_int()));
       }
       return Response::ok(sync_json());
+    });
+  }
+
+  // ---- recording from an analogue input ---------------------------------------------------------------------------------------
+  static Json capture_status_json(CaptureService& c) {
+    const CaptureService::Status st = c.status();
+    static const char* names[] = {"idle", "recording", "paused", "stopped"};
+    Json j = Json::object();
+    j.set("state", names[static_cast<int>(st.state)]);
+    j.set("path", st.path);
+    j.set("input", st.input);
+    j.set("seconds", st.seconds);
+    j.set("frames", static_cast<std::int64_t>(st.frames));
+    j.set("sample_rate", static_cast<std::int64_t>(st.sample_rate));
+    j.set("peak_db", static_cast<double>(st.peak_db));
+    j.set("hold_db", static_cast<double>(st.hold_db));
+    j.set("rms_db", static_cast<double>(st.rms_db));
+    j.set("clips", static_cast<std::int64_t>(st.clips));
+    j.set("dropped_frames", static_cast<std::int64_t>(st.dropped));
+    j.set("analysed", st.analysed);
+    j.set("analysing", st.analysing);
+    j.set("points", st.points);
+    j.set("error", st.error);
+    return j;
+  }
+  static bool capture_split_settings(const Json& b, capture::SplitSettings& s, std::string& error) {
+    struct F { const char* key; double* v; double lo, hi; };
+    const F fields[] = {{"min_gap_s", &s.min_gap_s, 0.1, 60},       {"min_track_s", &s.min_track_s, 1, 3600},    {"min_depth_db", &s.min_depth_db, 3, 80},
+                        {"adapt_db", &s.adapt_db, 1, 60},           {"max_gap_spread_db", &s.max_gap_spread_db, 0.5, 30},
+                        {"min_confidence", &s.min_confidence, 0, 1}, {"onset_db", &s.onset_db, 1, 40},             {"fade_db", &s.fade_db, 0.5, 40},
+                        {"fade_tolerance_s", &s.fade_tolerance_s, 0, 30}, {"lead_in_pad_s", &s.lead_in_pad_s, 0, 5}, {"lead_out_pad_s", &s.lead_out_pad_s, 0, 5},
+                        {"rumble_hz", &s.rumble_hz, 10, 400}};
+    for (const F& f : fields) {
+      if (!b.contains(f.key)) continue;
+      if (!b[f.key].is_number() || b[f.key].as_double() < f.lo || b[f.key].as_double() > f.hi) {
+        error = std::string(f.key) + " must be a number from " + std::to_string(f.lo) + " to " + std::to_string(f.hi);
+        return false;
+      }
+      *f.v = b[f.key].as_double();
+    }
+    return true;
+  }
+  static Json capture_split_settings_json(const capture::SplitSettings& s) {
+    Json j = Json::object();
+    j.set("min_gap_s", s.min_gap_s);
+    j.set("min_track_s", s.min_track_s);
+    j.set("min_depth_db", s.min_depth_db);
+    j.set("adapt_db", s.adapt_db);
+    j.set("max_gap_spread_db", s.max_gap_spread_db);
+    j.set("min_confidence", s.min_confidence);
+    j.set("onset_db", s.onset_db);
+    j.set("fade_db", s.fade_db);
+    j.set("fade_tolerance_s", s.fade_tolerance_s);
+    j.set("lead_in_pad_s", s.lead_in_pad_s);
+    j.set("lead_out_pad_s", s.lead_out_pad_s);
+    j.set("rumble_hz", s.rumble_hz);
+    return j;
+  }
+  // Export options shared by the two export routes: container, bit depth, overwrite and the clean-up switches.
+  static bool capture_export_settings(const Json& b, capture::ExportSettings& e, std::string& error) {
+    if (b.contains("container")) {
+      const std::string c = b["container"].as_string();
+      if (c == "wav") e.container = capture::Container::Wav;
+      else if (c == "aiff") e.container = capture::Container::Aiff;
+      else {
+        error = "container is wav or aiff";
+        return false;
+      }
+    }
+    if (b.contains("bits")) {
+      const std::int64_t bits = b["bits"].as_int(0);
+      if (!b["bits"].is_integer() || (bits != 16 && bits != 24 && bits != 32)) {
+        error = "bits is 16, 24 or 32";
+        return false;
+      }
+      e.format = bits == 16 ? capture::SampleFormat::Pcm16 : bits == 32 ? capture::SampleFormat::Float32 : capture::SampleFormat::Pcm24;
+    }
+    if (e.container == capture::Container::Aiff && e.format == capture::SampleFormat::Float32) {
+      error = "AIFF holds 16 or 24 bits";
+      return false;
+    }
+    e.overwrite = b["overwrite"].as_bool(false);
+    const Json& c = b["cleanup"];
+    if (b.contains("cleanup") && !c.is_object()) {
+      error = "cleanup is an object";
+      return false;
+    }
+    for (const char* k : {"remove_dc", "rumble_filter", "click_repair", "normalise"})
+      if (c.contains(k) && !c[k].is_bool()) {
+        error = std::string(k) + " must be true or false";
+        return false;
+      }
+    e.cleanup.remove_dc = c["remove_dc"].as_bool(false);
+    e.cleanup.rumble_filter = c["rumble_filter"].as_bool(false);
+    e.cleanup.click_repair = c["click_repair"].as_bool(false);
+    e.cleanup.normalise = c["normalise"].as_bool(false);
+    const auto num = [&](const char* k, double& v, double lo, double hi) {
+      if (!c.contains(k)) return true;
+      if (!c[k].is_number() || c[k].as_double() < lo || c[k].as_double() > hi) {
+        error = std::string(k) + " must be a number from " + std::to_string(lo) + " to " + std::to_string(hi);
+        return false;
+      }
+      v = c[k].as_double();
+      return true;
+    };
+    return num("rumble_hz", e.cleanup.rumble_hz, 10, 200) && num("target_lufs", e.cleanup.target_lufs, -40, 0) && num("fade_in_ms", e.cleanup.fade_in_ms, 0, 5000) &&
+           num("fade_out_ms", e.cleanup.fade_out_ms, 0, 5000);
+  }
+  static Json capture_result_json(const capture::ExportResult& r) {
+    Json j = Json::object();
+    j.set("ok", r.ok);
+    j.set("path", r.path);
+    j.set("error", r.error);
+    j.set("frames", static_cast<std::int64_t>(r.frames));
+    j.set("start", static_cast<std::int64_t>(r.start));
+    j.set("end", static_cast<std::int64_t>(r.end));
+    j.set("clicks_repaired", static_cast<std::int64_t>(r.cleanup.clicks_repaired));
+    j.set("gain_db", r.cleanup.gain_db);
+    return j;
+  }
+  // A frame given as "frame" or "seconds" (of the side's rate).
+  static bool capture_frame_arg(const Json& b, CaptureService& c, std::uint64_t& frame, std::string& error) {
+    const std::uint32_t rate = c.side_rate();
+    if (b["frame"].is_integer() && b["frame"].as_int() > 0) {
+      frame = static_cast<std::uint64_t>(b["frame"].as_int());
+      return true;
+    }
+    if (b["seconds"].is_number() && b["seconds"].as_double() > 0 && rate > 0) {
+      frame = static_cast<std::uint64_t>(b["seconds"].as_double() * rate);
+      return true;
+    }
+    error = "give frame (a whole number above 0) or seconds";
+    return false;
+  }
+  void add_capture_routes() {
+    auto& s = *server;
+    const auto svc = [this](Response& bad) -> CaptureService* {
+      CaptureService* c = host.api_capture();
+      if (!c) bad = Response::error(404, "recording is not available");
+      return c;
+    };
+    s.add_route("GET", "/v1/capture/inputs", "read", [this, svc](const Request&) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      Json items = Json::array();
+      for (const std::string& n : c->inputs()) items.push_back(Json(n));
+      const InputStatus st = host.api_engine().input_status();
+      Json cur = Json::object();
+      cur.set("open", st.open);
+      cur.set("name", st.name);
+      cur.set("sample_rate", static_cast<std::int64_t>(st.sample_rate));
+      Json j = Json::object();
+      j.set("inputs", std::move(items));
+      j.set("current", std::move(cur));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("GET", "/v1/capture", "read", [svc](const Request&) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      return c ? Response::ok(capture_status_json(*c)) : bad;
+    });
+    s.add_route("GET", "/v1/capture/meter", "read", [svc](const Request&) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      const CaptureService::Status st = c->status();
+      Json j = Json::object();
+      j.set("state", capture_status_json(*c)["state"]);
+      j.set("peak_db", static_cast<double>(st.peak_db));
+      j.set("hold_db", static_cast<double>(st.hold_db));
+      j.set("rms_db", static_cast<double>(st.rms_db));
+      j.set("clips", static_cast<std::int64_t>(st.clips));
+      j.set("seconds", st.seconds);
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/capture/start", "control", [svc](const Request& r) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      CaptureService::StartArgs a;
+      const Json& b = r.body;
+      if (b.contains("device") && !b["device"].is_string()) return Response::error(400, "device is a name from GET /v1/capture/inputs, or \"\" for the default");
+      if (b.contains("channel") && (!b["channel"].is_integer() || b["channel"].as_int() < 0 || b["channel"].as_int() > 62)) return Response::error(400, "channel is 0..62");
+      if (b.contains("stereo") && !b["stereo"].is_bool()) return Response::error(400, "stereo must be true or false");
+      if (b.contains("format") && (!b["format"].is_string() || (b["format"].as_string() != "pcm16" && b["format"].as_string() != "pcm24" && b["format"].as_string() != "float32")))
+        return Response::error(400, "format is pcm16, pcm24 or float32");
+      if (b.contains("name") && (!b["name"].is_string() || b["name"].as_string().size() > 120)) return Response::error(400, "name is a file name without extension");
+      a.device = b["device"].as_string();
+      a.channel = static_cast<int>(b["channel"].as_int(0));
+      a.stereo = b["stereo"].as_bool(true);
+      if (b.contains("format")) a.format = b["format"].as_string();
+      a.name = b["name"].as_string();
+      std::string error;
+      if (!c->start(a, error)) return Response::error(409, error);
+      return Response::ok(capture_status_json(*c));
+    });
+    s.add_route("POST", "/v1/capture/pause", "control", [svc](const Request& r) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      if (r.body.contains("paused") && !r.body["paused"].is_bool()) return Response::error(400, "paused must be true or false");
+      std::string error;
+      if (!c->set_paused(r.body["paused"].as_bool(true), error)) return Response::error(409, error);
+      return Response::ok(capture_status_json(*c));
+    });
+    s.add_route("POST", "/v1/capture/stop", "control", [svc](const Request&) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      std::string error;
+      if (!c->stop(error)) return Response::error(409, error);
+      return Response::ok(capture_status_json(*c));
+    });
+    s.add_route("POST", "/v1/capture/load", "control", [svc](const Request& r) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      std::error_code ec;
+      const std::string path = r.body["path"].as_string();
+      if (!absolute_path(path) || !std::filesystem::is_regular_file(std::filesystem::u8path(path), ec)) return Response::error(400, "path must be an existing absolute WAV file");
+      std::string error;
+      if (!c->load(path, error)) return Response::error(409, error);
+      return Response::ok(capture_status_json(*c));
+    });
+    s.add_route("POST", "/v1/capture/analyse", "control", [svc](const Request& r) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      capture::SplitSettings set = c->settings();
+      std::string error;
+      if (!r.body.is_object() && !r.body.is_null()) return Response::error(400, "the body is an object of split settings");
+      if (!capture_split_settings(r.body, set, error)) return Response::error(400, error);
+      if (!c->analyse(set, error)) return Response::error(409, error);
+      return Response::ok(capture_status_json(*c));
+    });
+    s.add_route("GET", "/v1/capture/splits", "read", [svc](const Request& r) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      if (!c->status().analysed) return Response::error(409, "analyse the side first (POST /v1/capture/analyse)");
+      Json pts = Json::array();
+      int i = 0;
+      for (const auto& p : c->points()) {
+        Json o = Json::object();
+        o.set("index", i++);
+        o.set("frame", static_cast<std::int64_t>(p.frame));
+        o.set("seconds", p.seconds);
+        o.set("confidence", p.confidence);
+        o.set("user", p.user);
+        pts.push_back(std::move(o));
+      }
+      Json pcs = Json::array();
+      for (const auto& p : c->pieces(r.query.count("contiguous") && r.query.at("contiguous") == "1")) {
+        Json o = Json::object();
+        o.set("start", static_cast<std::int64_t>(p.start));
+        o.set("end", static_cast<std::int64_t>(p.end));
+        o.set("start_s", p.start_s);
+        o.set("end_s", p.end_s);
+        o.set("empty", p.empty);
+        o.set("title", p.title);
+        pcs.push_back(std::move(o));
+      }
+      Json j = Json::object();
+      j.set("seconds", c->side_seconds());
+      j.set("sample_rate", static_cast<std::int64_t>(c->side_rate()));
+      j.set("points", std::move(pts));
+      j.set("pieces", std::move(pcs));
+      j.set("settings", capture_split_settings_json(c->settings()));
+      const auto it = r.query.find("envelope");
+      if (it != r.query.end()) {
+        const long n = std::clamp<long>(std::atol(it->second.c_str()), 0, 4000);
+        Json env = Json::array();
+        for (const float v : c->envelope(static_cast<int>(n))) env.push_back(Json(static_cast<double>(v)));
+        j.set("envelope", std::move(env));
+      }
+      return Response::ok(std::move(j));
+    });
+    s.add_route("PUT", "/v1/capture/splits", "control", [svc](const Request& r) {  // new settings, the user's edits stay
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      capture::SplitSettings set = c->settings();
+      std::string error;
+      if (!r.body.is_object()) return Response::error(400, "the body is an object of split settings");
+      if (!capture_split_settings(r.body, set, error)) return Response::error(400, error);
+      if (!c->rerun(set, error)) return Response::error(409, error);
+      return Response::ok(capture_status_json(*c));
+    });
+    s.add_route("POST", "/v1/capture/splits", "control", [svc](const Request& r) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      std::uint64_t frame = 0;
+      std::string error;
+      if (!capture_frame_arg(r.body, *c, frame, error)) return Response::error(400, error);
+      std::size_t index = 0;
+      if (!c->add_point(frame, &index, error)) return Response::error(409, error);
+      Json j = Json::object();
+      j.set("index", static_cast<std::int64_t>(index));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("PUT", "/v1/capture/splits/{index}", "control", [svc](const Request& r) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      std::int64_t idx = 0;
+      if (!int_param(r, "index", idx)) return Response::error(404, "no such split point");
+      std::uint64_t frame = 0;
+      std::string error;
+      if (!capture_frame_arg(r.body, *c, frame, error)) return Response::error(400, error);
+      if (!c->move_point(static_cast<std::size_t>(idx), frame, error)) return Response::error(404, error);
+      return Response::ok(capture_status_json(*c));
+    });
+    s.add_route("DELETE", "/v1/capture/splits/{index}", "control", [svc](const Request& r) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      std::int64_t idx = 0;
+      std::string error;
+      if (!int_param(r, "index", idx) || !c->remove_point(static_cast<std::size_t>(idx), error)) return Response::error(404, "no such split point");
+      Response ok;
+      ok.status = 204;
+      return ok;
+    });
+    s.add_route("PUT", "/v1/capture/tags", "control", [svc](const Request& r) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      const Json& b = r.body;
+      if (!b.is_object()) return Response::error(400, "the body is an object of tags");
+      CaptureService::AlbumTags a = c->album();
+      for (const char* k : {"artist", "album", "genre", "year", "comment"})
+        if (b.contains(k) && (!b[k].is_string() || b[k].as_string().size() > 300)) return Response::error(400, std::string(k) + " must be text");
+      if (b.contains("artist")) a.artist = b["artist"].as_string();
+      if (b.contains("album")) a.album = b["album"].as_string();
+      if (b.contains("genre")) a.genre = b["genre"].as_string();
+      if (b.contains("year")) a.year = b["year"].as_string();
+      if (b.contains("comment")) a.comment = b["comment"].as_string();
+      if (b.contains("titles")) {
+        if (!b["titles"].is_array() || b["titles"].size() > 200) return Response::error(400, "titles is a list of track names, one per piece");
+        std::vector<std::string> t;
+        for (std::size_t i = 0; i < b["titles"].size(); ++i) {
+          if (!b["titles"].at(i).is_string() || b["titles"].at(i).as_string().size() > 300) return Response::error(400, "titles holds text only");
+          t.push_back(b["titles"].at(i).as_string());
+        }
+        c->set_titles(t);
+      }
+      c->set_album(a);
+      return Response::ok(capture_status_json(*c));
+    });
+    s.add_route("POST", "/v1/capture/export", "export", [svc](const Request& r) {
+      Response bad;
+      CaptureService* c = svc(bad);
+      if (!c) return bad;
+      capture::ExportSettings es;
+      std::string error;
+      if (!capture_export_settings(r.body, es, error)) return Response::error(400, error);
+      const std::string dir = r.body["dir"].as_string();
+      if (!absolute_path(dir)) return Response::error(400, "dir must be an absolute folder (it is created when missing)");
+      std::error_code ec;
+      if (std::filesystem::exists(std::filesystem::u8path(dir), ec) && !std::filesystem::is_directory(std::filesystem::u8path(dir), ec)) return Response::error(400, "dir is a file");
+      const auto res = c->export_pieces(dir, es, r.body["contiguous"].as_bool(false), error);
+      if (res.empty()) return Response::error(409, error.empty() ? "nothing to export" : error);
+      Json items = Json::array();
+      bool all = true;
+      for (const auto& x : res) {
+        all = all && x.ok;
+        items.push_back(capture_result_json(x));
+      }
+      Json j = Json::object();
+      j.set("ok", all);
+      j.set("files", std::move(items));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/tracks/{id}/export-edit", "export", [this](const Request& r) {  // an edited copy: trim, fades, normalise
+      std::int64_t id = 0;
+      std::string source;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        const auto row = int_param(r, "id", id) ? lib.track(id) : std::nullopt;
+        if (!row) return Response::error(404, "no such track");
+        source = row->path;
+      }
+      const Json& b = r.body;
+      const std::string out = b["out"].as_string();
+      if (!absolute_path(out)) return Response::error(400, "out must be an absolute file path (.wav or .aiff)");
+      for (const char* k : {"start", "end"})
+        if (b.contains(k) && (!b[k].is_number() || b[k].as_double() < 0 || b[k].as_double() > 86400)) return Response::error(400, std::string(k) + " is seconds from the start");
+      const double start = b["start"].as_double(0), end = b["end"].as_double(0);
+      if (end > 0 && end <= start) return Response::error(400, "end must be after start (0 = to the end)");
+      capture::ExportSettings es;
+      std::string error;
+      if (out.size() > 5 && out.compare(out.size() - 5, 5, ".aiff") == 0) es.container = capture::Container::Aiff;
+      if (!capture_export_settings(b, es, error)) return Response::error(400, error);
+      const capture::ExportResult res = CaptureService::export_edit(source, start, end, out, es, nullptr, error);
+      if (!res.ok) return Response::error(409, error.empty() ? res.error : error);
+      return Response::ok(capture_result_json(res));
     });
   }
 
@@ -2981,9 +3387,19 @@ struct ApiBridge::Impl {
         return Response::error(400, "pattern 1..8, step 1..16 and slot 1..16 are needed");
       const double vel = r.body["velocity"].is_number() ? r.body["velocity"].as_double() : -1.0;
       if (vel > 1.0) return Response::error(400, "velocity is 0..1");
+      int slice = -1;  // keep the cell's slice
+      if (r.body.contains("slice")) {
+        const Json& sl = r.body["slice"];
+        if (!sl.is_integer() || sl.as_int() < 0 || sl.as_int() > 16) return Response::error(400, "slice is 0 (the whole sample) or 1..16");
+        slice = sl.as_int() == 0 ? -2 : static_cast<int>(sl.as_int() - 1);
+      }
       host.api_engine().seq_step(static_cast<int>(pat - 1), static_cast<int>(step - 1), static_cast<int>(slot - 1), r.body["on"].as_bool(true),
-                                 static_cast<float>(vel));
-      return Response::ok();
+                                 static_cast<float>(vel), slice);
+      Json j = Json::object();
+      j.set("pattern", pat);
+      j.set("step", step);
+      j.set("slot", slot);
+      return Response::ok(std::move(j));
     });
     s.add_route("POST", "/v1/sequencer/{action}", "control", [this](const Request& r) {
       const std::string& a = r.params.at("action");
@@ -3397,6 +3813,72 @@ struct ApiBridge::Impl {
       host.api_library_changed();
       Json j = Json::object();
       j.set("id", restored);
+      return Response::ok(std::move(j));
+    });
+    // ---- playlist trash: deleted playlists, folders (with everything in them) and smart playlists ----
+    s.add_route("GET", "/v1/library/playlist-trash", "library:read", [this](const Request&) {
+      Json items = Json::array();
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        for (const DeletedPlaylist& d : lib.deleted_playlists()) {
+          Json t = Json::object();
+          t.set("id", d.id);
+          t.set("kind", d.kind);
+          t.set("name", d.name);
+          t.set("old_id", d.old_id);
+          t.set("parent", d.parent_id);
+          t.set("deleted_at", d.deleted_at);
+          t.set("playlists", d.playlists);
+          t.set("folders", d.folders);
+          t.set("tracks", d.tracks);
+          t.set("shared", d.shared);
+          items.push_back(std::move(t));
+        }
+      }
+      Json j = Json::object();
+      j.set("items", std::move(items));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/playlist-trash/{id}/restore", "library:write", [this](const Request& r) {
+      std::int64_t id = 0, restored = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such playlist in the trash");
+      bool ok = false;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        ok = lib.restore_playlist(id, &restored);
+      }
+      if (!ok) return Response::error(404, "no such playlist in the trash");
+      host.api_library_changed();
+      Json j = Json::object();
+      j.set("id", restored);
+      return Response::ok(std::move(j));
+    });
+    s.add_route("DELETE", "/v1/library/playlist-trash/{id}", "admin", [this](const Request& r) {  // forgets one entry for good
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such playlist in the trash");
+      bool ok = false;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        ok = lib.purge_deleted_playlist(id);
+      }
+      if (!ok) return Response::error(404, "no such playlist in the trash");
+      Response res;
+      res.status = 204;
+      return res;
+    });
+    s.add_route("DELETE", "/v1/library/playlist-trash", "admin", [this](const Request& r) {  // forgets the entries older than N days (all when omitted)
+      const auto it = r.query.find("older_than_days");
+      const std::string days = it == r.query.end() ? std::string() : it->second;
+      if (!days.empty() && (days.size() > 6 || days.find_first_not_of("0123456789") != std::string::npos))
+        return Response::error(400, "older_than_days must be a whole number of days");
+      const int n = days.empty() ? 0 : static_cast<int>(std::clamp<long>(std::atol(days.c_str()), 0, 36500));
+      int removed;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        removed = lib.purge_deleted_playlists(n);
+      }
+      Json j = Json::object();
+      j.set("removed", removed);
       return Response::ok(std::move(j));
     });
     s.add_route("POST", "/v1/library/tracks", "library:write", [this](const Request& r) {
@@ -4080,7 +4562,8 @@ struct ApiBridge::Impl {
     }
     api::ApiConfig cfg;
     cfg.bind_address = bind;
-    cfg.port = static_cast<std::uint16_t>(std::clamp(std::atoi(port_text.c_str()), 1, 65535));
+    // "0" asks for any free port (tests); the port actually bound is in ApiBridge::port().
+    cfg.port = static_cast<std::uint16_t>(std::clamp(std::atoi(port_text.c_str()), port_text == "0" ? 0 : 1, 65535));
     const bool loopback = bind == "127.0.0.1" || bind == "::1" || bind == "localhost";
     if (tls == "1" || !loopback) {
       cfg.tls_cert = data_dir + "/api-cert.pem";
@@ -4118,6 +4601,7 @@ struct ApiBridge::Impl {
     add_chain_routes();
     add_browser_routes();
     add_sync_routes();
+    add_capture_routes();
     add_queue_routes();
     add_keymap_stem_routes();
     if (!server->start(&error)) {
@@ -4150,6 +4634,7 @@ ApiBridge::~ApiBridge() {
 
 bool ApiBridge::running() const { return impl_->server && impl_->server->running(); }
 std::string ApiBridge::describe() const { return impl_->description; }
+std::uint16_t ApiBridge::port() const { return impl_->server && impl_->server->running() ? impl_->server->port() : 0; }
 void ApiBridge::engine_event(const EngineEvent& e) { impl_->engine_event(e); }
 
 }  // namespace deckhand
@@ -4162,6 +4647,7 @@ ApiBridge::ApiBridge(ApiHost&, const std::string&) : impl_(std::make_unique<Impl
 ApiBridge::~ApiBridge() = default;
 bool ApiBridge::running() const { return false; }
 std::string ApiBridge::describe() const { return "API off"; }
+std::uint16_t ApiBridge::port() const { return 0; }
 void ApiBridge::engine_event(const EngineEvent&) {}
 }  // namespace deckhand
 

@@ -124,6 +124,7 @@ App::App(const dh_platform& platform, const dh_config& config)
     post(j);
   }
 
+  capture_ = std::make_unique<CaptureService>(*engine_, data_dir_ + "/Captures");
   stems_ = std::make_unique<StemService>(data_dir_, resource_dir_, [this] {
     for (int i = 0; i < kMaxDecks; ++i)
       if (engine_->deck(i).playing) return true;
@@ -819,7 +820,8 @@ std::string App::api_sync_json() {
        num("imported", s.audio_imported) + "," + num("imported_bytes", static_cast<long long>(s.audio_imported_bytes)) + "," +
        num("relinked", s.audio_relinked) + "," + num("skipped", s.audio_skipped) + "," + num("waiting_budget", s.audio_waiting_budget) + "," +
        num("waiting_files", s.audio_waiting_files) + "," + num("failed", s.audio_failed) + "," +
-       num("store_bytes", static_cast<long long>(s.audio_store_bytes)) + "}";
+       num("store_bytes", static_cast<long long>(s.audio_store_bytes)) + "," + num("removed", s.audio_removed) + "," +
+       num("freed_bytes", static_cast<long long>(s.audio_freed_bytes)) + "," + num("cleanup_pending", s.audio_cleanup_pending) + "}";
   return j + "}";
 }
 
@@ -902,6 +904,9 @@ void App::sync_job(Library& lib, bool run) {
           sync_.audio_exported_bytes = ar.exported_bytes;
           sync_.audio_imported_bytes = ar.imported_bytes;
           sync_.audio_store_bytes = ar.store_bytes;
+          sync_.audio_removed = ar.removed;
+          sync_.audio_freed_bytes = ar.freed_bytes;
+          sync_.audio_cleanup_pending = ar.cleanup_pending;
         }
       }
     } else if (!st.last_error.empty() && sync_.last_ms == 0) {

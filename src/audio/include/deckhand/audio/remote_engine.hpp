@@ -117,6 +117,9 @@ class RemoteEngine final : public IEngine {
   void close_input() override;
   std::vector<std::string> input_devices() override;
   InputStatus input_status() const override;
+  void input_tap_enable(bool on) override;
+  std::size_t input_tap_read(float* interleaved_stereo, std::size_t max_frames) override;
+  std::uint64_t input_tap_dropped() const override;
   std::uint64_t clock_frames() const override;
   double clock_seconds() const override;
   std::uint64_t clock_at_wall(std::chrono::steady_clock::time_point t) const override;

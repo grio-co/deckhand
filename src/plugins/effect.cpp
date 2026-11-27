@@ -54,6 +54,7 @@ void PluginEffect::run(float* buf, int frames) {
       in_[0][(std::size_t)i] = feed ? b[2 * i] : 0.0f;
       in_[1][(std::size_t)i] = feed ? b[2 * i + 1] : 0.0f;
     }
+    if (tempo_ > 0) inst_->set_transport({tempo_, beat_ + (double)done * tempo_ / (60.0 * sr_), playing_});
     const float* ip[2] = {in_[0].data(), in_[1].data()};
     float* op[2] = {out_[0].data(), out_[1].data()};
     inst_->process(ip, op, n);

@@ -363,7 +363,7 @@ void App::do_ui_action(const std::string& name, bool has_value, double value) {
     action("sampler");
   } else if (n == "learn") {
     action("learn");
-  } else if (n == "columns" || n == "trash" || n == "layouts" || n == "locate" || n == "split" || n == "focus_pane" || n == "layout_next" ||
+  } else if (n == "columns" || n == "trash" || n == "layouts" || n == "locate" || n == "capture" || n == "split" || n == "focus_pane" || n == "layout_next" ||
              n == "layout_prev") {
     action(n.c_str());
   } else if (n == "close_panel") {

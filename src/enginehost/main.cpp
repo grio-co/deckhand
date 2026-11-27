@@ -166,7 +166,7 @@ class Host final : public ControlSink {
   DeviceInfo dev_;
 
   DeckMeta meta_[kMaxDecks];  // service thread only
-  std::atomic<bool> ui_alive_{false}, stream_on_{false};
+  std::atomic<bool> ui_alive_{false}, stream_on_{false}, input_tap_on_{false};
   UiLiveness liveness_;  // service thread only
   std::uint64_t start_ns_ = 0;
   std::atomic<bool> attached_once_{false};  // some UI attached since this engine started (crash survival: then it never leaves by itself)
@@ -387,6 +387,15 @@ void Host::pump_events() {
 }
 
 void Host::pump_stream() {
+  if (input_tap_on_.load()) {
+    float tmp[2048];
+    while (sh_->input_tap.free_frames() >= 1024) {
+      const std::size_t n = engine_.input_tap_read(tmp, 1024);
+      if (n == 0) break;
+      sh_->input_tap.push(tmp, n);
+    }
+    sh_->hdr.input_tap_dropped.store(engine_.input_tap_dropped(), std::memory_order_relaxed);
+  }
   if (!stream_on_.load()) return;
   float tmp[2048];
   while (sh_->stream.free_frames() >= 1024) {
@@ -548,7 +557,7 @@ void Host::leave_if_abandoned(std::uint64_t now) {
     if (v.loaded || v.playing) return;
   }
   const RecorderStatus rs = engine_.recorder_status();
-  if (rs.open || rs.recording || stream_on_.load()) return;
+  if (rs.open || rs.recording || stream_on_.load() || input_tap_on_.load()) return;
   DH_LOG(Info, "no UI attached (%s) and nothing to look after: leaving", told ? "told to leave" : "timed out");
   std::error_code ec;
   if (told) std::filesystem::remove(file, ec);
@@ -915,6 +924,12 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
       const bool on = rd.u8() != 0, pre = rd.u8() != 0, with_mic = rd.u8() != 0;
       engine_.stream_enable(on, pre, with_mic);
       stream_on_ = on;
+      return;
+    }
+    case kReqInputTapEnable: {
+      const bool on = rd.u8() != 0;
+      engine_.input_tap_enable(on);
+      input_tap_on_ = on;
       return;
     }
     case kReqQuit:

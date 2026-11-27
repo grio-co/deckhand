@@ -64,6 +64,9 @@ int usage() {
                "usage: deckhandctl <command> [options]\n"
                "  import     [--source DB] [--key-file FILE] [--analysis DIR] [--data DIR] [--overwrite-edits]\n"
                "  playlists  [--data DIR]\n"
+               "  playlist-trash   [--data DIR]   deleted playlists, folders and smart playlists kept for restore (30 days)\n"
+               "  restore-playlist TRASH_ID   [--data DIR]   put one back (contents, order, place, rules; the top level if its folder is gone)\n"
+               "  purge-playlist-trash [--id TRASH_ID] [--days N]   drop one entry, or those older than N days (default 0 = all)   [--data DIR]\n"
                "  list       [--playlist ID] [--search TEXT] [--data DIR]\n"
                "  export DIR [--playlist ID] [--no-copy 1] [--convert 1] [--profile ID] [--data DIR]   write a club-player USB export\n"
                "         [--stems off|acapella+instrumental|all|LIST] [--stem-bits 16|24] [--stems-inline 1] [--stems-folder NAME]   stems as extra tracks\n"
@@ -85,6 +88,7 @@ int usage() {
                "  token list | create NAME SCOPE[,SCOPE...] | revoke ID   [--data DIR]   API access tokens\n"
                "  devices                      list audio outputs\n"
                "  midi                         list connected MIDI input devices\n"
+               "  capture    info|repair|split|edit ...   analogue-input recordings: stats, header repair, track splitting, edited export (see docs/CAPTURE.md)\n"
                "  hid                          list HID devices (vid:pid, usage, product); keyboards and mice are left out, nothing is opened\n"
                "  play FILE  [--seconds N] [--silent 1] [--device NAME]   decode and play through the engine\n");
   return 2;
@@ -92,9 +96,12 @@ int usage() {
 
 }  // namespace
 
+int capture_command(int argc, char** argv);  // src/cli/capture_cmd.cpp
+
 int main(int argc, char** argv) {
   if (argc < 2) return usage();
   const std::string cmd = argv[1];
+  if (cmd == "capture") return capture_command(argc, argv);
   if (cmd == "devices") {
     for (const auto& d : Engine::output_devices()) std::printf("%s\n", d.c_str());
     return 0;
@@ -443,6 +450,29 @@ int main(int argc, char** argv) {
       for (const auto& p : lib.playlists())
         std::printf("%lld\t%s%s\t(%d)\n", static_cast<long long>(p.id), p.is_folder ? "[folder] " : "",
                     p.name.c_str(), p.track_count);
+    } else if (cmd == "playlist-trash") {
+      for (const auto& d : lib.deleted_playlists()) {
+        std::printf("%lld\t%s\t%s\t%d playlists, %d folders, %d tracks%s\tdeleted %lld\n", static_cast<long long>(d.id), d.kind.c_str(),
+                    d.name.c_str(), d.playlists, d.folders, d.tracks, d.shared ? ", shared" : "", static_cast<long long>(d.deleted_at));
+      }
+    } else if (cmd == "restore-playlist" && argc >= 3) {
+      std::int64_t id = 0;
+      if (!lib.restore_playlist(std::atoll(argv[2]), &id)) {
+        std::fprintf(stderr, "error: no such entry in the playlist trash\n");
+        return 1;
+      }
+      std::printf("restored as %lld\n", static_cast<long long>(id));
+    } else if (cmd == "purge-playlist-trash") {
+      const std::int64_t one = std::atoll(arg_value(argc, argv, "--id", "0"));
+      if (one) {
+        if (!lib.purge_deleted_playlist(one)) {
+          std::fprintf(stderr, "error: no such entry in the playlist trash\n");
+          return 1;
+        }
+        std::printf("purged 1\n");
+      } else {
+        std::printf("purged %d\n", lib.purge_deleted_playlists(std::atoi(arg_value(argc, argv, "--days", "0"))));
+      }
     } else if (cmd == "list") {
       const auto rows = lib.tracks(std::atoll(arg_value(argc, argv, "--playlist", "0")),
                                    arg_value(argc, argv, "--search", ""));

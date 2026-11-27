@@ -149,8 +149,8 @@ Optional, per playlist, and off until you choose playlists (`SyncConfig::audio_p
   not cryptographic: it detects damage, not forgery) and copied into the store under that hash. The same audio under
   several tracks or from several devices is stored once. An object is written under a temporary name, `.<hash>.<device>.tmp`,
   and renamed, so another device sees all of it or none; if the file changes while it is copied, the copy is dropped.
-  The track gets a register `audio` = `<hash>:<size>`, which is how other devices find it. Nothing here deletes
-  objects: the store only grows (delete the folder to start over).
+  The track gets a register `audio` = `<hash>:<size>`, which is how other devices find it. Objects are removed only by
+  the clean-up below.
 - Importing: with `SyncConfig::music_folder` set, each track that is a missing-file placeholder here and has an
   `audio` register is looked for in the music folder first (same size and fingerprint, any name: the track is
   relinked, nothing is copied), then fetched from the store. A fetched file is verified against its hash and size
@@ -172,6 +172,16 @@ Optional, per playlist, and off until you choose playlists (`SyncConfig::audio_p
   what they sound like). A device that requires encryption does not accept a plain object. A build without a crypto
   library cannot encrypt: `sync_audio()` then refuses unless `allow_unencrypted_audio` is on. With that setting on,
   audio is stored and accepted unencrypted even when a passphrase is set (the logs stay encrypted).
+- Clean-up: an object is referenced while some live track whose `audio` register names it is in a live playlist of the
+  merged library (any device's). When nothing references it any more, the first device to notice writes the time into
+  `audio/unref/<hash>`; any device that finds it referenced again deletes that file. After `audio_cleanup_grace_ms`
+  (default 30 days; 0 = at once; negative = never) an object whose file is that old is deleted, but only after
+  `sync_audio()` has run a normal sync that read every device's records completely (otherwise the clean-up is skipped with a
+  warning), found it still unreferenced, and re-read the file just before. The delete renames the object to a
+  `.<hash>.<device>.tmp` name and removes that, so a crash leaves a leftover this device removes on its next call and other
+  devices see the whole object or none. A device that has not synced for longer than the grace period and referenced the audio
+  meanwhile republishes it from its own copy at its next call. `AudioReport`: `removed`, `freed_bytes`, `cleanup_pending`
+  (unreferenced, still inside the grace period), and `store_bytes` after the clean-up.
 - `sync_audio()` needs one normal sync first when a passphrase is set (the folder's key is created there).
 
 ## Safety
@@ -194,8 +204,7 @@ then the other devices' changes. A restore therefore does not undo changes that 
 restore win. If encryption was set up or changed after the backup, enter the current passphrase first. A backup from
 before sync was set up joins as a new device, and its playlists appear next to the synced ones.
 
-Not provided: removing tombstones altogether (that needs every device to confirm it has seen the deletion), and
-removing audio files from the store again (see "Audio files").
+Not provided: removing tombstones altogether (that needs every device to confirm it has seen the deletion).
 
 While a sync runs, nothing else may use the library database connection; the caller runs it from one worker and
 keeps other threads off the library connection until it returns.
@@ -255,7 +264,7 @@ Entity kinds, ids and fields:
 
 | kind | entity | id | fields |
 |---|---|---|---|
-| T | track | content fingerprint `f1-<size hex>-<hash128 hex>` | `_del`, metadata columns, `grid`, `file_name`, `hint`, `audio` (`<hash>:<size>`) |
+| T | track | content fingerprint `f1-<size hex>-<hash128 hex>` | `_del`, metadata columns, `grid`, `lgrid`, `file_name`, `hint`, `audio` (`<hash>:<size>`) |
 | C | cue | `<fingerprint>#s<slot>` (hot cue or loop on a slot) or `#m@<ms>` / `#l@<ms>` (memory cue / loop) | `_del`, `kind`, `start_ms`, `end_ms`, `label`, `color` |
 | P | playlist or folder | `<device>:<counter>` | `_del`, `name`, `is_folder`, `parent` (id or empty), `pos` |
 | E | playlist entry | `<device>:<counter>` | `_del`, `pl` (playlist id), `trk` (fingerprint), `pos` |
@@ -380,12 +389,21 @@ A sync run (settings panel button, startup, `POST /v1/sync/run`) calls `sync_onc
 that succeeded, `sync_audio()`. The panel shows the last numbers (sent, received, linked mix points waiting for their tracks, analysis items
 received, and the audio step: shared, imported, relinked, waiting, damaged, store size); `GET /v1/sync` returns the same as JSON.
 
-### Known gap: a concurrent re-analysis can replace a locked grid
+### Locked beat grids
 
-If device A locks a grid and device B, which had not seen the lock, re-analyses the same track afterwards, the track's `grid` field (written by
-B, later) wins the per-field last-writer-wins merge while `grid_locked` stays 1 from A: the grid is replaced although it is locked. A fix
-needs the writer's lock state to travel with the grid: capture writes `grid_locked` in the same batch whenever it writes `grid`; apply then
-keeps a locally locked grid when the incoming grid arrives with `grid_locked = 0` (and lets the next capture on the locking device re-assert
-its grid and lock with a newer stamp so everyone converges), while an explicit lock or unlock still merges last-writer-wins. This touches
-capture, apply and the state merge in `src/sync/sync.cpp` (`kTrackFields`, the track apply loop near `lib.replace_beatgrid`), so it was left
-alone; a test would run two engines in one process (see tests/sync_dev.hpp) with B unlocked and re-analysing after A's lock.
+The writer's lock state travels with the grid. While a device holds a track's grid locked, its capture also writes the track
+register `lgrid` (the same grid text; empty when unlocked). A track that is locked on a device takes its grid from `lgrid`, not
+from `grid`, so a grid from a device that had not seen the lock (a re-analysis, or any edit made while unlocked) never replaces
+it, however late it was written. An explicit grid edit on a device that holds the lock rewrites `lgrid`, and the newest `lgrid`
+wins by the normal last-writer rules. `grid_locked` itself still merges last-writer-wins, so unlocking syncs, after which `grid`
+(kept current by the unlocking device's capture) applies again. A locked track whose folder has no `lgrid` (written before this
+existed) keeps its grid until the locking device's next capture sends one; a missing `lgrid` otherwise means unlocked.
+
+### In the application
+
+The clean-up delay is the setting `sync.audio_cleanup_days` (default 30, `0` = at once, negative = never), shown in the settings
+panel next to the audio budgets and set with `PUT /v1/sync/config` (`audio_cleanup_days`). The panel and `GET /v1/sync` report
+what the last run did: `removed`, `freed_bytes` and `cleanup_pending`.
+
+A playlist deleted on another device is moved to the playlist trash here, like one deleted on this device (journalled as a
+`sync` edit), so it can be restored from the trash panel for 30 days.

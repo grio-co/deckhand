@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace deckhand {
@@ -584,12 +585,19 @@ inline void iso_svf(float x, float* st, const IsoCoef& c, float& lp, float& hp) 
   lp = v2;
   hp = x - k * v1 - v2;
 }
-void isolator_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
+// Band kill fader law: unity at 0.5, +6 dB at 1, then dB-linear down to -60 dB at 0.04 and an exact zero below it.
+inline float kill_gain(float k) {
+  if (k >= 0.5f) return 1.0f + (k - 0.5f) * 2.0f;
+  if (k <= 0.04f) return 0.0f;
+  return std::pow(10.0f, -3.0f * (0.5f - k) / 0.46f);
+}
+void iso_run(FxUnit& u, const FxCtx& cx, float* buf, int n, double f1, double f2, bool kill_law) {
   const K k = coefs(cx);
-  const IsoCoef c1 = iso_coef(250.0, cx.sr), c2 = iso_coef(2500.0, cx.sr);
+  const IsoCoef c1 = iso_coef(f1, cx.sr), c2 = iso_coef(f2, cx.sr);
   for (int i = 0; i < n; ++i) {
     smooth(u, k);
-    const float gl = iso_gain(u.param_s), gm = iso_gain(u.param2_s), gh = iso_gain(u.param3_s);
+    const float gl = kill_law ? kill_gain(u.param_s) : iso_gain(u.param_s), gm = kill_law ? kill_gain(u.param2_s) : iso_gain(u.param2_s),
+                gh = kill_law ? kill_gain(u.param3_s) : iso_gain(u.param3_s);
     const float m = u.on_s * u.wet_s;
     for (int c = 0; c < 2; ++c) {
       float* st = u.s + c * 16;  // 8 two-state filters: low path (2), high path (2) at 250 Hz; the same at 2.5 kHz
@@ -609,6 +617,8 @@ void isolator_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
     }
   }
 }
+void isolator_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) { iso_run(u, cx, buf, n, 250.0, 2500.0, false); }
+void bandkill_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) { iso_run(u, cx, buf, n, 160.0, 3500.0, true); }
 
 // Slicer: eight steps of one beat division; param picks how many of them play (a Euclidean spread), param2 rotates
 // the pattern, param3 sets how much of each step the gate stays open.
@@ -705,6 +715,164 @@ void buildup_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
   track_quiet(u, peak, n);
 }
 
+// ---- appended effects (protocol 9): riser, reverser, auto pan ---------------------------------------------------
+// Riser: engaging starts a build that takes `beats` (or `seconds`) to reach full tension. Over that time a high-pass
+// climbs, a band of noise swells and the signal falls into repeats of a snapshot that shorten every stage (1/2, 1/4,
+// 1/8, 1/16 beat). Releasing waits for the next beat line, then everything leaves in 4 ms: the dry signal is back on
+// the beat. param = intensity.
+void riser_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
+  const K k = coefs(cx);
+  const std::int64_t m = u.cap - 1, am = u.acap - 1;
+  const double total = std::max(0.05 * cx.sr, beat_time(u, cx));
+  const float ke = static_cast<float>(1.0 - std::exp(-1.0 / (0.004 * cx.sr)));
+  const float kr = static_cast<float>(1.0 - std::exp(-1.0 / (0.002 * cx.sr)));
+  const double bf = std::max(1.0, cx.bf);
+  if (u.rise) {
+    u.n[0] = 1;
+    u.n[2] = 0;
+    u.n[3] = 0;
+    u.n[6] = 0;
+    u.d0 = 0;
+    u.hold = true;
+  }
+  if (u.on) u.n[2] = 0;
+  else if (u.n[0] == 1) u.n[2] = 1;
+  double bp = cx.beat_pos;
+  const double dbp = 1.0 / bf;
+  float hp_a = 0, nz_a = 0;
+  for (int i = 0; i < n; ++i) {
+    smooth(u, k);
+    const std::int32_t bi = static_cast<std::int32_t>(std::floor(bp));
+    bp += dbp;
+    if (u.n[2] == 1 && bi != u.n[1]) {
+      u.n[0] = 0;
+      u.n[2] = 0;
+    }
+    u.n[1] = bi;
+    u.s[10] += (static_cast<float>(u.n[0]) - u.s[10]) * ke;
+    if (u.n[0] == 0 && u.s[10] < 1e-4f) {
+      u.s[10] = 0;
+      u.hold = false;
+      u.n[6] = 0;
+    }
+    const double t = std::min(1.0, u.d0 / total);
+    if (u.n[0] == 1) u.d0 += 1.0;
+    const float tf = static_cast<float>(t), inten = 0.35f + 0.65f * u.param_s;
+    // snapshot the audio just played into the aux buffer, then loop it; a new stage only starts at the loop's end
+    const int want = t < 0.25 ? 0 : t < 0.5 ? 1 : t < 0.7 ? 2 : t < 0.85 ? 3 : 4;
+    if (u.n[6] == 0 || u.n[4] >= u.n[5]) {
+      if (want > 0 && u.n[0] == 1 && (u.n[6] != want || u.n[4] >= u.n[5])) {
+        const std::int64_t L = std::clamp<std::int64_t>(static_cast<std::int64_t>(bf / static_cast<double>(1 << want)), 32, u.acap - 1);
+        for (std::int64_t j = 0; j < L; ++j) {
+          const std::size_t src = static_cast<std::size_t>((u.w - L + j) & m) * 2;
+          u.aux[static_cast<std::size_t>(j) * 2] = u.mem[src];
+          u.aux[static_cast<std::size_t>(j) * 2 + 1] = u.mem[src + 1];
+        }
+        u.n[5] = static_cast<std::int32_t>(L);
+        u.n[6] = want;
+      } else if (want == 0) {
+        u.n[6] = 0;
+      }
+      u.n[4] = 0;
+    }
+    const float rep_t = (u.n[6] > 0 && u.n[0] == 1) ? 1.0f : 0.0f;
+    u.s[11] += (rep_t * std::min(1.0f, (tf - 0.2f) * 6.0f) - u.s[11]) * kr;
+    if (u.s[11] < 0) u.s[11] = 0;
+    if ((i & 7) == 0) {
+      hp_a = lp_coef(25.0 * std::exp2(7.0 * static_cast<double>(tf * inten)), cx.sr);
+      nz_a = lp_coef(700.0 + 9000.0 * static_cast<double>(tf * tf), cx.sr);
+    }
+    float lv[2] = {0, 0};
+    if (u.n[6] > 0) {
+      const int j = u.n[4]++;
+      const int edge = std::max(1, std::min(96, u.n[5] / 4));
+      const float g = std::min({1.0f, static_cast<float>(j) / static_cast<float>(edge), static_cast<float>(u.n[5] - j) / static_cast<float>(edge)});
+      const std::size_t a = static_cast<std::size_t>(std::min(j, u.n[5] - 1) & am) * 2;
+      lv[0] = u.aux[a] * g;
+      lv[1] = u.aux[a + 1] * g;
+    }
+    const float nzv = noise(u);
+    u.s[8] += nz_a * (nzv - u.s[8]);
+    u.s[9] += lp_coef(250.0, cx.sr) * (u.s[8] - u.s[9]);
+    const float riser = (u.s[8] - u.s[9]) * 0.12f * tf * tf * inten;
+    const float mf = std::min(1.0f, tf * 3.0f), mix = u.s[10] * u.wet_s, rp = u.s[11];
+    for (int c = 0; c < 2; ++c) {
+      const float x = buf[i * 2 + c];
+      const std::size_t wi = static_cast<std::size_t>(u.w & m) * 2 + static_cast<std::size_t>(c);
+      u.mem[wi] = x;
+      const float y = x + (lv[c] - x) * rp;
+      u.s[c * 2] = fz(u.s[c * 2] + hp_a * (y - u.s[c * 2]));
+      u.s[c * 2 + 1] = fz(u.s[c * 2 + 1] + hp_a * (u.s[c * 2] - u.s[c * 2 + 1]));
+      const float hp = y - u.s[c * 2 + 1];
+      const float body = y + (hp - y) * mf + riser;
+      buf[i * 2 + c] = x + (body - x) * mix;
+    }
+    ++u.w;
+  }
+}
+
+// Reverser: each beat-length slice is played backwards from the slice before it (so it sounds one slice late), with
+// short fades at the seams. Listens all the time so the first slice after engaging is already there.
+void reverser_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
+  const K k = coefs(cx);
+  const double L = std::clamp(beat_time(u, cx), 64.0, static_cast<double>(u.cap / 2 - 16));
+  double ph = cx.beat_pos / (L / cx.bf);
+  ph -= std::floor(ph);
+  // Free-running phase: the beat position is continuous from chunk to chunk, but a tempo change or a playhead nudge moves it
+  // a little and a read position that followed it would click. Small errors are slewed out slowly; a real jump (seek,
+  // loop, first use) snaps.
+  if (u.rise || u.n[7] == 0) {
+    u.d0 = ph;
+    u.n[7] = 1;
+  } else {
+    double e = ph - u.d0;
+    e -= std::round(e);
+    if (std::fabs(e) * L > 0.04 * cx.bf) u.d0 = ph;
+    else u.d0 += e * 0.02;
+    if (u.d0 < 0) u.d0 += 1.0;
+    if (u.d0 >= 1.0) u.d0 -= 1.0;
+    ph = u.d0;
+  }
+  const double dph = 1.0 / L;
+  const float edge = static_cast<float>(0.004 * cx.sr);
+  for (int i = 0; i < n; ++i) {
+    smooth(u, k);
+    dl_write(u, buf[i * 2], buf[i * 2 + 1]);
+    const float mx = u.on_s * u.wet_s;
+    if (mx > 1e-5f) {
+      const double p = ph * L;
+      float rl, rr;
+      dl_read(u, 0, 2.0 * p + 1.0, rl);
+      dl_read(u, 1, 2.0 * p + 1.0, rr);
+      const float g = std::min({1.0f, static_cast<float>(p) / edge, static_cast<float>(L - p) / edge});
+      buf[i * 2] += (rl * g - buf[i * 2]) * mx;
+      buf[i * 2 + 1] += (rr * g - buf[i * 2 + 1]) * mx;
+    }
+    ph += dph;
+    if (ph >= 1.0) ph -= 1.0;
+  }
+  u.d0 = ph;
+}
+
+// Auto pan: an equal-power pan swings left and right once per `beats`; param = depth, param2 = shape (sine to a soft square).
+void autopan_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
+  const K k = coefs(cx);
+  double p, dp;
+  lfo_start(u, cx, p, dp);
+  for (int i = 0; i < n; ++i) {
+    smooth(u, k);
+    const float sh = 1.0f + 9.0f * u.param2_s;
+    const float lfo = std::tanh(std::sin(kTwoPi * static_cast<float>(p)) * sh) / std::tanh(sh);
+    p += dp;
+    if (p >= 1.0) p -= 1.0;
+    const float th = 0.78539816f * (1.0f + u.param_s * lfo);
+    const float m = u.on_s * u.wet_s;
+    const float gl = 1.0f + (1.41421356f * std::cos(th) - 1.0f) * m, gr = 1.0f + (1.41421356f * std::sin(th) - 1.0f) * m;
+    buf[i * 2] *= gl;
+    buf[i * 2 + 1] *= gr;
+  }
+}
+
 // One-knob DJ filter: 0.5 = off, turning down closes a low-pass, turning up opens a high-pass (param2 = resonance).
 void filter_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
   const K k = coefs(cx);
@@ -738,7 +906,7 @@ void filter_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
   }
 }
 
-void plugin_proc(FxUnit& u, const FxCtx&, float* buf, int n) { fx_plugin_run(u, buf, n); }
+void plugin_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) { fx_plugin_run(u, cx, buf, n); }
 void reset_none(FxUnit&) {}
 void reset_delay(FxUnit& u) { u.time_s = -1; }
 
@@ -772,6 +940,10 @@ const FxDef kDefs[] = {
     {{EffectKind::TapeEcho, "Tape Echo", "feedback", true, true, false, false, 0.5f, 0.5f, 0.5f, "tone", "wobble", "tape_echo"}, tape_proc, reset_delay, false},
     {{EffectKind::BeatReverb, "Beat Reverb", "", true, true, false, false, 0.4f, 0.5f, 2.0f, "", "", "beat_reverb"}, beat_reverb_proc, reverb_reset, false},
     {{EffectKind::TapeStop, "Tape Stop", "curve", true, false, true, false, 1.0f, 0.3f, 1.0f, "", "", "tape_stop"}, tapestop_proc, reset_none, false},
+    {{EffectKind::Riser, "Riser", "intensity", true, false, true, false, 1.0f, 0.7f, 4.0f, "", "", "riser"}, riser_proc, reset_none, false},
+    {{EffectKind::BandKill, "Band Kill", "low", false, false, false, false, 1.0f, 0.5f, 1.0f, "mid", "high", "band_kill"}, bandkill_proc, reset_none, false},
+    {{EffectKind::Reverser, "Reverser", "", true, false, false, false, 1.0f, 0.5f, 1.0f, "", "", "reverser"}, reverser_proc, reset_none, true},
+    {{EffectKind::AutoPan, "Auto Pan", "depth", true, false, false, false, 1.0f, 0.8f, 1.0f, "shape", "", "auto_pan"}, autopan_proc, reset_none, false},
     // Must stay last: effect_count() leaves it out. Parameters are the plug-in's own (FxChainEdit field >= kFxFieldPluginParam).
     {{EffectKind::Plugin, "Plug-in", "", false, true, false, false, 1.0f, 0.5f, 1.0f, "", "", "plugin"}, plugin_proc, reset_none, false},
 };
@@ -815,7 +987,7 @@ void run_unit(FxUnit& u, const FxCtx& cx, float* buf, int n) {
 // Kinds that keep no delay memory get a small allocation (a chain may hold eight units).
 bool small_memory(EffectKind k) {
   switch (k) {
-    case EffectKind::Isolator: case EffectKind::Slicer: case EffectKind::Filter: case EffectKind::Transform:
+    case EffectKind::Isolator: case EffectKind::BandKill: case EffectKind::AutoPan: case EffectKind::Slicer: case EffectKind::Filter: case EffectKind::Transform:
     case EffectKind::FilterSweep: case EffectKind::Phaser:
       return true;
     default:
@@ -873,7 +1045,7 @@ void fx_unit_prepare(FxUnit& u, double sr) {
   if (u.sr == sr && u.cap == cap && !u.mem.empty()) return;
   u.sr = sr;
   u.cap = cap;
-  u.acap = small_memory(u.kind) ? 64 : 16384;
+  u.acap = small_memory(u.kind) ? 64 : u.kind == EffectKind::Riser ? 262144 : 16384;
   u.mem.assign(static_cast<std::size_t>(cap) * 2, 0.0f);
   u.aux.assign(static_cast<std::size_t>(u.acap) * 2, 0.0f);
   u.clear();

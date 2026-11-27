@@ -752,6 +752,22 @@ std::uint64_t RemoteEngine::stream_dropped_frames() const {
   return l ? l->sh->hdr.stream_dropped.load() : 0;
 }
 
+void RemoteEngine::input_tap_enable(bool on) {
+  Wr w;
+  w.u8(on ? 1 : 0);
+  std::vector<std::uint8_t> r;
+  rpc(kReqInputTapEnable, w.bytes(), r, 3000);
+  if (const auto l = link()) l->sh->input_tap.discard();
+}
+std::size_t RemoteEngine::input_tap_read(float* out, std::size_t max_frames) {
+  const auto l = link();
+  return l ? l->sh->input_tap.pop(out, max_frames) : 0;
+}
+std::uint64_t RemoteEngine::input_tap_dropped() const {
+  const auto l = link();
+  return l ? l->sh->hdr.input_tap_dropped.load() : 0;
+}
+
 bool RemoteEngine::open_input(const InputConfig& config, std::string& error) {
   Wr w;
   w.str(config.device_hint);

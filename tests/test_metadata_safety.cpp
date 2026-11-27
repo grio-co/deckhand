@@ -274,7 +274,7 @@ static void test_schema4_migration() {
   }
   {
     Library lib(path);
-    CHECK(count(lib, "SELECT max(version) FROM schema_version") == kLibrarySchemaVersion && kLibrarySchemaVersion == 10);
+    CHECK(count(lib, "SELECT max(version) FROM schema_version") == kLibrarySchemaVersion && kLibrarySchemaVersion == 11);
     const auto copies = library_backups(path);
     CHECK(!copies.empty() && copies[0].reason == "upgrade" && copies[0].schema_version == 4 && copies[0].tracks == 1);
     CHECK(lib.track_count() == 1 && lib.track(a)->title == "Alpha" && lib.track(a)->bpm == 126);
@@ -339,7 +339,7 @@ static void test_schema6_migration() {
   }
   {
     Library lib(path);
-    CHECK(count(lib, "SELECT max(version) FROM schema_version") == 10 && kLibrarySchemaVersion == 10);
+    CHECK(count(lib, "SELECT max(version) FROM schema_version") == kLibrarySchemaVersion && kLibrarySchemaVersion == 11);
     const auto copies = library_backups(path);
     CHECK(!copies.empty() && copies[0].reason == "upgrade" && copies[0].schema_version == 6);
     CHECK(count(lib, "SELECT count(*) FROM pragma_table_info('tracks') WHERE name = 'last_sound_ms'") == 1);

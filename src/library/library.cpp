@@ -11,6 +11,7 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 #include <sqlite3.h>
@@ -355,6 +356,28 @@ void Library::migrate() {
         "UPDATE schema_version SET version = 10;");
     tx.commit();
     DH_LOG(Info, "library migrated to schema %d (linked mix points, vocal regions)", 10);
+  }
+  if (version < 11) {
+    // Playlist trash: a deleted playlist, folder (with everything inside) or smart playlist is kept until purged.
+    Transaction tx(db_);
+    db_.exec(
+        "CREATE TABLE IF NOT EXISTS trash_playlist_entries ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, name TEXT NOT NULL, old_id INTEGER NOT NULL,"
+        " old_parent_id INTEGER NOT NULL DEFAULT 0, position INTEGER NOT NULL DEFAULT 0, deleted_at INTEGER NOT NULL,"
+        " match_all INTEGER NOT NULL DEFAULT 1, rules TEXT NOT NULL DEFAULT '');"
+        "CREATE TABLE IF NOT EXISTS trash_playlist_nodes ("
+        " entry_id INTEGER NOT NULL, old_id INTEGER NOT NULL, old_parent_id INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL,"
+        " is_folder INTEGER NOT NULL DEFAULT 0, position INTEGER NOT NULL DEFAULT 0, shared_link TEXT NOT NULL DEFAULT '',"
+        " PRIMARY KEY(entry_id, old_id));"
+        "CREATE TABLE IF NOT EXISTS trash_playlist_items ("
+        " entry_id INTEGER NOT NULL, playlist_old_id INTEGER NOT NULL, position INTEGER NOT NULL, track_id INTEGER NOT NULL);"
+        "CREATE INDEX IF NOT EXISTS idx_trash_playlist_items ON trash_playlist_items(entry_id, playlist_old_id, position);"
+        "CREATE INDEX IF NOT EXISTS idx_trash_playlist_items_track ON trash_playlist_items(track_id);"
+        "CREATE TABLE IF NOT EXISTS trash_playlist_import ("
+        " entry_id INTEGER NOT NULL, old_id INTEGER NOT NULL, source TEXT NOT NULL, source_id TEXT NOT NULL);"
+        "UPDATE schema_version SET version = 11;");
+    tx.commit();
+    DH_LOG(Info, "library migrated to schema %d (playlist trash)", 11);
   }
   {
     // Substring search index (FTS5 trigram, case-insensitive) kept in step with `tracks` by triggers. Optional: an
@@ -1148,6 +1171,9 @@ bool Library::restore_track(std::int64_t track_id, std::int64_t* restored) {
     set_playlist_tracks(list, ids);
   }
   if (id != track_id) {
+    Stmt pi(db_, "UPDATE trash_playlist_items SET track_id = ?1 WHERE track_id = ?2");
+    pi.bind(1, id).bind(2, track_id);
+    pi.run();
     Stmt h(db_, "UPDATE track_edits SET track_id = ?1 WHERE track_id = ?2");
     h.bind(1, id).bind(2, track_id);
     h.run();
@@ -1171,6 +1197,7 @@ bool Library::restore_track(std::int64_t track_id, std::int64_t* restored) {
 }
 
 int Library::purge_deleted(int older_than_days) {
+  purge_deleted_playlists(older_than_days);  // same retention; the count returned stays the tracks'
   const std::int64_t cutoff = unix_now() - static_cast<std::int64_t>(std::max(0, older_than_days)) * 86400;
   std::vector<std::int64_t> ids;
   {
@@ -1189,6 +1216,9 @@ int Library::purge_deleted(int older_than_days) {
     Stmt d(db_, "DELETE FROM trash_tracks WHERE id = ?1");
     d.bind(1, id);
     d.run();
+    Stmt pi(db_, "DELETE FROM trash_playlist_items WHERE track_id = ?1");  // the id may be reused: do not bring it back by mistake
+    pi.bind(1, id);
+    pi.run();
     Stmt h(db_, "DELETE FROM track_edits WHERE track_id = ?1 AND NOT EXISTS (SELECT 1 FROM tracks WHERE id = ?1)");
     h.bind(1, id);
     h.run();
@@ -1307,6 +1337,7 @@ void Library::set_date_added(std::int64_t track_id, std::int64_t unix_seconds) {
 }
 
 int Library::undo_one(const TrackEditRecord& e) {
+  if (e.field == "playlist_trash") return undo_playlist_trash(e);
   if (e.field == "grid" || e.field == "cues" || e.field == "mix_links") return undo_whole(e);
   if (e.field == "path") {  // a relocation: only while the track still points where that edit put it
     const auto row = track(e.track_id);
@@ -1386,17 +1417,14 @@ void Library::rename_playlist(std::int64_t id, const std::string& name) {
   u.run();
 }
 
-void Library::delete_playlist(std::int64_t id) {
-  Transaction tx(db_);
-  Stmt m(db_,
-         "WITH RECURSIVE sub(id) AS (SELECT ?1 UNION ALL SELECT p.id FROM playlists p JOIN sub ON p.parent_id = sub.id)"
-         " DELETE FROM import_map WHERE entity = 'playlist' AND local_id IN (SELECT id FROM sub)");
-  m.bind(1, id);
-  m.run();
-  Stmt d(db_, "DELETE FROM playlists WHERE id = ?1");  // children and entries cascade
-  d.bind(1, id);
-  d.run();
+std::int64_t Library::delete_playlist(std::int64_t id) {
+  EditScope scope("user");
+  OptionalTx tx(db_);
+  std::string kind;
+  const std::int64_t entry = trash_playlist_node(id, false, &kind);
+  if (entry) journal_record(0, "playlist_trash", "live:" + std::to_string(id) + ":" + kind, "trash:" + std::to_string(entry));
   tx.commit();
+  return entry;
 }
 
 bool Library::move_playlist(std::int64_t id, std::int64_t new_parent, int position) {
@@ -1906,10 +1934,14 @@ void Library::update_smart_playlist(const SmartPlaylist& p) {
   u.run();
 }
 
-void Library::delete_smart_playlist(std::int64_t id) {
-  Stmt d(db_, "DELETE FROM smart_playlists WHERE id = ?1");
-  d.bind(1, id);
-  d.run();
+std::int64_t Library::delete_smart_playlist(std::int64_t id) {
+  EditScope scope("user");
+  OptionalTx tx(db_);
+  std::string kind;
+  const std::int64_t entry = trash_playlist_node(id, true, &kind);
+  if (entry) journal_record(0, "playlist_trash", "live:" + std::to_string(id) + ":smart", "trash:" + std::to_string(entry));
+  tx.commit();
+  return entry;
 }
 
 std::vector<std::int64_t> Library::smart_track_ids(std::int64_t smart_id, const std::string& search, SortKey sort, bool descending) {
@@ -1932,6 +1964,7 @@ void Library::set_setting(const std::string& key, const std::string& value) {
 
 #include "library_tools.inc"
 #include "mix_links.inc"
+#include "playlist_trash.inc"
 #include "relocate.inc"
 
 }  // namespace deckhand

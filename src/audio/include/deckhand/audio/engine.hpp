@@ -168,7 +168,8 @@ enum class Op : std::uint8_t {
   SeqRun,          // i = 1 run, 0 stop, -1 toggle
   SeqBpm,          // f = tempo used when no deck leads (0 = follow MasterBpm, else 120)
   SeqSwing,        // f = 0..0.75: how far every second step is delayed, as a fraction of a step
-  SeqStep,         // deck = slot, i = pattern * 16 + step, d = 1 on / 0 off, f = velocity 0..1 (< 0 keeps it)
+  SeqStep,         // deck = slot, i = pattern * 16 + step | (slice code << 8), d = 1 on / 0 off, f = velocity 0..1 (< 0 keeps it);
+                   //   slice code 0 keeps the cell's slice, 1 = whole sample, 2 + j = slice j (protocol 10)
   SeqSelect,       // i = pattern 0..7, d = 1 waits for the next bar (when running), 0 switches at once
   SeqRecord,       // i = 1 on, 0 off, -1 toggle: sampler triggers while running are written into the current pattern
   SeqClear,        // i = pattern (-1 = all), d = slot (< 0 = all slots)
@@ -198,8 +199,12 @@ enum class EffectKind : std::uint8_t {
   TapeEcho,   // beat echo whose repeats darken and soften (feedback filtering, saturation, wow): param = feedback, param2 = tone, param3 = wobble
   BeatReverb, // plate reverb whose decay lasts the beat length (beats / seconds = time to fall 60 dB)
   TapeStop,   // release effect: the signal winds down to a stop over the beat length; param = curve (0 linear, 1 sharp)
-  // appended (protocol 9)
-  Plugin,     // a hosted third-party effect plug-in (chain units only; id in FxChainEdit::text; parameters via FxChainVerb::Set
+  // appended (protocol 9; kinds travel as bytes, so no wire change, but Plugin moved up and now follows these)
+  Riser,      // transition build: over `beats` a high-pass climbs, noise swells and repeats shorten; release drops to dry on the beat; param = intensity
+  BandKill,   // 3-band kill isolator (crossovers 160 Hz / 3.5 kHz, dB-law faders, exact kill): param = low, param2 = mid, param3 = high
+  Reverser,   // plays each beat-length slice backwards (one slice late)
+  AutoPan,    // beat-synced equal-power auto pan: param = depth, param2 = shape
+  Plugin,         // a hosted third-party effect plug-in (chain units only; id in FxChainEdit::text; parameters via FxChainVerb::Set
               // with field = kFxFieldPluginParam + parameter index, value 0..1). Not counted by effect_count().
   Count
 };
@@ -552,8 +557,11 @@ struct SamplerView {
 constexpr int kSeqPatterns = 8, kSeqSteps = 16;
 constexpr int kSeqVelMax = 127;
 // A cell is one slot on one step: bit 7 = on, bits 0..6 = velocity 1..127. [step][slot].
+// slice[step][slot] (protocol 10): 0 = the whole sample, n = slice n-1 of a sliced slot (a slot that is not sliced, or has
+// fewer slices, plays the whole sample).
 struct SeqPatternData {
   std::uint8_t cell[kSeqSteps][kSamplerSlots] = {};
+  std::uint8_t slice[kSeqSteps][kSamplerSlots] = {};
 };
 struct StepSeqView {
   std::uint32_t rev = 0;           // changes whenever a cell changes
@@ -570,7 +578,9 @@ static_assert(sizeof(StepSeqView) % 8 == 0);
 
 // Compact text form of one pattern: "dhseq1" then 16 tokens (one per step) separated by ';'. A token is "-" for an empty
 // step or "<mask>:<velocities>": mask = 4 hex digits (bit n = slot n is on), then 2 hex digits of velocity (1..7f) for
-// each slot in the mask, lowest slot first. Example: "dhseq1;0005:7f40;-;-;..."
+// each slot in the mask, lowest slot first; a velocity may be followed by "@<hex digit>" = play that slice (0..f) of the
+// slot instead of the whole sample ("0005:7f@340" = slot 1 plays slice 3 at full, slot 3 plays whole at 0x40). Texts
+// without "@" are the original format and still read the same. Example: "dhseq1;0005:7f40;-;-;..."
 std::string seq_pattern_to_text(const SeqPatternData& p);
 bool seq_pattern_from_text(const std::string& text, SeqPatternData& out);
 
@@ -646,7 +656,8 @@ class IEngine {
   void seq_run(int on);                              // 1 / 0 / -1 toggle
   void seq_bpm(double bpm);
   void seq_swing(double swing);
-  void seq_step(int pattern, int step, int slot, bool on, float velocity = -1);
+  // slice: -1 keeps the cell's slice, -2 = whole sample, 0..15 = that slice of a sliced slot.
+  void seq_step(int pattern, int step, int slot, bool on, float velocity = -1, int slice = -1);
   void seq_select(int pattern, bool at_next_bar);
   void seq_record(int on);                           // 1 / 0 / -1 toggle
   void seq_clear(int pattern = -1, int slot = -1);
@@ -671,6 +682,13 @@ class IEngine {
   virtual void close_input() = 0;
   virtual std::vector<std::string> input_devices() = 0;  // capture devices currently present
   virtual InputStatus input_status() const = 0;
+  // Raw input tap (protocol 11): the frames the open capture device delivers, as interleaved stereo float (a mono input
+  // is doubled) at InputStatus::sample_rate, before any resampling, gain or ducking: what a recording of the input wants.
+  // Enable it, then pull from one non-real-time thread; frames that are not pulled in time are dropped and counted. An
+  // engine without an input answers with nothing.
+  virtual void input_tap_enable(bool) {}
+  virtual std::size_t input_tap_read(float*, std::size_t) { return 0; }
+  virtual std::uint64_t input_tap_dropped() const { return 0; }
 
   virtual std::uint64_t clock_frames() const = 0;
   virtual double clock_seconds() const = 0;
@@ -800,6 +818,9 @@ class Engine final : public IEngine {
   void close_input() override;
   std::vector<std::string> input_devices() override;
   InputStatus input_status() const override;
+  void input_tap_enable(bool on) override;
+  std::size_t input_tap_read(float* interleaved_stereo, std::size_t max_frames) override;
+  std::uint64_t input_tap_dropped() const override;
 
   // ---- engine clock and sample-accurate scheduling ----
   // Output frames rendered so far (monotonic, any thread; advances once per callback).

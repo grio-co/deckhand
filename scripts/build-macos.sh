@@ -46,7 +46,7 @@ swiftc -O -swift-version 5 \
   -I "$ROOT/platform/macos/DeckHandKit/Sources/CDeckHand/include" \
   "$ROOT"/platform/macos/DeckHandKit/Sources/DeckHandKit/*.swift "$ROOT"/platform/macos/Shell/main.swift \
   -o "$APP/Contents/MacOS/DeckHand" \
-  -L "$BUILD" -ldh_app -ldh_lighting -ldh_plugins -ldh_stems -ldh_sync -ldh_services -ldh_broadcast -ldh_api -ldh_skin -ldh_i18n -ldh_export -ldh_analysis -ldh_stems -ldh_midi -ldh_import \
+  -L "$BUILD" -ldh_app -ldh_lighting -ldh_plugins -ldh_stems -ldh_sync -ldh_services -ldh_broadcast -ldh_api -ldh_skin -ldh_i18n -ldh_export -ldh_capture -ldh_analysis -ldh_stems -ldh_midi -ldh_import \
   -ldh_library -ldh_audio -ldh_gfx -ldh_log -ldh_platform -ldh_miniaudio \
   $(cat "$BUILD/tls_link.txt") $(cat "$BUILD/sqlite_link.txt") -lc++ \
   -framework AppKit -framework Metal -framework MetalKit -framework QuartzCore -framework CoreText \

@@ -67,9 +67,10 @@ void fx_plugin_rate(FxUnit& u, double sr) {
   s->sr = sr;
 }
 
-void fx_plugin_run(FxUnit& u, float* buf, int n) {
+void fx_plugin_run(FxUnit& u, const FxCtx& cx, float* buf, int n) {
   PluginSlot* s = u.plug;
   if (!s || !s->loaded) return;
+  if (cx.bf > 0) s->eff.set_transport(60.0 * cx.sr / cx.bf, cx.beat_pos, true);
   s->eff.set_on(u.on);
   s->eff.set_wet(u.wet);
   s->eff.run(buf, n);

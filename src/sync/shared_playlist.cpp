@@ -518,7 +518,7 @@ SharedResult join_shared_playlist(Library& lib, const std::string& shared_id, co
     c.link.participant = new_id_of(cfg);
     c.link.name_synced = m.name.empty() ? std::string("Shared playlist") : m.name;  // the name is theirs: not sent back
     res = run_sync(c, false);
-    if (!res.ok) lib.delete_playlist(pl);
+    if (!res.ok) lib.purge_deleted_playlist(lib.delete_playlist(pl));  // a failed join leaves nothing behind, not even a trash entry
   } catch (const std::exception& e) {
     res.ok = false;
     res.error = e.what();

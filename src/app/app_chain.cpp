@@ -14,6 +14,16 @@
 
 namespace deckhand {
 
+std::string App::fx_name(const EffectInfo& info) const {
+  const std::string key = std::string("fx.name.") + info.slug;
+  return info.slug[0] && i18n_.has(key) ? i18n_.tr(key) : std::string(info.name);
+}
+std::string App::fx_param(const char* english) const {
+  std::string key = "fx.param.";
+  for (const char* c = english; *c; ++c) key += *c == ' ' ? '_' : static_cast<char>(std::tolower(static_cast<unsigned char>(*c)));
+  return english[0] && i18n_.has(key) ? i18n_.tr(key) : std::string(english);
+}
+
 using namespace deckhand::detail;
 
 namespace {
@@ -153,7 +163,7 @@ void App::draw_chain_panel(const Rect& m) {
     for (int i = 0; i < ci.count && i < kFxChainMax; ++i) {
       const FxUnitInfo& u = ci.unit[i];
       const EffectInfo* info = effect_info(u.kind);
-      std::string name = info ? info->name : "?";
+      std::string name = info ? fx_name(*info) : "?";
       if (u.kind == EffectKind::Plugin && u.id == chain_unit_ && chain_pinfo_unit_ == u.id && !chain_pinfo_.name.empty()) name = chain_pinfo_.name;
       const Rect row{x, cy, left_w, row_h - 3};
       const bool sel = u.id == chain_unit_;
@@ -227,7 +237,7 @@ void App::draw_chain_panel(const Rect& m) {
     int c = 0;
     for (int i = 0; i < builtin; ++i) {
       const EffectInfo& e = effect_info_at(i);
-      if (ui_button({rx + static_cast<float>(c) * (cw + 8), cy, cw, item_h - 3}, e.name, false)) {
+      if (ui_button({rx + static_cast<float>(c) * (cw + 8), cy, cw, item_h - 3}, fx_name(e), false)) {
         FxChainEdit ed;
         ed.verb = FxChainVerb::Insert;
         ed.kind = e.kind;
@@ -295,7 +305,7 @@ void App::draw_chain_panel(const Rect& m) {
         return ch;
       };
       double nv = 0;
-      dl_.text(rx, cy + 2, skin_->fit(u->kind == EffectKind::Plugin && !chain_pinfo_.name.empty() ? chain_pinfo_.name : (info ? info->name : ""), 14, 1, rwid), 14, th.text, Align::Left, rwid, 1);
+      dl_.text(rx, cy + 2, skin_->fit(u->kind == EffectKind::Plugin && !chain_pinfo_.name.empty() ? chain_pinfo_.name : (info ? fx_name(*info) : ""), 14, 1, rwid), 14, th.text, Align::Left, rwid, 1);
       cy += 28;
       if (row(T("chain.wet"), u->wet, 1, percent(u->wet), nv)) set_field(FxField::Wet, nv);
       if (u->kind == EffectKind::Plugin) {
@@ -347,9 +357,9 @@ void App::draw_chain_panel(const Rect& m) {
           }
         }
       } else if (info) {
-        if (info->param_name[0] && row(info->param_name, u->param, 2, percent(u->param), nv)) set_field(FxField::Param, nv);
-        if (info->param2_name[0] && row(info->param2_name, u->param2, 3, percent(u->param2), nv)) set_field(FxField::Param2, nv);
-        if (info->param3_name[0] && row(info->param3_name, u->param3, 4, percent(u->param3), nv)) set_field(FxField::Param3, nv);
+        if (info->param_name[0] && row(fx_param(info->param_name), u->param, 2, percent(u->param), nv)) set_field(FxField::Param, nv);
+        if (info->param2_name[0] && row(fx_param(info->param2_name), u->param2, 3, percent(u->param2), nv)) set_field(FxField::Param2, nv);
+        if (info->param3_name[0] && row(fx_param(info->param3_name), u->param3, 4, percent(u->param3), nv)) set_field(FxField::Param3, nv);
         if (info->beat_synced) {  // beat division: halve / double
           dl_.text(rx, cy + 5, T("chain.beat_division"), 12, th.dim);
           const std::string txt = u->beats >= 1 ? fmt("%g", static_cast<double>(u->beats)) : "1/" + fmt("%g", std::round(1.0 / static_cast<double>(u->beats)));

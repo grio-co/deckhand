@@ -125,6 +125,12 @@ class AuInstance final : public PluginInstance {
     AURenderCallbackStruct cb{&AuInstance::input_cb, this};
     if ((st = AudioUnitSetProperty(unit_, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb)) != noErr)
       return fail("render callback", st);
+    HostCallbackInfo hc{};
+    hc.hostUserData = this;
+    hc.beatAndTempoProc = &AuInstance::cb_beat_tempo;
+    hc.musicalTimeLocationProc = &AuInstance::cb_musical_time;
+    hc.transportStateProc = &AuInstance::cb_transport;
+    AudioUnitSetProperty(unit_, kAudioUnitProperty_HostCallbacks, kAudioUnitScope_Global, 0, &hc, sizeof hc);  // optional: units that ignore it are fine
     if ((st = AudioUnitInitialize(unit_)) != noErr) return fail("AudioUnitInitialize", st);
     inited_ = true;
 
@@ -148,11 +154,14 @@ class AuInstance final : public PluginInstance {
       return;
     }
     if (any_pending_.exchange(false, std::memory_order_acquire)) apply_pending();
+    double beat = tr_beat_.load(std::memory_order_relaxed);
+    const double tempo = tr_tempo_.load(std::memory_order_relaxed);
     int done = 0;
     while (done < frames) {
       const int n = std::min(frames - done, max_block_);
       for (int c = 0; c < 2; ++c) std::memcpy(in_buf_[c].data(), in[c] + done, (std::size_t)n * sizeof(float));
       cur_n_ = n;
+      cur_beat_.store(beat, std::memory_order_relaxed);
       for (int c = 0; c < 2; ++c) {
         abl_->mBuffers[c].mNumberChannels = 1;
         abl_->mBuffers[c].mDataByteSize = (UInt32)n * sizeof(float);
@@ -173,8 +182,30 @@ class AuInstance final : public PluginInstance {
             std::memcpy(out[c] + done, abl_->mBuffers[c].mData, (std::size_t)n * sizeof(float));
       }
       sample_time_ += n;
+      if (tempo > 0) beat += n * tempo / (60.0 * sr_);
       done += n;
     }
+    tr_beat_.store(beat, std::memory_order_relaxed);
+  }
+
+  void set_transport(const HostTransport& t) override {
+    tr_tempo_.store(t.tempo_bpm > 0 ? t.tempo_bpm : 0.0, std::memory_order_relaxed);
+    tr_beat_.store(t.beat, std::memory_order_relaxed);
+    cur_beat_.store(t.beat, std::memory_order_relaxed);
+    tr_play_.store(t.playing, std::memory_order_relaxed);
+  }
+  bool query_host_transport(HostTransport& out) override {
+    HostCallbackInfo hc{};
+    UInt32 sz = sizeof hc;
+    if (AudioUnitGetProperty(unit_, kAudioUnitProperty_HostCallbacks, kAudioUnitScope_Global, 0, &hc, &sz) != noErr || !hc.beatAndTempoProc) return false;
+    Float64 b = 0, t = 0;
+    if (hc.beatAndTempoProc(hc.hostUserData, &b, &t) != noErr) return false;
+    Boolean playing = false;
+    if (hc.transportStateProc) hc.transportStateProc(hc.hostUserData, &playing, nullptr, nullptr, nullptr, nullptr, nullptr);
+    out.beat = b;
+    out.tempo_bpm = t;
+    out.playing = playing != 0;
+    return true;
   }
 
   void set_bypass(bool on) override { bypass_.store(on, std::memory_order_relaxed); }
@@ -331,6 +362,36 @@ class AuInstance final : public PluginInstance {
   }
 
  private:
+  static OSStatus cb_beat_tempo(void* ref, Float64* beat, Float64* tempo) {
+    auto* s = static_cast<AuInstance*>(ref);
+    const double t = s->tr_tempo_.load(std::memory_order_relaxed);
+    if (!(t > 0)) return kAudioUnitErr_CannotDoInCurrentContext;
+    if (beat) *beat = s->cur_beat_.load(std::memory_order_relaxed);
+    if (tempo) *tempo = t;
+    return noErr;
+  }
+  static OSStatus cb_musical_time(void* ref, UInt32* to_next, Float32* num, UInt32* den, Float64* downbeat) {
+    auto* s = static_cast<AuInstance*>(ref);
+    const double t = s->tr_tempo_.load(std::memory_order_relaxed);
+    if (!(t > 0)) return kAudioUnitErr_CannotDoInCurrentContext;
+    const double b = s->cur_beat_.load(std::memory_order_relaxed);
+    if (to_next) *to_next = (UInt32)std::max(0.0, (std::ceil(b) - b) * 60.0 * s->sr_ / t);
+    if (num) *num = 4;
+    if (den) *den = 4;
+    if (downbeat) *downbeat = std::floor(b / 4.0) * 4.0;
+    return noErr;
+  }
+  static OSStatus cb_transport(void* ref, Boolean* playing, Boolean* changed, Float64* sample, Boolean* cycling, Float64* cs, Float64* ce) {
+    auto* s = static_cast<AuInstance*>(ref);
+    if (playing) *playing = s->tr_play_.load(std::memory_order_relaxed);
+    if (changed) *changed = false;
+    if (sample) *sample = s->sample_time_;
+    if (cycling) *cycling = false;
+    if (cs) *cs = 0;
+    if (ce) *ce = 0;
+    return noErr;
+  }
+
   static OSStatus input_cb(void* ref, AudioUnitRenderActionFlags*, const AudioTimeStamp*, UInt32, UInt32 frames,
                            AudioBufferList* io) {
     auto* self = static_cast<AuInstance*>(ref);
@@ -433,6 +494,8 @@ class AuInstance final : public PluginInstance {
   std::unique_ptr<std::atomic<float>[]> pend_val_;
   std::unique_ptr<std::atomic<std::uint8_t>[]> pend_flag_;
   std::atomic<bool> any_pending_{false};
+  std::atomic<double> tr_tempo_{0}, tr_beat_{0}, cur_beat_{0};
+  std::atomic<bool> tr_play_{false};
 };
 
 }  // namespace

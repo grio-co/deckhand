@@ -74,11 +74,13 @@ Send `Authorization: Bearer <token>`. Bodies and replies are JSON.
 | `POST /v1/library/analysis/strip` | `library:write` | Clear derived data only: `kinds` of grid, key, loudness, waveform, first_sound, phrases, vocals, stems for `ids`, a `playlist_id`/`search`, or `all`; `force`, `dry_run`. Tags, cues, playlists and the main cue are never touched; locked grids and hand-set keys are skipped unless forced. Undo (edit batch) restores grid, tempo, key and lock; loudness, waveform, phrases and first-sound/load cue are not undoable |
 | `GET /v1/library/duplicates`, `POST /v1/library/duplicates/hash`, `POST /v1/library/duplicates/merge` | `library:read` / `library:write` | Duplicate groups (`exact` by file hash, `likely` by artist, title and length, with confidence, differences and a `suggested_keep`), a bounded hashing step, and `merge` (`keep_id`, `remove_ids`, `options`: `copy_cues`, `fill_metadata`, `combine_history`, `dry_run`): playlists re-pointed without doubles, cues/grid copied where missing, history combined, removed tracks to the trash, audio files never touched |
 | `GET /v1/library/trash`, `POST /v1/library/trash/{id}/restore` | `library:read` / `library:write` | Removed tracks (kept 30 days) and restoring one with its cues, grid and playlist places |
-| `DELETE /v1/library/trash` | `admin` | Empty the trash for good (`?older_than_days=` keeps newer ones). Cannot be undone |
+| `DELETE /v1/library/trash` | `admin` | Empty the trash for good (`?older_than_days=` keeps newer ones); the deleted playlists go with it. Cannot be undone |
+| `GET /v1/library/playlist-trash`, `POST /v1/library/playlist-trash/{id}/restore` | `library:read` / `library:write` | Deleted playlists, folders (with their contents) and smart playlists, kept 30 days (`kind`, `name`, `old_id`, `parent`, `playlists`, `folders`, `tracks`, `shared`); restoring one puts back contents, order, place, rules and a shared link (`id` of the answer is the restored playlist) |
+| `DELETE /v1/library/playlist-trash/{id}`, `DELETE /v1/library/playlist-trash` | `admin` | Forget one entry, or all (`?older_than_days=` keeps newer ones; a value that is not a whole number is 400). Cannot be undone |
 | `GET /v1/library/folders/{id}/tracks`, `GET /v1/library/disk-folders`, `GET /v1/library/disk-folders/tracks?dir=` | `library:read` | A playlist folder shows the tracks of every playlist beneath it (each once, with `source`); the library by the directories of its files |
 | `POST /v1/library/relocate/scan`, `POST /v1/library/relocate/apply`, `POST /v1/library/tracks/{id}/relink`, `POST .../relink/siblings` | `library:read` / `library:write` | Find the files of missing tracks in folders you give (dry run, never guesses between equal candidates), apply the matches in one journal batch (undo with `POST /v1/library/edit-batches/{id}/undo`), relink one track by hand, and look for the other tracks that moved with it |
 | `GET /v1/browser`, `PUT /v1/browser/split`, `PUT /v1/browser/panes/{slot}`, `PUT /v1/browser/layout`, `POST /v1/browser/layouts`, `POST /v1/browser/layouts/delete` | `read`, `control` | The browser's saved column layouts, the split into two tables (`off`, `side`, `stacked`) and what each table shows |
-| `GET /v1/sync`, `POST /v1/sync/run`, `PUT /v1/sync/config` | `read`, `control`, `admin` | Sync settings (`mix_links`, `analysis`, `audio_playlists`, `music_folder`, `audio_budget_mb`, `audio_import_budget_mb`, `allow_unencrypted_audio`; settings keys `sync.*`, see docs/SYNC.md) and the last run: `sent`, `received`, `links_pending`, `analysis_applied` and the audio step (`exported`, `imported`, `relinked`, `waiting_budget`, `waiting_files`, `failed`, `store_bytes`) |
+| `GET /v1/sync`, `POST /v1/sync/run`, `PUT /v1/sync/config` | `read`, `control`, `admin` | Sync settings (`mix_links`, `analysis`, `audio_playlists`, `music_folder`, `audio_budget_mb`, `audio_import_budget_mb`, `audio_cleanup_days` (default 30, 0 = at once, negative = never), `allow_unencrypted_audio`; settings keys `sync.*`, see docs/SYNC.md) and the last run: `sent`, `received`, `links_pending`, `analysis_applied` and the audio step (`exported`, `imported`, `relinked`, `waiting_budget`, `waiting_files`, `failed`, `store_bytes`, `removed`, `freed_bytes`, `cleanup_pending`) |
 | `POST /v1/library/export/xml`, `POST /v1/library/playlists/{id}/export/m3u8`, `POST /v1/library/export/m3u8` | `export` | Write the library as DJ library XML, or playlists as M3U8, to a server-side path ([INTERCHANGE.md](INTERCHANGE.md)) |
 | `POST /v1/library/import/xml`, `POST /v1/library/import/m3u8` | `library:write` | Import them; `dry_run` reports without writing; imported edits are journalled (source `import`) and keep user/API edits unless `overwrite_metadata` |
 | `POST /v1/export/preflight`, `GET /v1/export/report` | `export`, `library:read` | Check which tracks a club player can read before exporting; report of the last export. `POST /v1/export` takes `convert_incompatible` and `player_profile` |
@@ -190,7 +192,7 @@ being played: 0 off, 0..1 on at that velocity, none = toggle), `sampler.slot.<1.
 |---|---|---|
 | `GET /v1/sequencer` | `read` | Running, recording, pattern (1..8), queued pattern (0 = none), step (1..16, 0 = stopped), `bpm`, `swing`, `follows_deck`, and `patterns` (all eight as text) |
 | `GET`/`PUT /v1/sequencer/patterns/{n}` | `read` / `control` | One pattern as text (`{"text": "dhseq1;..."}`); PUT replaces it (400 for a text that is not valid) |
-| `POST /v1/sequencer/step` | `control` | `{"pattern": 3, "step": 5, "slot": 2, "on": true, "velocity": 0.8}` (pattern defaults to the one being played) |
+| `POST /v1/sequencer/step` | `control` | `{"pattern": 3, "step": 5, "slot": 2, "on": true, "velocity": 0.8, "slice": 3}` (pattern defaults to the one being played; `slice` 0 = whole sample, 1..16 = that slice, left out = keep the cell's) |
 | `POST /v1/sequencer/{action}` | `control` | `run`, `record` (`{"on": true}`, none = toggle), `bpm`, `swing` (`{"value": n}`), `select`, `queue` (`{"pattern": n}`), `clear` (`{"pattern": n}`, `{"all": true}`, `slot` limits it to one slot) |
 | `GET /v1/sampler/slices` | `read` | Per slot: `loaded`, `slices`, `last_slice` (1-based, 0 = none), `scratching` |
 | `POST /v1/sampler/{slot}/slices` | `control` | `{"count": 0 / 8 / 16}` |
@@ -243,3 +245,22 @@ A chain unit can be a hosted plug-in (macOS Audio Units; `GET /v1/fx/plugins` sa
 - Named presets (chain plus plug-in states): `POST /v1/fx/chains/{target}/presets` `{"name"}` saves, `POST .../presets/load` loads
   (`notes` names plug-ins that were missing or blocked: their units stay as pass-throughs), `GET /v1/fx/presets` lists,
   `POST /v1/fx/presets/delete` removes. Controls: `deckN.chain.preset_save|preset_load|preset_delete` (name as `text`).
+
+## Recording from an analogue input (protocol 11)
+
+The engine's raw input tap feeds a recording; see docs/CAPTURE.md. All routes answer 404 when the build has no recording.
+
+| Route | Scope | What it does |
+|---|---|---|
+| `GET /v1/capture/inputs` | `read` | `inputs` (capture devices present) and `current` (the input the engine has open) |
+| `GET /v1/capture`, `GET /v1/capture/meter` | `read` | `state` (idle, recording, paused, stopped), `path`, `seconds`, `peak_db`, `hold_db`, `rms_db`, `clips`, `dropped_frames`, `analysed`, `points` |
+| `POST /v1/capture/start` | `control` | `{"device": "", "channel": 0, "stereo": true, "format": "pcm24", "name": "side-a"}`; 409 when already recording or the input cannot be opened |
+| `POST /v1/capture/pause`, `POST /v1/capture/stop` | `control` | `{"paused": true}` (audio that arrives while paused is discarded); stop closes the file |
+| `POST /v1/capture/load` | `control` | `{"path": "/abs/side.wav"}`: use an existing recording as the current side |
+| `POST /v1/capture/analyse` | `control` | Reads the side (blocks); the optional body sets split settings (`min_gap_s`, `min_track_s`, `min_depth_db`, ...) |
+| `GET /v1/capture/splits` | `read` | `points`, `pieces`, `settings`; `?envelope=N` adds N level values (dB) for drawing; `?contiguous=1` |
+| `PUT /v1/capture/splits` | `control` | Re-run the detection with new settings; the user's points stay |
+| `POST /v1/capture/splits`, `PUT /v1/capture/splits/{index}`, `DELETE /v1/capture/splits/{index}` | `control` | Add, move or remove a split point (`frame` or `seconds`) |
+| `PUT /v1/capture/tags` | `control` | `artist`, `album`, `genre`, `year`, `comment`, `titles` (one per piece) |
+| `POST /v1/capture/export` | `export` | `{"dir": "/abs/folder", "container": "wav", "bits": 24, "contiguous": false, "overwrite": false, "cleanup": {"remove_dc": true, "fade_in_ms": 10}}`: one file per piece |
+| `POST /v1/library/tracks/{id}/export-edit` | `export` | `{"out": "/abs/edited.wav", "start": 1.5, "end": 200, "cleanup": {"normalise": true, "target_lufs": -14}}`: an edited copy; the original is never written to |

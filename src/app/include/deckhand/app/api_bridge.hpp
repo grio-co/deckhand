@@ -13,6 +13,7 @@ namespace deckhand {
 class StemService;
 class AutomixService;
 class LightingBridge;
+class CaptureService;
 class Library;
 
 // Arguments of a track-preparation action (grid editing, cues, loops). Which fields an action reads is in docs/API.md.
@@ -93,6 +94,8 @@ class ApiHost {
     error = "automix is not available";
     return false;
   }
+  // Recording from an analogue input (docs/CAPTURE.md); null when the host has none.
+  virtual CaptureService* api_capture() { return nullptr; }
   // The lighting module's application side; null when the host has none. A build without the module returns a stub.
   virtual LightingBridge* api_lighting() { return nullptr; }
   // The connected and previously seen controllers with their mapping and per-controller settings, as JSON text.
@@ -122,6 +125,7 @@ class ApiBridge {
   ~ApiBridge();
   bool running() const;
   std::string describe() const;
+  std::uint16_t port() const;  // the bound port, 0 when the API is off (the setting "api.port" = 0 binds any free port)
   // Forward engine events here (scheduled commands that fired or were dropped). Any thread.
   void engine_event(const EngineEvent& e);  // e.g. "API http://127.0.0.1:7373"
 

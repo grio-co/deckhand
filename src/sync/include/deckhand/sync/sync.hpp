@@ -50,6 +50,9 @@ struct SyncConfig {
   // With a passphrase set, audio is encrypted the same way as the logs. A build without a crypto library cannot do that:
   // sync_audio() then refuses unless this is true, in which case audio is stored and accepted unencrypted.
   bool allow_unencrypted_audio = false;
+  // Stored audio that no synced playlist on any device references any more is removed once it has been unreferenced for
+  // this long (as first noticed by any device). Negative: never remove anything. 0: remove at the first call that sees it.
+  std::int64_t audio_cleanup_grace_ms = 30ll * 24 * 3600 * 1000;
 };
 
 // What one SyncEngine::sync_audio() call did. Counts are files; bytes are audio bytes (not container overhead).
@@ -67,6 +70,9 @@ struct AudioReport {
   int waiting_files = 0;       // other devices' audio that has not arrived (or is incomplete) in the folder yet
   int failed = 0;              // arrived damaged (hash mismatch, cut off, wrong passphrase) and was not used
   std::uint64_t store_bytes = 0;  // audio store size in the folder after this call
+  int removed = 0;                // objects deleted because no playlist references them any more (after the grace period)
+  std::uint64_t freed_bytes = 0;  // size on disk of those objects
+  int cleanup_pending = 0;        // unreferenced objects still inside their grace period
   std::vector<std::string> warnings;
 };
 

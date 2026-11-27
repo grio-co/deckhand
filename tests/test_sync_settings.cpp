@@ -48,6 +48,22 @@ int main() {
     load_sync_options(lib, cfg);
     CHECK(!sync_audio_wanted(cfg));
   }
+  {  // stored audio nothing uses any more: removed after audio_cleanup_days (default 30, 0 = at once, negative = never)
+    CHECK(audio_cleanup_days("") == 30 && audio_cleanup_days("abc") == 30 && audio_cleanup_days("7") == 7 && audio_cleanup_days("0") == 0);
+    CHECK(audio_cleanup_days("-1") == -1 && audio_cleanup_days("-40") == -1 && audio_cleanup_days("999999") == 36500);
+    CHECK(audio_cleanup_grace_ms("") == 30ll * 24 * 3600 * 1000 && audio_cleanup_grace_ms("0") == 0 && audio_cleanup_grace_ms("2") == 2ll * 24 * 3600 * 1000);
+    CHECK(audio_cleanup_grace_ms("-1") < 0);
+    Library lib((dir / "cleanup.db").string());
+    deckhand::sync::SyncConfig cfg;
+    load_sync_options(lib, cfg);
+    CHECK(cfg.audio_cleanup_grace_ms == 30ll * 24 * 3600 * 1000);
+    lib.set_setting("sync.audio_cleanup_days", "0");
+    load_sync_options(lib, cfg);
+    CHECK(cfg.audio_cleanup_grace_ms == 0);
+    lib.set_setting("sync.audio_cleanup_days", "-3");
+    load_sync_options(lib, cfg);
+    CHECK(cfg.audio_cleanup_grace_ms < 0);
+  }
   fs::remove_all(dir, ec);
   std::printf("sync settings ok\n");
   return 0;

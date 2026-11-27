@@ -169,6 +169,21 @@ struct DeletedTrack {
   std::int64_t deleted_at = 0;  // unix seconds
 };
 
+// A playlist, smart playlist or folder (with everything in it) removed from the collection, kept for
+// restore_playlist() until purge_deleted_playlists() drops it.
+struct DeletedPlaylist {
+  std::int64_t id = 0;         // trash entry id (not the playlist's old id)
+  std::string kind;            // "playlist" | "folder" | "smart"
+  std::string name;
+  std::int64_t old_id = 0;     // the playlist's id when it was deleted
+  std::int64_t parent_id = 0;  // the folder it was in (0 = top level)
+  std::int64_t deleted_at = 0; // unix seconds
+  int playlists = 0;           // playlists in the deleted subtree (a smart playlist counts 1)
+  int folders = 0;             // folders in the subtree, the deleted folder included
+  int tracks = 0;              // playlist entries kept (a track in two playlists counts twice)
+  bool shared = false;         // a shared-playlist link is kept and comes back with it
+};
+
 // Names the origin of the library edits made on this thread while it lives ('user' when no scope is open), and groups
 // them into one journal batch. Scopes nest: an inner scope keeps the outer source and batch unless `force` is set.
 struct ResumeBatch {};
@@ -507,7 +522,19 @@ class Library {
   // Playlists. Positions are 0-based; position -1 appends.
   std::int64_t create_playlist(std::int64_t parent, const std::string& name, bool is_folder);
   void rename_playlist(std::int64_t id, const std::string& name);
-  void delete_playlist(std::int64_t id);
+  // Deleting a playlist or folder (with everything inside) moves it to the playlist trash; the return value is the trash
+  // entry id (0 when there is no such playlist). Journalled (field "playlist_trash", track id 0) so undo_batch /
+  // undo_edit bring it back. The entry is kept like trashed tracks (purge_deleted_playlists).
+  std::int64_t delete_playlist(std::int64_t id);
+  std::vector<DeletedPlaylist> deleted_playlists();  // newest first
+  // Puts a trashed playlist / folder subtree / smart playlist back: contents, order, place in the tree, rules and
+  // shared-playlist link. The old ids are reused when free. When the old folder is gone it goes to the top level; a name
+  // already used next to it becomes "Name (restored)". False when there is no such entry. `restored` gets the id of the
+  // restored playlist (or smart playlist when kind is "smart").
+  bool restore_playlist(std::int64_t trash_id, std::int64_t* restored = nullptr);
+  // Drops entries deleted more than the given number of days ago (also runs from purge_deleted()).
+  int purge_deleted_playlists(int older_than_days = 30);
+  bool purge_deleted_playlist(std::int64_t trash_id);  // one entry now
   // Returns false when the move would put a folder inside itself.
   bool move_playlist(std::int64_t id, std::int64_t new_parent, int position);
   std::vector<std::int64_t> playlist_track_ids(std::int64_t playlist_id);
@@ -521,7 +548,8 @@ class Library {
   std::optional<SmartPlaylist> smart_playlist(std::int64_t id);
   std::int64_t create_smart_playlist(const std::string& name, bool match_all, const std::vector<SmartRule>& rules);
   void update_smart_playlist(const SmartPlaylist& p);  // name, match mode and rules of p.id
-  void delete_smart_playlist(std::int64_t id);
+  // To the playlist trash like delete_playlist (kind "smart"); returns the trash entry id, 0 when there is none.
+  std::int64_t delete_smart_playlist(std::int64_t id);
   // Tracks matching rules (all of them or any), then the text search, in the order tracks() would give.
   std::vector<std::int64_t> query_ids(const std::vector<SmartRule>& rules, bool match_all, const std::string& search = {},
                                       SortKey sort = SortKey::Default, bool descending = false);
@@ -616,6 +644,9 @@ class Library {
   UndoResult undo_records(const std::vector<TrackEditRecord>& newest_first);
   int undo_one(const TrackEditRecord& e);  // 0 restored, 1 conflict, 2 track gone
   int undo_mix_links(const TrackEditRecord& e);
+  int undo_playlist_trash(const TrackEditRecord& e);
+  std::int64_t trash_playlist_node(std::int64_t id, bool smart, std::string* kind);  // 0 when absent; not journalled
+  std::int64_t restore_playlist_entry(std::int64_t entry, std::string* kind);        // 0 when absent; not journalled
   int undo_whole(const TrackEditRecord& e);  // the "grid" and "cues" rows
   int follow_mix_links(std::int64_t track_id, const std::vector<BeatSection>& old_grid, const std::vector<BeatSection>& new_grid,
                        double tolerance_ms, bool apply);  // moved (apply) or movable (!apply) link ends

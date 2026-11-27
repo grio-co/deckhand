@@ -49,6 +49,8 @@ strings {
   skull.close "x"
   skull.eject "EJECT"
   skull.zero "0"
+  skull.loop_in "IN"
+  skull.loop_out "OUT"
 }
 
 animation beat_glow property=glow from=1 to=0 duration=160 ease=out trigger=beat
@@ -98,6 +100,8 @@ window main size=1100x1440 min=550x720 title="@app.title" chrome=none background
     button bind="deck[1].cue.loop_save" text="@cue.loop_save" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=176 y=512 w=86 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
     button bind="deck[1].cue.loop_recall" text="@cue.loop_recall" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=266 y=512 w=86 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
     button bind="deck[1].cue.suggest" text="@cue.suggest" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=356 y=512 w=86 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].loop_in" text="@skull.loop_in" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=176 y=546 w=64 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
+    button bind="deck[1].loop_out" text="@skull.loop_out" font=small color=text bg=panel border=deck1 border_w=1 radius=6 transition=90 x=244 y=546 w=64 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
     // ---- deck A: upper teeth = hot cues, lower teeth = key shift, range, stems
     pads bind="deck[1].pads" cols=8 rows=1 gap=4 radius=8 color=deck1 x=230 y=576 w=316 h=60
     button bind="deck[1].key_shift.minus" text="@deck.key_down" font=small color=text bg=panel border=deck1 border_w=1 radius=8 transition=90 x=230 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck1 color=bg } }
@@ -169,6 +173,8 @@ window main size=1100x1440 min=550x720 title="@app.title" chrome=none background
     button bind="deck[2].cue.loop_save" text="@cue.loop_save" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=656 y=512 w=86 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
     button bind="deck[2].cue.loop_recall" text="@cue.loop_recall" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=746 y=512 w=86 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
     button bind="deck[2].cue.suggest" text="@cue.suggest" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=836 y=512 w=86 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].loop_in" text="@skull.loop_in" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=656 y=546 w=64 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
+    button bind="deck[2].loop_out" text="@skull.loop_out" font=small color=text bg=panel border=deck2 border_w=1 radius=6 transition=90 x=724 y=546 w=64 h=26 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }
     // ---- deck B: upper teeth = hot cues, lower teeth = key shift, range, stems
     pads bind="deck[2].pads" cols=8 rows=1 gap=4 radius=8 color=deck2 x=550 y=576 w=316 h=60
     button bind="deck[2].key_shift.minus" text="@deck.key_down" font=small color=text bg=panel border=deck2 border_w=1 radius=8 transition=90 x=550 y=806 w=36 h=56 { state hover { bg=hover } state pressed { bg=press } state on { bg=deck2 color=bg } }

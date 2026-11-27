@@ -271,6 +271,7 @@ Target map_binding(std::string_view n) {
     if (k == "trash") return action("trash");
     if (k == "layouts") return action("layouts");
     if (k == "locate") return action("locate");
+    if (k == "capture") return action("capture");
     if (k == "split") return action("split");
     if (k == "focus_pane") return action("focus_pane");
     if (k == "layout_next") return action("layout_next");

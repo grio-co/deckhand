@@ -37,6 +37,12 @@ class PluginEffect {
   // any tail finished).
   void run(float* interleaved, int frames);
   bool busy() const;  // on, still fading, or ringing out a tail
+  // Host tempo and the beat position at the start of the next run() call (any thread; run() advances it per block).
+  void set_transport(double tempo_bpm, double beat, bool playing) {
+    tempo_ = tempo_bpm;
+    beat_ = beat;
+    playing_ = playing;
+  }
   void reset();       // clears the plug-in's tails and the smoothing (not RT)
 
   // Chain persistence: opaque plug-in state plus the unit's own settings.
@@ -51,6 +57,8 @@ class PluginEffect {
   float m_ = 0;                  // smoothed mix
   long long tail_left_ = 0;      // frames of tail still to render after switching off
   double sr_ = 48000;
+  double tempo_ = 0, beat_ = 0;
+  bool playing_ = false;
   std::vector<float> in_[2], out_[2];  // allocated in load()
 };
 

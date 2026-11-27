@@ -176,18 +176,18 @@ void App::draw_browser_panes(const Rect& r, const ui::Theme& th, const std::stri
   }
   const int live = live_slot_;
   draw_tracks(rect_of(live), th, columns, row_h);
-  {
-    std::lock_guard<std::mutex> lock(browse_mutex_);
-    swap_pane();
-  }
+  // The other table is drawn with its state swapped in, and the swap, the drawing and the swap back happen under one hold of
+  // browse_mutex_: the controller thread never sees the second table's state in the live members.
   const bool had_press = in_.pressed;
   in_.pressed = false;  // the unfocused table only shows; clicks in it were turned into a focus change above
-  draw_tracks(rect_of(1 - live), th, columns, row_h);
-  in_.pressed = had_press;
+  prepare_track_columns(columns);
   {
     std::lock_guard<std::mutex> lock(browse_mutex_);
     swap_pane();
+    draw_tracks_locked(rect_of(1 - live), th, row_h);
+    swap_pane();
   }
+  in_.pressed = had_press;
   const Rect f = rect_of(live);
   dl_.rect(f.x, f.y, f.w, 2, th.accent);
 }
@@ -306,8 +306,10 @@ void App::draw_trash_panel(const Rect& m) {
   if (trash_dirty_) {
     trash_dirty_ = false;
     trash_cache_.clear();
+    trash_pl_cache_.clear();
     hist_cache_.clear();
     if (trash_tab_ == 0) {
+      trash_pl_cache_ = lib_->deleted_playlists();
       trash_cache_ = lib_->deleted_tracks();
     } else {
       const std::vector<HistoryStep> steps = trash_tab_ == 1 ? (sel_track ? track_history_steps(*lib_, sel_track) : std::vector<HistoryStep>{})
@@ -315,7 +317,8 @@ void App::draw_trash_panel(const Rect& m) {
       for (const HistoryStep& s : steps) {
         HistRow h;
         h.step = s;
-        if (const auto row = lib_->track(s.track_id)) h.title = row->artist.empty() ? row->title : row->artist + " - " + row->title;
+        if (is_playlist_trash_step(s)) h.title = playlist_trash_step_title(*lib_, s);
+        else if (const auto row = lib_->track(s.track_id)) h.title = row->artist.empty() ? row->title : row->artist + " - " + row->title;
         hist_cache_.push_back(std::move(h));
       }
     }
@@ -324,13 +327,27 @@ void App::draw_trash_panel(const Rect& m) {
   const Rect list{m.x + 8, y, m.w - 16, m.y + m.h - y - foot};
   if (list.contains(ov_.x, ov_.y)) panel_scroll_ -= ov_.scroll;
   const float row_h = 34, bw = 110, lw = rw - bw - 10;
-  const std::size_t count = trash_tab_ == 0 ? trash_cache_.size() : hist_cache_.size();
+  const std::size_t count = trash_tab_ == 0 ? trash_pl_cache_.size() + trash_cache_.size() : hist_cache_.size();
   panel_scroll_ = std::clamp(panel_scroll_, 0.0f, std::max(0.0f, row_h * static_cast<float>(count) - list.h));
   dl_.push_clip(list.x, list.y, list.w, list.h);
   float cy = list.y + 2 - panel_scroll_;
   if (count == 0) dl_.text(x, cy + 6, T(trash_tab_ == 0 ? "trash.empty" : "trash.no_history"), 12, th.dim);
   bool reload = false;
   if (trash_tab_ == 0) {
+    for (const DeletedPlaylist& p : trash_pl_cache_) {
+      const char* kind_key = p.kind == "folder" ? "trash.kind_folder" : p.kind == "smart" ? "trash.kind_smart" : "trash.kind_playlist";
+      const std::string detail = T(kind_key) + (p.kind == "smart" ? std::string() : "  " + T("trash.pl_contents", {{"playlists", p.playlists}, {"tracks", p.tracks}}));
+      dl_.text(x, cy + 1, skin_->fit(p.name, 12, 0, lw), 12, th.text, Align::Left, lw);
+      dl_.text(x, cy + 17, skin_->fit(detail, 10, 0, lw), 10, th.dim, Align::Left, lw);
+      if (ui_button({x + rw - bw, cy + 3, bw, 26}, T("trash.restore"), false)) {
+        std::int64_t restored = 0;
+        status_note_ = lib_->restore_playlist(p.id, &restored) ? T("trash.pl_restored", {{"name", p.name}}) : T("trash.cannot_restore");
+        rows_dirty_ = true;
+        reload = true;
+        break;
+      }
+      cy += row_h;
+    }
     for (const DeletedTrack& d : trash_cache_) {
       const std::string name = d.artist.empty() ? d.title : d.artist + " - " + d.title;
       dl_.text(x, cy + 1, skin_->fit(name, 12, 0, lw), 12, th.text, Align::Left, lw);
@@ -348,7 +365,8 @@ void App::draw_trash_panel(const Rect& m) {
     for (const HistRow& h : hist_cache_) {
       std::string fields;
       for (const std::string& f : h.step.fields) fields += (fields.empty() ? "" : ", ") + f;
-      const std::string change = fields + ": " + h.step.first_old + " > " + h.step.first_new + "  (" + h.step.source + ")";
+      const std::string change = is_playlist_trash_step(h.step) ? T(playlist_trash_step_deleted(h.step) ? "trash.pl_step_deleted" : "trash.pl_step_restored") + "  (" + h.step.source + ")"
+                                                                : fields + ": " + h.step.first_old + " > " + h.step.first_new + "  (" + h.step.source + ")";
       dl_.text(x, cy + 1, skin_->fit(h.title.empty() ? T("trash.gone") : h.title, 12, 0, lw), 12, th.text, Align::Left, lw);
       dl_.text(x, cy + 17, skin_->fit(change, 10, 0, lw), 10, th.dim, Align::Left, lw);
       if (h.step.source != "undo" && ui_button({x + rw - bw, cy + 3, bw, 26}, T("trash.undo"), false)) {
@@ -363,8 +381,8 @@ void App::draw_trash_panel(const Rect& m) {
   }
   dl_.pop_clip();
   if (reload) trash_dirty_ = true;
-  if (trash_tab_ == 0 && !trash_cache_.empty()) {
-    const std::string label = trash_confirm_empty_ ? T("trash.empty_confirm", {{"count", static_cast<int>(trash_cache_.size())}}) : T("trash.empty_button");
+  if (trash_tab_ == 0 && !(trash_cache_.empty() && trash_pl_cache_.empty())) {
+    const std::string label = trash_confirm_empty_ ? T("trash.empty_confirm", {{"count", static_cast<int>(trash_cache_.size() + trash_pl_cache_.size())}}) : T("trash.empty_button");
     if (ui_button({x, m.y + m.h - 36, rw, 28}, label, trash_confirm_empty_, th.warn)) {
       if (trash_confirm_empty_) {
         status_note_ = T("trash.emptied", {{"count", empty_trash(*lib_)}});

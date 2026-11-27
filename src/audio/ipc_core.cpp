@@ -337,7 +337,7 @@ bool validate_command(const WireCommand& w, Command& out) {
       if (!finite_in(w.f, -0.001, 0.751)) return false;
       break;
     case Op::SeqStep:
-      if (w.i < 0 || w.i >= kSeqPatterns * kSeqSteps || !finite_in(w.f, -1.001, 1.001)) return false;
+      if (w.i < 0 || (w.i & 0xFF) >= kSeqPatterns * kSeqSteps || (w.i >> 8) > 17 || !finite_in(w.f, -1.001, 1.001)) return false;
       break;
     case Op::SeqSelect:
       if (w.i < 0 || w.i >= kSeqPatterns) return false;

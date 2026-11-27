@@ -433,6 +433,14 @@ void test_playlists_merge() {
   sync_all(s);
   expect_equal(s);
   CHECK(playlist_named(a, "Mix") == 0 && playlist_named(c, "Mix") == 0);
+  // A deletion that arrives from another device goes to the playlist trash like one made here (and can be restored).
+  for (Dev* d : {&b, &c}) {
+    const auto gone = d->lib->deleted_playlists();
+    CHECK(gone.size() == 1 && gone[0].name == "Mix");
+    CHECK(d->lib->restore_playlist(gone[0].id) && playlist_named(*d, "Mix") != 0 && d->lib->deleted_playlists().empty());
+    d->lib->delete_playlist(playlist_named(*d, "Mix"));
+    d->lib->purge_deleted_playlists(0);  // leave no trash for the comparison below
+  }
 }
 
 void test_folder_cycles() {

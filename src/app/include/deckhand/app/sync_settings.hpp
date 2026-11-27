@@ -9,6 +9,8 @@
 //   sync.audio_budget_mb          integer MiB, 0 = none  most the audio store in the sync folder may hold
 //   sync.audio_import_budget_mb   integer MiB, 0 = none  most one run copies into the music folder
 //   sync.allow_unencrypted_audio  "0" (default) / "1"    store audio without encryption when no crypto library exists
+//   sync.audio_cleanup_days       integer, default 30    stored audio no playlist uses any more is removed after this many days;
+//                                 0 = at once, negative = never
 // None of the audio keys syncs between devices (their names contain "audio" or "folder").
 #include <algorithm>
 #include <cstdint>
@@ -45,6 +47,19 @@ inline std::uint64_t mib_setting(const std::string& v) {
   return n <= 0 ? 0 : static_cast<std::uint64_t>(std::min<long long>(n, 1ll << 30)) << 20;
 }
 
+// Days (setting text) -> the engine's grace period in ms: empty or unreadable = 30 days, negative = never (-1), 0 = at once.
+inline std::int64_t audio_cleanup_days(const std::string& v) {
+  if (v.empty()) return 30;
+  char* e = nullptr;
+  const long long n = std::strtoll(v.c_str(), &e, 10);
+  if (!e || *e != 0) return 30;
+  return n < 0 ? -1 : std::min<long long>(n, 36500);
+}
+inline std::int64_t audio_cleanup_grace_ms(const std::string& v) {
+  const std::int64_t d = audio_cleanup_days(v);
+  return d < 0 ? -1 : d * 24 * 3600 * 1000;
+}
+
 // Fills the new fields of `cfg` from the settings (folder, name and passphrase stay the caller's business).
 inline void load_sync_options(Library& lib, deckhand::sync::SyncConfig& cfg) {
   cfg.sync_mix_links = lib.setting("sync.mix_links", "1") != "0";
@@ -54,6 +69,7 @@ inline void load_sync_options(Library& lib, deckhand::sync::SyncConfig& cfg) {
   cfg.audio_budget_bytes = mib_setting(lib.setting("sync.audio_budget_mb"));
   cfg.audio_import_budget_bytes = mib_setting(lib.setting("sync.audio_import_budget_mb"));
   cfg.allow_unencrypted_audio = lib.setting("sync.allow_unencrypted_audio", "0") == "1";
+  cfg.audio_cleanup_grace_ms = audio_cleanup_grace_ms(lib.setting("sync.audio_cleanup_days"));
 }
 
 // True when a sync run should also call sync_audio(): something to publish or somewhere to import to.

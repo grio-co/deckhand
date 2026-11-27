@@ -3,6 +3,7 @@
 // Pure logic (no window), so it is tested headless.
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,26 @@ inline std::vector<HistoryStep> recent_history_steps(Library& lib, int limit = 2
 
 // Undo of a step. A step with batch_id 0 never exists (see above), so undo_batch works for every one.
 inline UndoResult undo_step(Library& lib, const HistoryStep& s) { return lib.undo_batch(s.batch_id); }
+
+// Deleting or restoring a playlist is journalled under the field "playlist_trash" with track id 0 (old/new value
+// "live:<id>:<kind>" or "trash:<entry>"). Such a step has no track.
+inline bool is_playlist_trash_step(const HistoryStep& s) {
+  return s.track_id == 0 && std::find(s.fields.begin(), s.fields.end(), "playlist_trash") != s.fields.end();
+}
+inline bool playlist_trash_step_deleted(const HistoryStep& s) { return s.first_new.compare(0, 6, "trash:") == 0; }
+// The playlist's name when it still can be found (in the trash, or in the tree under the id in "live:<id>:<kind>").
+inline std::string playlist_trash_step_title(Library& lib, const HistoryStep& s) {
+  const std::string& v = s.first_new;  // "trash:<entry>" after a delete, "live:<id>:<kind>" after a restore
+  const std::int64_t id = std::strtoll(v.c_str() + (v.compare(0, 6, "trash:") == 0 ? 6 : v.compare(0, 5, "live:") == 0 ? 5 : v.size()), nullptr, 10);
+  if (id == 0) return {};
+  const bool in_trash = v.compare(0, 6, "trash:") == 0;
+  for (const DeletedPlaylist& d : lib.deleted_playlists())
+    if (in_trash ? d.id == id : d.old_id == id) return d.name;
+  if (!in_trash)
+    for (const PlaylistNode& n : lib.playlists())
+      if (n.id == id) return n.name;
+  return {};
+}
 
 inline int empty_trash(Library& lib) { return lib.purge_deleted(0); }
 

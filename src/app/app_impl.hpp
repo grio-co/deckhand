@@ -38,6 +38,7 @@
 #include "deckhand/app/seq_store.hpp"
 #include "deckhand/app/prep_mode.hpp"
 #include "deckhand/app/stems_service.hpp"
+#include "deckhand/app/capture_service.hpp"
 #include "deckhand/app/stream_bridge.hpp"
 #include "deckhand/audio/engine.hpp"
 #include "deckhand/audio/grid_edit.hpp"
@@ -201,6 +202,8 @@ struct SyncSummary {
   int audio_exported = 0, audio_already = 0, audio_imported = 0, audio_relinked = 0, audio_skipped = 0, audio_waiting_budget = 0,
       audio_waiting_files = 0, audio_failed = 0;
   std::uint64_t audio_exported_bytes = 0, audio_imported_bytes = 0, audio_store_bytes = 0;
+  int audio_removed = 0, audio_cleanup_pending = 0;  // stored audio nothing uses any more: deleted this run / still inside its grace period
+  std::uint64_t audio_freed_bytes = 0;
 };
 
 // One window of the UI. In single-window mode these exist too (they hold the arrangement of the modules that are
@@ -242,6 +245,28 @@ struct Field {
   bool secret = false;  // drawn as dots
 };
 
+// State of the recording panel (what the user has picked and is editing; the recording itself is the CaptureService).
+struct CaptureUi {
+  std::vector<std::string> devices;
+  std::string device;           // "" = the system default input
+  int channel = 0;
+  bool stereo = true;
+  bool again = false;           // show the recorder although a finished side is held
+  bool seen_stopped = false;    // the finished side has been handed to the analysis
+  float in_scroll = 0, list_scroll = 0;
+  int drag = -1, sel = -1;      // split point being dragged / selected (index)
+  std::uint64_t drag_frame = 0;
+  std::vector<float> env;       // the side's envelope for the width drawn
+  int env_w = 0;
+  bool env_dirty = true;
+  Field name, artist, album;
+  std::vector<Field> titles;
+  bool dc = false, rumble = false, declick = false, normalise = false, fades = false, aiff = false;
+  int bits = 24;
+  double min_gap = 1.0, min_depth = 15.0;
+  std::string note;
+};
+
 }  // namespace detail
 
 using namespace detail;
@@ -278,6 +303,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   StemService* api_stems() override { return stems_.get(); }
   LightingBridge* api_lighting() override { return lighting_.get(); }
   AutomixService* api_automix() override { return automix_.get(); }
+  CaptureService* api_capture() override { return capture_.get(); }
   bool api_automix_control(const std::string& name, bool has_value, double value, std::string& error) override {
     return automix_control(name, has_value, value, error);
   }
@@ -586,6 +612,8 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   bool import_available();
   void draw_tree(const Rect& r, const ui::Theme& th);
   void draw_tracks(const Rect& r, const ui::Theme& th, const std::string& columns, float row_h);
+  void prepare_track_columns(const std::string& columns);                        // UI thread, before taking browse_mutex_
+  void draw_tracks_locked(const Rect& r, const ui::Theme& th, float row_h);     // browse_mutex_ held
   void draw_search(const Rect& r, const skin::Style& st, const std::string& hint);
   // ---- pre-listen (app_browser.cpp)
   bool preview_start(std::int64_t track_id, bool play, std::string& error);  // any thread
@@ -604,7 +632,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   Rect inner_rect() const;
 
   // ---- overlays (app_panels.cpp) ----------------------------------------------------
-  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart, Shortcuts, Tools, Suggest, PrepMode, Controller, Trash, Layouts, Locate, Chain };
+  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart, Shortcuts, Tools, Suggest, PrepMode, Controller, Trash, Layouts, Locate, Chain, Capture };
   bool overlay_open() const { return panel_ != Panel::None; }
   void open_panel(Panel p);
   void close_panel();
@@ -668,6 +696,9 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void draw_chain_panel(const Rect& m);
   bool chain_slider(const Rect& track, double v, int id, double& out);
   void draw_locate_panel(const Rect& m);
+  void draw_capture_panel(const Rect& m);
+  std::string fx_name(const EffectInfo& info) const;     // the effect's name in the language pack (the built-in English name without one)
+  std::string fx_param(const char* english) const;       // a parameter name likewise
   void start_relocate_scan();
   void refresh_pane_rows();  // browse_mutex_ held: rebuilds the tree and the rows of the live pane
   void draw_smart_editor(const Rect& m);
@@ -748,6 +779,8 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::int64_t load_failed_[kMaxDecks] = {};  // track id whose load failed, per deck; state_mutex_
   std::thread signal_thread_;
   std::unique_ptr<StemService> stems_;  // before api_: the bridge is destroyed first
+  std::unique_ptr<CaptureService> capture_;  // likewise
+  CaptureUi cap_ui_;
   std::unique_ptr<ApiBridge> api_;
   std::unique_ptr<StreamBridge> stream_;
   std::unique_ptr<LightingBridge> lighting_;  // DMX lighting; off until the user enables it
@@ -884,6 +917,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
     std::string title;
   };
   std::vector<DeletedTrack> trash_cache_;
+  std::vector<DeletedPlaylist> trash_pl_cache_;  // playlists, folders and smart playlists in the trash
   std::vector<HistRow> hist_cache_;
   bool trash_dirty_ = true;
   std::future<RelocateReport> loc_future_;
@@ -981,6 +1015,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   MixerView mixer_;
   DeckInfo info_[kMaxDecks];
   SamplerView samplers_[kSamplerSlots];
+  int seq_brush_ = 0;  // slice a step gets when set in the sequencer grid: 0 = the whole sample, n = slice n
 
   // ---- windows
   std::uint32_t caps_ = 0;  // DH_CAP_* the shell announced (0 = one rectangular window)
@@ -1045,7 +1080,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   } keys_ui_;
   Field f_title_, f_artist_, f_key_, f_rating_, f_relink_, f_relink_old_, f_sync_folder_, f_sync_name_, f_sync_pass_;
   Field* last_focus_ = nullptr;
-  Field f_sync_music_, f_sync_budget_, f_sync_import_;
+  Field f_sync_music_, f_sync_budget_, f_sync_import_, f_sync_cleanup_;
   std::map<std::string, std::string> sv_;  // settings shown in the settings panel
   int tag_rating_ = 0;
   std::string tag_path_;

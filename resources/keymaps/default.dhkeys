@@ -291,6 +291,7 @@ bind mod+shift+o ui.layouts desc="Browser layouts (saved column sets)"
 bind mod+shift+period ui.layout_next desc="Next browser layout"
 bind mod+shift+comma ui.layout_prev desc="Previous browser layout"
 bind mod+shift+u ui.locate desc="Find moved or renamed files"
+bind mod+alt+shift+v ui.capture desc="Record from an analogue input and split into tracks"
 bind mod+shift+m ui.split desc="Split the browser: side by side, stacked, off"
 bind mod+shift+i ui.focus_pane desc="Keyboard focus to the other track table"
 bind f5 ui.compatible

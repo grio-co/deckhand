@@ -409,7 +409,7 @@ struct Engine::Impl {
     std::uint32_t rev = 1;
     bool dirty = true;
   } seq;
-  struct SeqEvent { int frame; int slot; float vel; };
+  struct SeqEvent { int frame; int slot; float vel; int slice; };
   SeqEvent seq_ev[160];
   int seq_nev = 0;
   SpscRing<SeqPatternData*, 64> seq_garbage;
@@ -450,6 +450,9 @@ struct Engine::Impl {
   std::uint64_t seen_pushes = 0;
   std::chrono::steady_clock::time_point seen_at{}, retry_at{};
   std::atomic<std::uint64_t> stream_dropped{0};
+  FrameRing input_tap;                    // raw capture frames for Engine::input_tap_read (allocated by the first enable)
+  std::atomic<bool> input_tap_on{false};
+  std::atomic<std::uint64_t> input_tap_lost{0};
 
   // ---- engine clock and scheduled commands ---------------------------------------
   std::uint64_t clock = 0;                       // audio thread: frames rendered before the current chunk
@@ -1161,7 +1164,7 @@ struct Engine::Impl {
       case Op::SamplerTrigger:
         if (c.deck < kSamplerSlots) {
           const float vel = c.f > 0 ? std::min(c.f, 1.0f) : 1.0f;
-          seq_record_hit(c.deck, vel);
+          seq_record_hit(c.deck, vel, 0);
           if (sampler_slots[c.deck].s && sampler_slots[c.deck].s->audio) sampler_fire(sampler_slots[c.deck], vel, 0, 0);
         }
         return true;
@@ -1177,6 +1180,7 @@ struct Engine::Impl {
           if (s.s && s.s->audio && s.slices > 0 && c.i >= 0 && c.i < s.slices) {
             const double total = static_cast<double>(s.s->audio->frames);
             s.slice = static_cast<std::uint8_t>(c.i);
+            seq_record_hit(c.deck, c.f > 0 ? std::min(c.f, 1.0f) : 1.0f, c.i + 1);
             sampler_fire(s, c.f > 0 ? std::min(c.f, 1.0f) : 1.0f, std::floor(total * c.i / s.slices),
                          std::floor(total * (c.i + 1) / s.slices));
           }
@@ -1224,9 +1228,12 @@ struct Engine::Impl {
       case Op::SeqBpm: seq.bpm_set = c.f > 0 ? std::clamp<double>(c.f, 20.0, 400.0) : 0.0; seq.dirty = true; return true;
       case Op::SeqSwing: seq.swing = std::clamp(c.f, 0.0f, 0.75f); seq.dirty = true; return true;
       case Op::SeqStep: {
-        const int pat = c.i / kSeqSteps, st = c.i % kSeqSteps;
-        if (c.i < 0 || pat >= kSeqPatterns || c.deck >= kSamplerSlots) return true;
+        const int idx = c.i & 0xFF, code = c.i >> 8;
+        const int pat = idx / kSeqSteps, st = idx % kSeqSteps;
+        if (c.i < 0 || pat >= kSeqPatterns || c.deck >= kSamplerSlots || code > 17) return true;
         std::uint8_t& cell = seq.pat[pat].cell[st][c.deck];
+        if (code == 1) seq.pat[pat].slice[st][c.deck] = 0;
+        else if (code >= 2) seq.pat[pat].slice[st][c.deck] = static_cast<std::uint8_t>(code - 1);
         int vel = cell & 0x7F;
         if (c.f >= 0) vel = std::clamp(static_cast<int>(std::lround(c.f * kSeqVelMax)), 1, kSeqVelMax);
         if (vel == 0) vel = kSeqVelMax;
@@ -1248,7 +1255,7 @@ struct Engine::Impl {
           if (c.i >= 0 && c.i != p) continue;
           for (int st = 0; st < kSeqSteps; ++st)
             for (int k = 0; k < kSamplerSlots; ++k)
-              if (c.d < 0 || static_cast<int>(c.d) == k) seq.pat[p].cell[st][k] = 0;
+              if (c.d < 0 || static_cast<int>(c.d) == k) seq.pat[p].cell[st][k] = 0, seq.pat[p].slice[st][k] = 0;
         }
         ++seq.rev;
         seq.dirty = true;
@@ -2010,14 +2017,16 @@ struct Engine::Impl {
     if (d.color != 0) fxb[di].run_colour(buf, n, cx, d.s_filter);
   }
 
-  FxCtx make_ctx(const Deck& d, FxBus& b, int n) {
+  // `p0` is the deck's playhead at the START of this chunk (render_deck has already moved d.pos to its end), so the beat
+  // position handed to the chain is continuous from chunk to chunk whatever the sizes of the chunks.
+  FxCtx make_ctx(const Deck& d, FxBus& b, int n, double p0) {
     FxCtx cx;
     cx.sr = sr;
     double bpm = d.bpm_now * d.tempo_mult;
     if (bpm <= 0) bpm = master_bpm > 0 ? master_bpm : 120.0;
     cx.bf = 60.0 / bpm * sr;
     const GridSection* s = d.trk && d.playing && !d.touching ? section_at(d) : nullptr;
-    cx.beat_pos = s && s->bpm > 0 ? (d.pos - s->first_beat_frame) / beat_frames(d) : b.clock;
+    cx.beat_pos = s && s->bpm > 0 ? (p0 - s->first_beat_frame) / beat_frames(d) : b.clock;
     b.clock += n / cx.bf;
     return cx;
   }
@@ -2046,12 +2055,13 @@ struct Engine::Impl {
     return static_cast<std::int64_t>(pair) * 2 + (q >= 1.0 + swing ? 1 : 0);
   }
   // A pad hit while recording lands on the nearest step of the current pattern.
-  void seq_record_hit(int slot, float vel) {
+  void seq_record_hit(int slot, float vel, int slice) {
     if (!seq.rec || !seq.run) return;
     const std::int64_t n = static_cast<std::int64_t>(std::floor(seq.phase + 0.5));
     const int step = static_cast<int>(((n % kSeqSteps) + kSeqSteps) % kSeqSteps);
     const int v = std::clamp(static_cast<int>(std::lround(vel * kSeqVelMax)), 1, kSeqVelMax);
     seq.pat[seq.cur].cell[step][slot] = static_cast<std::uint8_t>(0x80 | v);
+    seq.pat[seq.cur].slice[step][slot] = static_cast<std::uint8_t>(slice);
     ++seq.rev;
     seq.dirty = true;
   }
@@ -2106,7 +2116,7 @@ struct Engine::Impl {
         for (int k = 0; k < kSamplerSlots; ++k) {
           const std::uint8_t cell = q.pat[q.cur].cell[step][k];
           if ((cell & 0x80) == 0 || seq_nev >= 160) continue;
-          seq_ev[seq_nev++] = {i, k, static_cast<float>(cell & 0x7F) / kSeqVelMax};
+          seq_ev[seq_nev++] = {i, k, static_cast<float>(cell & 0x7F) / kSeqVelMax, q.pat[q.cur].slice[step][k]};
         }
       }
     }
@@ -2132,7 +2142,14 @@ struct Engine::Impl {
       s.scr_pending = 0;
       for (int i = 0; i < n; ++i) {
         while (e < seq_nev && seq_ev[e].frame <= i) {
-          sampler_fire(s, std::max(seq_ev[e].vel, 0.01f), 0, 0);
+          const int sl = seq_ev[e].slice - 1;
+          if (sl >= 0 && sl < s.slices) {  // a step on a slice (a slot sliced differently since falls back to the whole sample)
+            s.slice = static_cast<std::uint8_t>(sl);
+            sampler_fire(s, std::max(seq_ev[e].vel, 0.01f), std::floor(static_cast<double>(total) * sl / s.slices),
+                         std::floor(static_cast<double>(total) * (sl + 1) / s.slices));
+          } else {
+            sampler_fire(s, std::max(seq_ev[e].vel, 0.01f), 0, 0);
+          }
           ++e;
           while (e < seq_nev && seq_ev[e].slot != k) ++e;
         }
@@ -2194,6 +2211,8 @@ struct Engine::Impl {
     std::memset(cue, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
     std::memset(click_bus, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
     const float inv_n = 1.0f / static_cast<float>(n);
+    double pos0[kMaxDecks];
+    for (int di = 0; di < kMaxDecks; ++di) pos0[di] = decks[di].pos;
 
     for (int di = 0; di < kMaxDecks; ++di) {
       Deck& d = decks[di];
@@ -2202,14 +2221,14 @@ struct Engine::Impl {
         d.g_master_prev = 0;
         if (!fxb[di].busy() && !chains[di].busy()) continue;
         std::memset(buf, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));  // let effect tails ring out
-        const FxCtx cx = make_ctx(d, fxb[di], n);
+        const FxCtx cx = make_ctx(d, fxb[di], n, pos0[di]);
         chains[di].run(buf, n, cx, fx_garbage);
         if (!d.cue_only)
           for (int i = 0; i < n * 2; ++i) master[i] += buf[i] * d.fader * d.fader;
         continue;
       }
       render_deck(d, di, buf, n);
-      const FxCtx cx = make_ctx(d, fxb[di], n);
+      const FxCtx cx = make_ctx(d, fxb[di], n, pos0[di]);
       if (d.stems) {
         for (int k = 0; k < kStems; ++k) {
           if (!sbuf_on[k]) continue;
@@ -2310,7 +2329,7 @@ struct Engine::Impl {
       const double bpm = master_bpm > 0 ? master_bpm : 120.0;
       mcx.bf = 60.0 / bpm * sr;
       const GridSection* s = lead ? section_at(*lead) : nullptr;
-      mcx.beat_pos = s && s->bpm > 0 ? (lead->pos - s->first_beat_frame) / beat_frames(*lead) : master_clock;
+      mcx.beat_pos = s && s->bpm > 0 ? (pos0[lead - decks] - s->first_beat_frame) / beat_frames(*lead) : master_clock;
       master_clock += n / mcx.bf;
     }
     if (chains[kFxTargetSampler].active()) {  // the sampler bus has its own chain: render it apart, then mix it in
@@ -2976,6 +2995,12 @@ struct Engine::Impl {
   }
 
 
+  void push_tap(const float* stereo, std::size_t frames) {
+    if (!input_tap_on.load(std::memory_order_acquire)) return;
+    const std::size_t n = input_tap.push(stereo, frames);
+    if (n < frames) input_tap_lost.fetch_add(frames - n, std::memory_order_relaxed);
+  }
+
   // ---- microphone input (non-real-time; input_mutex held) --------------------------------------------------------
   void capture(const float* in, ma_uint32 frames) {
     float buf[256 * 2];
@@ -2989,6 +3014,7 @@ struct Engine::Impl {
         buf[2 * k + 1] = st ? fr[1] : fr[0];
       }
       mic_in.push(buf, n);
+      push_tap(buf, n);
       done += n;
     }
     cap_pushes.fetch_add(1, std::memory_order_relaxed);
@@ -3547,6 +3573,19 @@ void Engine::stream_enable(bool on, bool pre_clip, bool include_mic) {
   c.f = pre_clip ? 1.0f : 0.0f;
   send(c);
 }
+void Engine::input_tap_enable(bool on) {
+  Impl& s = *impl_;
+  if (on) {
+    if (s.input_tap.capacity() == 0) s.input_tap.init(std::size_t{1} << 17);  // once: the capture thread only pushes while the flag is up
+    float junk[512 * 2];
+    while (s.input_tap.pop(junk, 512) > 0) {
+    }
+    s.input_tap_lost.store(0);
+  }
+  s.input_tap_on.store(on, std::memory_order_release);
+}
+std::size_t Engine::input_tap_read(float* out, std::size_t max_frames) { return impl_->input_tap.capacity() ? impl_->input_tap.pop(out, max_frames) : 0; }
+std::uint64_t Engine::input_tap_dropped() const { return impl_->input_tap_lost.load(); }
 std::size_t Engine::stream_read(float* out, std::size_t max_frames) { return impl_->stream.pop(out, max_frames); }
 std::uint64_t Engine::stream_dropped_frames() const { return impl_->stream_dropped.load(); }
 
@@ -3661,6 +3700,7 @@ void Engine::configure_offline_input(std::uint32_t input_sample_rate) {
 std::size_t Engine::feed_input(const float* interleaved_stereo, std::size_t frames) {
   Impl& s = *impl_;
   s.mic_in.push(interleaved_stereo, frames);
+  s.push_tap(interleaved_stereo, frames);
   return frames;
 }
 
@@ -3741,6 +3781,11 @@ std::string seq_pattern_to_text(const SeqPatternData& p) {
       const int v = std::clamp(p.cell[st][k] & 0x7F, 1, kSeqVelMax);
       t += hex[v >> 4];
       t += hex[v & 15];
+      const int sl = p.slice[st][k];
+      if (sl >= 1 && sl <= 16) {
+        t += '@';
+        t += hex[sl - 1];
+      }
     }
   }
   return t;
@@ -3783,6 +3828,13 @@ bool seq_pattern_from_text(const std::string& text, SeqPatternData& out) {
       if (v < 1 || v > kSeqVelMax) return false;
       d.cell[st][k] = static_cast<std::uint8_t>(0x80 | v);
       pos += 2;
+      if (pos < tok.size() && tok[pos] == '@') {
+        if (pos + 1 >= tok.size()) return false;
+        const int sl = hv(tok[pos + 1]);
+        if (sl < 0) return false;
+        d.slice[st][k] = static_cast<std::uint8_t>(sl + 1);
+        pos += 2;
+      }
     }
     if (pos != tok.size()) return false;
   }
@@ -3813,12 +3865,14 @@ void IEngine::seq_swing(double swing) {
   c.f = static_cast<float>(swing);
   send(c);
 }
-void IEngine::seq_step(int pattern, int step, int slot, bool on, float velocity) {
+void IEngine::seq_step(int pattern, int step, int slot, bool on, float velocity, int slice) {
   if (pattern < 0 || pattern >= kSeqPatterns || step < 0 || step >= kSeqSteps || slot < 0 || slot >= kSamplerSlots) return;
   Command c;
   c.op = Op::SeqStep;
   c.deck = static_cast<std::uint8_t>(slot);
   c.i = pattern * kSeqSteps + step;
+  if (slice == -2) c.i |= 1 << 8;
+  else if (slice >= 0 && slice < 16) c.i |= (slice + 2) << 8;
   c.d = on ? 1.0 : 0.0;
   c.f = velocity;
   send(c);

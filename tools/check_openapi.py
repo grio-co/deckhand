@@ -8,6 +8,8 @@ is read with a small indentation-based scan of the `paths:` block, which is all 
     python3 tools/check_openapi.py
 """
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -44,7 +46,33 @@ def operations_in_spec():
     return ops
 
 
+def strict_parse():
+    """Parses the whole spec with a strict YAML parser when one is installed (PyYAML, else Ruby's Psych).
+    Returns an error text, or None when it parses or no parser is available (nothing is installed for this)."""
+    try:
+        import yaml  # type: ignore
+        try:
+            yaml.safe_load(SPEC.read_text(encoding="utf-8"))
+        except yaml.YAMLError as e:
+            return str(e)
+        return None
+    except ImportError:
+        pass
+    ruby = shutil.which("ruby")
+    if ruby:
+        r = subprocess.run([ruby, "-ryaml", "-e", "YAML.safe_load(File.read(ARGV[0]))", str(SPEC)], capture_output=True, text=True)
+        if r.returncode != 0:
+            return (r.stderr or "").strip().splitlines()[0] if r.stderr.strip() else "ruby could not parse the file"
+        return None
+    print("note: no strict YAML parser (PyYAML or ruby) here; skipped the syntax check", file=sys.stderr)
+    return None
+
+
 def main():
+    bad_yaml = strict_parse()
+    if bad_yaml:
+        print(f"openapi.yaml is not valid YAML: {bad_yaml}")
+        return 1
     code, spec = routes_in_code(), operations_in_spec()
     if not code:
         print(f"no add_route calls found in {CODE}", file=sys.stderr)

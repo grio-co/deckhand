@@ -157,9 +157,17 @@ void App::drop_rows_on_playlist(std::int64_t playlist_id) {
 
 // ---- the track table ----------------------------------------------------------------------------------------------------
 void App::draw_tracks(const Rect& table, const ui::Theme& th, const std::string& columns, float row_h) {
+  prepare_track_columns(columns);
+  std::lock_guard<std::mutex> lock(browse_mutex_);
+  draw_tracks_locked(table, th, row_h);
+}
+
+void App::prepare_track_columns(const std::string& columns) {
   if (settings_synced_.exchange(false)) bcols_loaded_ = false;
   if (!bcols_loaded_) load_browser_settings(columns);
-  std::lock_guard<std::mutex> lock(browse_mutex_);
+}
+
+void App::draw_tracks_locked(const Rect& table, const ui::Theme& th, float row_h) {  // browse_mutex_ held
   struct Col {
     const ColDef* def;
     float w;  // points, or weight when flexible

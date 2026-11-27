@@ -52,8 +52,7 @@ probe every plug-in out of process (`probe_catalog` with the `deckhand-plugin-pr
 first seen, block failures, and re-probe on a version change.
 
 ## Not done this round
-VST3; plug-in editor windows (generic parameters only); MIDI input for `aumf`; sidechain / more than stereo; host tempo and
-transport (`kAudioUnitProperty_HostCallbacks`) for tempo-synced units; delay compensation; latency-hiding; a
+VST3; plug-in editor windows (generic parameters only); MIDI input for `aumf`; sidechain / more than stereo; transport position jumps and loop ranges (host tempo and beat are given, see below); delay compensation; latency-hiding; a
 parameter-change listener. A UI would need: a native view (`kAudioUnitProperty_CocoaUI` / AUv3 view controller) embedded
 in an NSView hosted by the app window, a main-thread run loop, and view lifetime tied to the instance. Until then render a
 generic list from `params()` (sliders, stepped pickers from `value_strings`).
@@ -83,8 +82,13 @@ helper normally, the app in in-process mode), never on the audio thread, and the
   into a fresh engine process after a restart.
 - **Editor.** The chain panel (`ui.chain`, `mod+alt+shift+c`, the CHAIN button of a deck) edits the chain of deck 1..4, master, mic, sampler
   or a stem; plug-in parameters show as generic sliders with the plug-in's own value text, eight to a page. No plug-in windows.
-- **Not done.** Host tempo and transport are not given to plug-ins (a tempo-synced plug-in runs at its own tempo; the unit's `beats` field
-  does not apply to plug-ins); mix mode is insert (dry / wet crossfade), tails are not rung out after switch-off; the main app process does not
+- **Host tempo and beat.** Every block the chain unit tells the plug-in the tempo (60 x rate / frames per beat of the deck or master it runs on)
+  and the beat position at the start of the block (`PluginEffect::set_transport`, `PluginInstance::set_transport`). The Audio Unit backend
+  installs `kAudioUnitProperty_HostCallbacks` (beat and tempo, musical time in 4/4, transport state: playing, sample position), so a
+  tempo-synced unit follows the deck. The beat advances inside long blocks. Before any tempo is told, the callbacks answer
+  `kAudioUnitErr_CannotDoInCurrentContext`, as a host without a tempo would. `query_host_transport` reads the values back through the unit's own
+  property (used by tests; Apple's built-in units do not use the tempo themselves). The unit's `beats` field does not apply to plug-ins.
+- **Not done.** mix mode is insert (dry / wet crossfade), tails are not rung out after switch-off; the main app process does not
   carry the library-validation exception, so in in-process mode only Apple's own units load (see the signing notes in scripts/build-macos.sh).
 - **Tests.** `test_plugin_chain` (Apple's delay / low-pass only: in process, through the helper, and a helper kill with restore),
   `test_chain_app`. No third-party plug-in is ever instantiated by a test; a rescan probes every installed plug-in (out of process), so tests

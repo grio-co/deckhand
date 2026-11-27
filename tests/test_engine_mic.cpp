@@ -577,6 +577,32 @@ void test_null_device() {
 
 }  // namespace
 
+// The raw input tap hands over exactly what the capture device delivered (device rate, no resampling or gain).
+void test_input_tap() {
+  Engine e;
+  e.configure_offline(48000, 2);
+  e.configure_offline_input(44100);
+  CHECK(e.input_status().sample_rate == 44100);
+  CHECK(e.input_tap_read(nullptr, 0) == 0);  // nothing enabled: nothing to read
+  std::vector<float> in(2 * 1000), got(2 * 4096);
+  for (std::size_t i = 0; i < 1000; ++i) in[2 * i] = static_cast<float>(i) / 1000.0f, in[2 * i + 1] = -static_cast<float>(i) / 1000.0f;
+  e.feed_input(in.data(), 1000);
+  float scratch[2];
+  CHECK(e.input_tap_read(scratch, 1) == 0);  // fed while the tap was off: dropped silently, not counted
+  e.input_tap_enable(true);
+  e.feed_input(in.data(), 1000);
+  e.feed_input(in.data(), 1000);
+  CHECK(e.input_tap_read(got.data(), 4096) == 2000);
+  for (std::size_t i = 0; i < 2000; ++i) CHECK(got[2 * i] == in[2 * (i % 1000)] && got[2 * i + 1] == in[2 * (i % 1000) + 1]);
+  CHECK(e.input_tap_dropped() == 0);
+  for (int k = 0; k < 200; ++k) e.feed_input(in.data(), 1000);  // nobody reads: the ring fills and the loss is counted
+  CHECK(e.input_tap_dropped() > 0);
+  e.input_tap_enable(false);
+  e.feed_input(in.data(), 1000);
+  e.input_tap_enable(true);  // enabling again starts clean
+  CHECK(e.input_tap_read(got.data(), 4096) == 0 && e.input_tap_dropped() == 0);
+}
+
 int main() {
   test_routing_and_gain();
   test_filters();
@@ -587,6 +613,7 @@ int main() {
   test_drift();
   test_stall_keeps_music();
   test_null_device();
+  test_input_tap();
   std::puts("engine mic ok");
   return 0;
 }

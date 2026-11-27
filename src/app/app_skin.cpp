@@ -2,6 +2,7 @@
 // library and app actions) and the complex widgets (waveform, overview, jog, pads, playlist tree, track
 // table, search field) that are drawn into the rectangle the skin gives them.
 #include "app_impl.hpp"
+#include "vocal_band.hpp"
 
 namespace deckhand {
 
@@ -282,6 +283,7 @@ bool App::read_flag(const ui::Target& t) {
     if (n == "chain") return panel_ == Panel::Chain;
     if (n == "layouts") return panel_ == Panel::Layouts;
     if (n == "locate") return panel_ == Panel::Locate;
+    if (n == "capture") return panel_ == Panel::Capture;
     if (n == "split") return split_ != SplitMode::Off;
     if (n == "compatible") return compat_on_;
     if (n == "preview_play") return engine_->preview().playing != 0;
@@ -427,6 +429,18 @@ void App::do_action(const ui::Target& t) {
         loc_note_.clear();
       }
       trash_dirty_ = true;
+    }
+  } else if (n == "capture") {
+    if (panel_ == Panel::Capture) {
+      close_panel();
+    } else {
+      open_panel(Panel::Capture);
+      cap_ui_.devices = engine_->input_devices();
+      cap_ui_.device = lib_->setting("capture.device");
+      cap_ui_.channel = std::clamp(std::atoi(lib_->setting("capture.channel", "0").c_str()), 0, 7);
+      cap_ui_.stereo = lib_->setting("capture.stereo", "1") != "0";
+      cap_ui_.again = false;
+      cap_ui_.note.clear();
     }
   } else if (n == "chain" || n.compare(0, 6, "chain.") == 0) {
     int target = t.deck >= 0 ? t.deck : kFxMaster;
@@ -861,6 +875,11 @@ void App::draw_overview(int di, const Rect& ov, const DeckView& v, const DeckInf
   }
   const auto x_at = [&](double frame) { return ov.x + static_cast<float>(frame / v.length) * ov.w; };
   draw_phrase_bands(info, ov.x, ov.y, ov.w, std::min(4.0f, ov.h * 0.3f), 0, v.length / std::max(1u, info.audio ? info.audio->sample_rate : 1u) * 1000.0, false, th);
+  if (info.has_vocals && v.sample_rate > 0) {  // the vocal band of the main waveform, along the top edge of the whole track
+    const float bh = std::min(3.0f, ov.h * 0.25f);
+    for (const VocalSpan& g : vocal_spans(info.vocals.regions, 0, v.length / v.sample_rate * 1000.0, ov.x, ov.w))
+      dl_.rect(g.x0, ov.y, std::max(1.0f, g.x1 - g.x0), bh, with_alpha(rgba(120, 210, 255), 200));
+  }
   if (v.loop_in >= 0 && v.loop_out > v.loop_in)
     dl_.rect(x_at(v.loop_in), ov.y, std::max(1.0f, x_at(v.loop_out) - x_at(v.loop_in)), ov.h, with_alpha(th.accent, v.loop_active ? 80 : 40));
   for (const MemCue& m : info.mem) {  // memory cues: a tick at the foot; saved loops: a band

@@ -42,6 +42,13 @@ struct PresetInfo {
   std::string name;
 };
 
+// What the host tells a plug-in about time (tempo-synced units read it through the format's own host callbacks).
+struct HostTransport {
+  double tempo_bpm = 0;  // 0 = unknown
+  double beat = 0;       // position in beats at the start of the next process() call
+  bool playing = false;
+};
+
 class PluginInstance {
  public:
   virtual ~PluginInstance() = default;
@@ -83,6 +90,13 @@ class PluginInstance {
   virtual bool restore_state(const std::uint8_t* data, std::size_t size) = 0;
   virtual std::vector<PresetInfo> presets() = 0;  // factory presets
   virtual bool load_preset(int number) = 0;
+
+  // ---- host tempo and position ----------------------------------------------------------------------------------------
+  // set_transport is real-time safe and applies from the next process() call, which then advances the beat by the frames
+  // it renders. Formats without host callbacks ignore it. query_host_transport asks the plug-in's own host-callback
+  // channel what a unit would read (the AU property round trip); false when unsupported. Used by tests.
+  virtual void set_transport(const HostTransport&) {}
+  virtual bool query_host_transport(HostTransport&) { return false; }
 };
 
 // Lists installed effect plug-ins without instantiating any of them (metadata only). Blocklist is not applied here.

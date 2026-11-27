@@ -169,7 +169,7 @@ void App::open_panel(Panel p) {
       for (const auto& kv : std::vector<std::pair<const char*, const char*>>{{"api.enabled", "1"}, {"api.port", "7373"}, {"stream.files", "0"},
                                                                           {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"preview.master", "0"}, {"stems.auto_attach", "1"}, {"keysync.mode", "0"}, {"keysync.fine", "0"}, {"browser.key_musical", "0"}, {"ui.show_phrases", "1"}, {"obs.host", "127.0.0.1"},
                                                                           {"obs.port", "4455"}, {"obs.text_source", ""}, {"sync.folder", ""}, {"sync.mix_links", "1"}, {"sync.analysis", "0"},
-                                                                          {"sync.audio_playlists", ""}, {"sync.music_folder", ""}, {"sync.audio_budget_mb", "0"}, {"sync.audio_import_budget_mb", "0"},
+                                                                          {"sync.audio_playlists", ""}, {"sync.music_folder", ""}, {"sync.audio_budget_mb", "0"}, {"sync.audio_import_budget_mb", "0"}, {"sync.audio_cleanup_days", "30"},
                                                                           {"sync.allow_unencrypted_audio", "0"}})
         sv_[kv.first] = lib_->setting(kv.first, kv.second);
       sv_["sync.device_name"] = lib_->setting("sync.device_name", host_name());
@@ -181,6 +181,7 @@ void App::open_panel(Panel p) {
       f_sync_music_.text = sv_["sync.music_folder"];
       f_sync_budget_.text = sv_["sync.audio_budget_mb"];
       f_sync_import_.text = sv_["sync.audio_import_budget_mb"];
+      f_sync_cleanup_.text = std::to_string(audio_cleanup_days(sv_["sync.audio_cleanup_days"]));
       post_kind(Job::SyncInfo);  // devices and last sync, read on the loader thread
       f_port_.text = sv_["api.port"];
       f_obs_host_.text = sv_["obs.host"];
@@ -296,6 +297,18 @@ void App::commit_settings() {
   text("sync.music_folder", f_sync_music_, true);
   mib("sync.audio_budget_mb", f_sync_budget_);
   mib("sync.audio_import_budget_mb", f_sync_import_);
+  {  // days before unused stored audio is removed: a whole number, 0 = at once, negative = never
+    std::string digits;
+    const std::string t = trim(f_sync_cleanup_.text);
+    for (std::size_t i = 0; i < t.size() && digits.size() < 6; ++i)
+      if ((t[i] >= '0' && t[i] <= '9') || (i == 0 && t[i] == '-')) digits += t[i];
+    const std::string days = std::to_string(audio_cleanup_days(digits.empty() || digits == "-" ? "30" : digits));
+    f_sync_cleanup_.text = days;
+    if (days != sv_["sync.audio_cleanup_days"]) {
+      save_setting("sync.audio_cleanup_days", days);
+      sv_["sync.audio_cleanup_days"] = days;
+    }
+  }
   const std::string old_folder = sv_["sync.folder"];
   text("sync.folder", f_sync_folder_, true);
   text("sync.device_name", f_sync_name_, false);
@@ -317,6 +330,7 @@ Rect App::panel_size(float w, float h, std::string& title) {
     case Panel::Trash: m = {0, 0, std::min(700.0f, w - 24), std::min(520.0f, h - 24)}; title = T("trash.title"); break;
     case Panel::Layouts: m = {0, 0, std::min(420.0f, w - 24), std::min(440.0f, h - 24)}; title = T("layouts.title"); break;
     case Panel::Locate: m = {0, 0, std::min(700.0f, w - 24), std::min(500.0f, h - 24)}; title = T("locate.title"); break;
+    case Panel::Capture: m = {0, 0, std::min(720.0f, w - 24), std::min(640.0f, h - 24)}; title = T("capture.title"); break;
     case Panel::Smart: m = {0, 0, std::min(720.0f, w - 24), std::min(470.0f, h - 24)}; title = T("smart.title"); break;
     case Panel::Tools: m = {0, 0, std::min(640.0f, w - 24), std::min(480.0f, h - 24)}; title = T("tools.title"); break;
     case Panel::Suggest: m = {0, 0, std::min(760.0f, w - 24), std::min(540.0f, h - 24)}; title = T("suggest.title"); break;
@@ -366,6 +380,7 @@ void App::draw_panel_body(const Rect& m, const std::string& title) {
   else if (panel_ == Panel::Chain) draw_chain_panel(m);
   else if (panel_ == Panel::Layouts) draw_layouts_panel(m);
   else if (panel_ == Panel::Locate) draw_locate_panel(m);
+  else if (panel_ == Panel::Capture) draw_capture_panel(m);
   else if (panel_ == Panel::Smart) draw_smart_editor(m);
   else if (panel_ == Panel::Relink) draw_relink(m);
   else if (panel_ == Panel::Shortcuts) draw_shortcuts(m);
@@ -935,6 +950,10 @@ void App::draw_sync_section(float x, float& y, float rw) {
   ui_field({x + lw, y, 90, 24}, f_sync_import_, "0");
   dl_.text(x + lw + 96, y + 5, T("settings.sync_budget_unit"), 11, th.dim);
   y += line;
+  dl_.text(x, y + 5, T("settings.sync_cleanup"), 12, th.dim, Align::Left, lw - 6);
+  ui_field({x + lw, y, 90, 24}, f_sync_cleanup_, "30");
+  dl_.text(x + lw + 96, y + 5, T("settings.sync_cleanup_unit"), 11, th.dim);
+  y += line;
   flag("sync.allow_unencrypted_audio", "settings.sync_unencrypted", false);
   if (sv_["sync.allow_unencrypted_audio"] == "1") {
     dl_.text(x + 40, y - 2, skin_->fit(T("settings.sync_unencrypted_warning"), 11, 0, rw - 40), 11, th.warn, Align::Left, rw - 40);
@@ -953,6 +972,11 @@ void App::draw_sync_section(float x, float& y, float rw) {
                                                               {"store", static_cast<int>(s.audio_store_bytes >> 20)}}), 11, 0, rw), 11, th.text, Align::Left, rw);
     }
     y += 20;
+    if (s.audio_ok && (s.audio_removed > 0 || s.audio_cleanup_pending > 0)) {
+      dl_.text(x, y, skin_->fit(T("settings.sync_audio_cleanup", {{"removed", s.audio_removed}, {"freed", static_cast<int>(s.audio_freed_bytes >> 20)},
+                                                                    {"pending", s.audio_cleanup_pending}}), 11, 0, rw), 11, th.text, Align::Left, rw);
+      y += 20;
+    }
   }
   y += 8;
 }
@@ -1099,6 +1123,18 @@ void App::draw_sequencer(const Rect& r) {
     dl_.text(r.x, y + 4, T("sampler.seq_empty"), 11, th.dim);
     return;
   }
+  int most_slices = 0;  // the brush: which slice a step set in the grid plays (only offered when a slot is sliced)
+  for (const int k : rows) most_slices = std::max<int>(most_slices, samplers_[k].slices);
+  if (most_slices > 0) {
+    seq_brush_ = std::clamp(seq_brush_, 0, most_slices);
+    dl_.text(r.x, y + 4, T("sampler.seq_slice"), 11, th.dim);
+    const float bx = r.x + 56, bw = (r.right() - bx - 4.0f * static_cast<float>(most_slices)) / static_cast<float>(most_slices + 1);
+    for (int n = 0; n <= most_slices; ++n)
+      if (ui_button({bx + static_cast<float>(n) * (bw + 4), y, bw, 20}, n == 0 ? T("sampler.seq_whole") : std::to_string(n), seq_brush_ == n)) seq_brush_ = n;
+    y += 26;
+  } else {
+    seq_brush_ = 0;
+  }
   const float label_w = 26, gap = 2;
   const float cw = (r.w - label_w - gap * (kSeqSteps - 1)) / kSeqSteps;
   const float ch = std::clamp((r.bottom() - y - gap * static_cast<float>(rows.size())) / static_cast<float>(rows.size()), 10.0f, 20.0f);
@@ -1116,7 +1152,13 @@ void App::draw_sequencer(const Rect& r) {
       if (on) fill = mix(th.panel2, th.accent, 0.35f + 0.6f * static_cast<float>(cell & 0x7F) / static_cast<float>(kSeqVelMax));
       if (here) fill = mix(fill, rgba(255, 255, 255), on ? 0.35f : 0.15f);
       dl_.rrect(c.x, c.y, c.w, c.h, 2, fill);
-      if (ov_.pressed && c.contains(ov_.x, ov_.y)) ctl("seq.step." + std::to_string(st + 1) + ".slot" + std::to_string(k + 1), false, 0);
+      const int cell_slice = sq.pattern[sq.current].slice[st][k];
+      if (on && cell_slice > 0 && ch >= 12) dl_.text(c.x + 1, c.y + 1, std::to_string(cell_slice), 8, th.text, Align::Left, c.w);
+      if (ov_.pressed && c.contains(ov_.x, ov_.y)) {
+        const int want = std::min<int>(seq_brush_, samplers_[k].slices);  // a slot that is not sliced plays the whole sample
+        if (on && cell_slice == want) ctl("seq.step." + std::to_string(st + 1) + ".slot" + std::to_string(k + 1), false, 0);  // lit with this slice: off
+        else engine_->seq_step(sq.current, st, k, true, -1, want > 0 ? want - 1 : -2);  // off, or lit with another slice: on with this one
+      }
     }
   }
 }

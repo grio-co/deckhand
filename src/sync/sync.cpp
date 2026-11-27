@@ -818,7 +818,12 @@ struct SyncEngine::Impl {
         put('T', fp, "hint", Val::text(t.path), back);
       }
       const auto g = grids.find(t.id);
-      put('T', fp, "grid", Val::text(g == grids.end() ? std::string() : g->second), back);
+      // The writer's lock state travels with the grid: while the grid is locked here, "lgrid" carries it (and is empty
+      // otherwise). A locked track takes its grid from "lgrid", never from "grid", so a re-analysis from a device that had
+      // not seen the lock cannot replace it; an explicit edit on a locking device rewrites "lgrid" and wins by stamp.
+      const std::string grid_text = g == grids.end() ? std::string() : g->second;
+      put('T', fp, "grid", Val::text(grid_text), back);
+      put('T', fp, "lgrid", Val::text(t.vals[static_cast<std::size_t>(grid_locked_index())].i != 0 ? grid_text : std::string()), back);
       // Cues.
       std::unordered_set<std::string> seen;
       const auto ci = cues.find(t.id);
@@ -1618,11 +1623,33 @@ struct SyncEngine::Impl {
         u.run();
         lib.edit_journal(id, before);
       }
-      if (const Val* g = field("grid")) {
-        const auto want = decode_grid(g->t == Val::Text ? g->s : std::string());
-        if (encode_grid(lib.beatgrid(id)) != encode_grid(want)) lib.replace_beatgrid(id, want);
+      {
+        const Val* g = field("grid");
+        const Val* lg = field("lgrid");
+        const bool lk = lib.grid_locked(id);  // already updated above: lock and grid arrive together
+        std::string text;
+        bool known = false;
+        if (lk && lg && lg->t == Val::Text && !lg->s.empty()) {
+          text = lg->s;
+          known = true;
+        } else if (lk && !lib.beatgrid(id).empty()) {
+          known = false;  // locked here and nobody sent the locked grid (older folder): keep ours, the next capture sends it
+        } else if (g) {
+          text = g->t == Val::Text ? g->s : std::string();
+          known = true;
+        }
+        if (known) {
+          const auto want = decode_grid(text);
+          if (encode_grid(lib.beatgrid(id)) != encode_grid(want)) lib.replace_beatgrid(id, want);
+        }
       }
     }
+  }
+
+  static int grid_locked_index() {
+    for (int k = 0; k < kNumTrackFields; ++k)
+      if (std::string(kTrackFields[k].name) == "grid_locked") return k;
+    return 0;
   }
 
   std::int64_t create_track_row(const std::string& fp, const Entity* e) {
@@ -1715,6 +1742,7 @@ struct SyncEngine::Impl {
   }
 
   void materialize_playlists(std::set<std::int64_t>& created) {
+    EditScope sync_scope("sync");  // a playlist deleted on the other device goes to the trash here as a sync edit
     const Tree tree = build_tree(st);
     IdMap pm = load_map('P');
     struct Live {
@@ -1727,13 +1755,26 @@ struct SyncEngine::Impl {
       Stmt s(db, "SELECT id, coalesce(parent_id, 0), name, is_folder, position FROM playlists");
       while (s.step()) live[s.i64(0)] = {s.i64(1), s.i64(4), s.text(2), s.i64(3) != 0};
     }
-    for (const auto& eid : tree.dead) {  // deleted here: remove the live row (children and entries cascade)
-      const auto it = pm.e2l.find(eid);
-      if (it == pm.e2l.end()) continue;
-      Stmt d(db, "DELETE FROM playlists WHERE id = ?1");
-      d.bind(1, it->second);
-      d.run();
-      live.erase(it->second);
+    {  // deleted on the other device: to the playlist trash, outermost folders first so a folder takes its contents along
+      std::vector<std::pair<int, std::int64_t>> doomed;  // (depth, local id)
+      for (const auto& eid : tree.dead) {
+        const auto it = pm.e2l.find(eid);
+        if (it == pm.e2l.end()) continue;
+        int depth = 0;
+        for (std::int64_t p = it->second; live.count(p) && live[p].parent != 0 && depth < 1000; p = live[p].parent) ++depth;
+        doomed.emplace_back(depth, it->second);
+      }
+      std::sort(doomed.begin(), doomed.end());
+      for (const auto& [depth, id] : doomed) {
+        (void)depth;
+        if (live.count(id)) lib.delete_playlist(id);  // 0 and a no-op when a folder above it took it along
+        live.erase(id);
+      }
+      for (auto it = doomed.empty() ? live.end() : live.begin(); it != live.end();) {  // what the folders took along
+        Stmt e(db, "SELECT 1 FROM playlists WHERE id = ?1");
+        e.bind(1, it->first);
+        it = e.step() ? std::next(it) : live.erase(it);
+      }
     }
     for (const auto& eid : tree.order) {
       const std::string peid = tree.parent.at(eid);
@@ -2457,11 +2498,127 @@ struct SyncEngine::Impl {
       return rep;
     }
     rep.ok = true;
+    bool fresh = false, fresh_ok = false;
+    SyncResult pub;
     if (published) {  // send the new "audio" registers now rather than at the next regular sync
-      const SyncResult pub = guarded([&](SyncResult& r) { cycle(r); });
+      pub = guarded([&](SyncResult& r) { cycle(r); });
+      fresh = true;
+      fresh_ok = pub.ok;
       if (!pub.ok) rep.warnings.push_back("could not publish the audio list yet: " + pub.error);
     }
+    if (cfg.audio_cleanup_grace_ms >= 0) {
+      try {
+        std::error_code ec;
+        if (fs::is_directory(audio_root(), ec)) {
+          // The decision needs every device's latest records, read completely, so read them now.
+          if (!fresh) {
+            pub = guarded([&](SyncResult& r) { cycle(r); });
+            fresh_ok = pub.ok;
+          }
+          if (fresh_ok && pub.files_corrupt == 0 && pub.files_skipped == 0) cleanup_audio(rep);
+          else rep.warnings.push_back("audio clean-up skipped: the other devices' records could not all be read");
+        }
+      } catch (const std::exception& e) {
+        rep.warnings.push_back(std::string("audio clean-up stopped: ") + e.what());
+      }
+    }
     return rep;
+  }
+
+  // ---- audio clean-up ----------------------------------------------------------------------------------------------------
+  // An object is referenced when a live track with an "audio" register naming it is in a live playlist (any device's, as
+  // merged). The first device to find an object unreferenced writes DeckHandSync/audio/unref/<hash> (the time, ms); any device
+  // that finds it referenced again removes that file. An object is deleted only when the file is older than the grace
+  // period, the object is still unreferenced after a complete read of every device's records, and the file still says so
+  // just before the delete. The delete is a rename to a name of our own followed by a remove, so a crash leaves a leftover
+  // that the next call removes, and another device sees the whole object or none. A device that referenced the audio in the
+  // meantime without having synced yet republishes it from its own copy (the track's file is then still on that device).
+  static bool read_stamp(const fs::path& p, std::int64_t& ms) {
+    std::ifstream in(p, std::ios::binary);
+    std::string t;
+    if (!in || !std::getline(in, t) || t.empty()) return false;
+    char* end = nullptr;
+    ms = std::strtoll(t.c_str(), &end, 10);
+    return end && end != t.c_str();
+  }
+
+  void cleanup_audio(AudioReport& rep) {
+    std::set<std::string> referenced;
+    {
+      Tree tree = build_tree(st);
+      for (const auto& [eid, e] : st.ent[State::idx('E')]) {
+        (void)e;
+        if (!st.alive('E', eid) || tree.dead.count(st.text('E', eid, "pl"))) continue;
+        const std::string fp = st.text('E', eid, "trk");
+        std::string hash;
+        std::uint64_t size = 0;
+        if (st.entity('T', fp) && st.alive('T', fp) && parse_audio_reg(st.text('T', fp, "audio"), hash, size)) referenced.insert(hash);
+      }
+    }
+    // Hashes of the stored objects (leftover temporary names start with '.').
+    std::vector<std::pair<std::string, fs::path>> objs;
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(audio_root(), fs::directory_options::skip_permission_denied, ec), end; !ec && it != end;
+         it.increment(ec)) {
+      std::error_code e2;
+      if (!it->is_regular_file(e2) || it->path().extension() != ".dhau") continue;
+      const std::string stem = it->path().stem().string();
+      if (stem.size() == 32 && stem[0] != '.') objs.emplace_back(stem, it->path());
+    }
+    const fs::path marks = audio_root() / "unref";
+    fs::create_directories(marks, ec);
+    const std::int64_t t = now();
+    std::set<std::string> have;
+    for (const auto& [hash, path] : objs) {
+      have.insert(hash);
+      const fs::path mark = marks / hash;
+      std::int64_t since = 0;
+      const bool marked = read_stamp(mark, since);
+      if (referenced.count(hash)) {
+        if (fs::exists(mark, ec)) fs::remove(mark, ec);
+        continue;
+      }
+      if (!marked) {
+        const fs::path tmp = marks / ("." + hash + "." + dev + ".tmp");
+        {
+          std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+          out << t << "\n";
+        }
+        fs::rename(tmp, mark, ec);
+        if (ec) {
+          fs::remove(tmp, ec);
+          continue;
+        }
+        since = t;
+      }
+      if (since > t) since = t;  // a clock set ahead never shortens the wait
+      if (t - since < cfg.audio_cleanup_grace_ms) {
+        ++rep.cleanup_pending;
+        continue;
+      }
+      std::int64_t again = 0;
+      if (!read_stamp(mark, again) || again != since) {  // changed under us: decide at the next call
+        ++rep.cleanup_pending;
+        continue;
+      }
+      const std::uint64_t bytes = audio_object_size(path);
+      const fs::path gone = path.parent_path() / ("." + hash + "." + dev + ".tmp");
+      fs::rename(path, gone, ec);
+      if (ec) continue;
+      fs::remove(gone, ec);
+      fs::remove(mark, ec);
+      ++rep.removed;
+      rep.freed_bytes += bytes;
+      rep.store_bytes = rep.store_bytes >= bytes ? rep.store_bytes - bytes : 0;
+    }
+    // Marks of objects that are gone (removed by another device) and our own cut-off mark files.
+    std::vector<fs::path> stale;
+    for (fs::directory_iterator it(marks, ec), end; !ec && it != end; it.increment(ec)) {
+      const std::string n = it->path().filename().string();
+      if (n.size() > 1 && n[0] == '.' && n.size() > dev.size() + 4 && n.compare(n.size() - dev.size() - 4, dev.size() + 4, dev + ".tmp") == 0) stale.push_back(it->path());
+      else if (n.size() == 32 && !have.count(n)) stale.push_back(it->path());
+    }
+    for (const auto& p : stale) fs::remove(p, ec);
   }
 
   void import_audio(AudioReport& rep, bool require_encrypted) {

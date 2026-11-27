@@ -18,6 +18,7 @@
 #include "deckhand/audio/plugin_host.hpp"
 #include "deckhand/audio/remote_engine.hpp"
 #include "deckhand/plugins/catalog.hpp"
+#include "deckhand/plugins/effect.hpp"
 #include "deckhand/plugins/plugin.hpp"
 
 #if defined(__APPLE__) && !defined(DECKHAND_PLUGINS_DISABLED)
@@ -197,6 +198,37 @@ void test_in_process(const std::string& dir) {
   }
 }
 
+// Host tempo and beat position reach the unit through the format's host callbacks (Apple's delay only; nothing is
+// played). The unit reads them back through the same property a tempo-synced plug-in would use.
+void test_host_transport() {
+  const std::string delay = find_id("dely");
+  CHECK(!delay.empty());
+  plugins::PluginInfo info;
+  for (const auto& p : plugins::scan_installed())
+    if (p.id == delay) info = p;
+  plugins::PluginEffect fx;
+  std::string err;
+  CHECK(fx.load(info, kSr, &err));
+  plugins::HostTransport t;
+  CHECK(fx.instance()->query_host_transport(t) == false);  // no tempo told yet: the callbacks refuse
+  fx.set_on(true);
+  fx.set_transport(128.0, 16.0, true);
+  std::vector<float> buf(1024 * 2, 0.0f);
+  fx.run(buf.data(), 1024);
+  fx.set_transport(128.0, 16.0, true);
+  fx.instance()->set_transport({128.0, 16.0, true});
+  CHECK(fx.instance()->query_host_transport(t));
+  CHECK(std::fabs(t.tempo_bpm - 128.0) < 1e-9 && t.playing && std::fabs(t.beat - 16.0) < 1e-9);
+  // the beat advances with the frames rendered: one second at 120 bpm is two beats
+  fx.set_transport(120.0, 4.0, true);
+  std::vector<float> one(static_cast<std::size_t>(kSr) * 2, 0.0f);
+  fx.run(one.data(), static_cast<int>(kSr));
+  CHECK(fx.instance()->query_host_transport(t) && std::fabs(t.tempo_bpm - 120.0) < 1e-9 && t.playing);
+  std::printf("beat read back after one second: %.4f\n", t.beat);
+  CHECK(t.beat > 5.98 && t.beat < 5.99);  // start of the last 384-frame block of the second (93 x 512 frames in)
+  std::printf("host transport read back: %.1f bpm, beat %.3f\n", t.tempo_bpm, t.beat);
+}
+
 void test_helper(const std::string& dir, const std::string& helper) {
   const std::string data = dir + "/helper";
   fs::create_directories(data);
@@ -265,6 +297,7 @@ int main(int, char** argv) {
   fs::remove_all(dir, ec);
   fs::create_directories(dir, ec);
   test_in_process(dir);
+  test_host_transport();
   std::string helper = (fs::absolute(argv[0]).parent_path() / "deckhand-engine").string();
   if (const char* h = std::getenv("DECKHAND_ENGINE_BIN")) helper = h;
   if (fs::exists(helper, ec)) test_helper(dir, helper);
