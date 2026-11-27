@@ -249,6 +249,7 @@ GridCommit Library::commit_grid(std::int64_t track_id, const std::vector<BeatSec
       apply_cue_moves(track_id, old_cues, r.proposal);
       r.applied = true;
     }
+    r.mix_links_moved = follow_mix_links(track_id, old_grid, grid, tolerance_ms, mode == CueFollow::Always);
   }
   r.batch_id = scope.batch();
   if (dry_run) tx.rollback();
@@ -262,6 +263,7 @@ FollowResult Library::apply_cue_follow(std::int64_t track_id, std::int64_t batch
   std::optional<TrackEditRecord> grid_row;
   bool has_cues = false;
   for (const TrackEditRecord& e : read_edits("WHERE batch_id = ?1", batch_id, 1000000)) {
+    if (e.field == "mix_links") has_cues = true;  // links already followed (their journal row sits on the from-track)
     if (e.track_id != track_id) continue;
     if (e.field == "grid" && !grid_row) grid_row = e;
     if (e.field == "cues") has_cues = true;
@@ -277,10 +279,11 @@ FollowResult Library::apply_cue_follow(std::int64_t track_id, std::int64_t batch
   }
   const std::vector<Cue> now = cues(track_id);
   r.proposal = propose_cue_follow(now, grid_from_text(grid_row->old_value.value_or("")), grid_from_text(grid_row->new_value.value_or("")), tolerance_ms);
-  if (!r.proposal.moves.empty()) {
+  {
     EditScope scope("api", ResumeBatch{}, batch_id);
     OptionalTx tx(db_);
-    apply_cue_moves(track_id, now, r.proposal);
+    if (!r.proposal.moves.empty()) apply_cue_moves(track_id, now, r.proposal);
+    r.mix_links_moved = follow_mix_links(track_id, grid_from_text(grid_row->old_value.value_or("")), grid_from_text(grid_row->new_value.value_or("")), tolerance_ms, true);
     tx.commit();
   }
   r.status = FollowStatus::Ok;
@@ -294,6 +297,7 @@ int Library::undo_whole(const TrackEditRecord& e) {
     s.bind(1, e.track_id);
     if (!s.step()) return 2;
   }
+  if (e.field == "mix_links") return undo_mix_links(e);
   const bool grid = e.field == "grid";
   const std::string current = grid ? grid_text(beatgrid(e.track_id)) : cues_text(cues(e.track_id));
   if (current != e.new_value.value_or("")) return 1;
@@ -386,12 +390,19 @@ StripResult Library::strip_analysis(const std::vector<std::int64_t>& ids, const 
       count("phrases");
       if (!dry_run) clear_phrases(id);
     }
+    if (k.vocals) {
+      Stmt hv(db_, "SELECT 1 FROM track_vocals WHERE track_id = ?1");
+      hv.bind(1, id);
+      if (hv.step()) {
+        count("vocals");
+        if (!dry_run) clear_vocals(id);
+      }
+    }
     if (!dry_run) edit_journal(id, before);
     if (changed) ++r.tracks_changed;
   }
-  if (k.vocals) r.notes.push_back("vocals: no vocal data exists in this version; nothing to clear");
   if (k.stems) r.notes.push_back("stems: not available; nothing cleared");
-  r.notes.push_back("undo (edit batch) restores grid, tempo, key and grid lock; loudness, waveform cache, phrases and first-sound / load cue are not undoable, the next analysis re-creates them");
+  r.notes.push_back("undo (edit batch) restores grid, tempo, key and grid lock; loudness, waveform cache, phrases, vocal regions and first-sound / load cue are not undoable, the next analysis re-creates them");
   r.batch_id = scope.batch();
   if (dry_run) tx.rollback();
   else tx.commit();
@@ -829,6 +840,26 @@ MergeResult Library::merge_duplicates(std::int64_t keep_id, const std::vector<st
       u.run();
       r.history_moved += sqlite3_changes(db_.handle());
     }
+  }
+
+  // Linked mix points of the removed tracks now belong to the kept track (a link between two of them would point at itself:
+  // dropped; so are links that become exact copies of one the kept track already had).
+  for (const std::int64_t id : removed) {
+    for (const char* sql : {"UPDATE mix_links SET from_track = ?1 WHERE from_track = ?2", "UPDATE mix_links SET to_track = ?1 WHERE to_track = ?2"}) {
+      Stmt u(db_, sql);
+      u.bind(1, keep_id).bind(2, id);
+      u.run();
+      r.mix_links_moved += sqlite3_changes(db_.handle());
+    }
+  }
+  if (r.mix_links_moved > 0) {
+    Stmt d1(db_, "DELETE FROM mix_links WHERE from_track = ?1 AND to_track = ?1");
+    d1.bind(1, keep_id);
+    d1.run();
+    Stmt d2(db_, "DELETE FROM mix_links WHERE (from_track = ?1 OR to_track = ?1) AND id NOT IN "
+                 "(SELECT min(id) FROM mix_links WHERE from_track = ?1 OR to_track = ?1 GROUP BY from_track, to_track, round(from_ms), round(to_ms))");
+    d2.bind(1, keep_id);
+    d2.run();
   }
 
   for (const std::int64_t id : removed) remove_track(id);  // to the trash: restorable, files untouched

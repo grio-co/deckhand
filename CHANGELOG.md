@@ -6,6 +6,23 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Sampler step sequencer: 8 patterns of 16 steps over the 16 slots, locked to the playing deck's
+  beat grid (or a set tempo), swing, record from pads, pattern changes queued to the next bar;
+  grid in the sampler panel, shortcuts, REST routes; patterns are saved and survive an engine
+  restart ([docs/SEQUENCER.md](docs/SEQUENCER.md)). Loop slicing (8 or 16 slices) and sample
+  scratch for sampler slots. Engine protocol 8. Unheard.
+- Linked mix points: tie a position in one track to a position in another, with an optional
+  transition length and type. Automix uses the link, suggestions rank linked tracks higher,
+  links follow grid edits, are undoable, and move to the kept track when duplicates are merged.
+  Markers on the waveform, a list in track details, Cmd+Shift+L / B to link the two playheads.
+  Library schema 10. Not synced between devices yet.
+- Vocal regions: found from a track's cached vocal stem after separation and drawn as a thin
+  band on the main waveform. Tested on synthetic audio only.
+- Controller settings: deck side (1/2, 3/4, or switchable with a mapped button or "Switch decks
+  now"), jog touch behaviour (vinyl or bend-only; let a scratch finish on release), crossfader
+  curve, EQ kill, filter centre snap, fader inverts. Fake MIDI only.
+- One copy per data folder: a second copy started on the same folder says so and exits before
+  touching the audio engine.
 - Controller settings: click the controller's name in the status row (or Cmd/Ctrl+Shift+C) to open
   a panel for that device: mapping in use with a chooser, decks, pad modes, jog sensitivity and a
   ticks-per-turn calibration helper, soft takeover, LED feedback, Learn, reload mapping, and a jump
@@ -195,6 +212,10 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 - Tests for the library, analysis, API, export, effects, scheduling, languages, skins and streaming.
 
 ### Fixed
+- Engine helper: a busy UI is no longer reported as lost after 3 s (now 10 s, or 1 s if the UI
+  process is gone), and repeated loss/attach log lines are summarised.
+- Engine helper: a second controller-settings request could hang the helper's service thread.
+- Automix: the playing track's own mix-out point was read too early to see a linked mix point.
 - Engine helper: if the helper misses the start-up wait and the app falls back to in-process
   audio, the late helper now exits by itself instead of staying attached to the controller; the
   status line says the engine is starting while the app waits.

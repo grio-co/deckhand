@@ -80,6 +80,9 @@ Besides the engine's control table the keymap can call these application actions
 | `Mod+E` | Add the selected tracks to the end of the play queue | `ui.queue_add` |
 | `Mod+Shift+E` | Play the selected tracks next | `ui.queue_play_next` |
 | `Mod+Shift+C` | Open or close the connected controller's panel (mapping, jog and LED settings) | `ui.controller` |
+| `Mod+Shift+D` | Switch a controller with switchable deck sides to its other pair of decks | `ui.controller.switch_decks` |
+| `Mod+Shift+L` | Link the playhead of deck 1 to the playhead of deck 2 (a mix point between the two tracks) | `ui.link.1.2` |
+| `Mod+Shift+B` | Link the playhead of deck 2 to the playhead of deck 1 | `ui.link.2.1` |
 | `F9` | What goes well after the track on air | `ui.suggestions` |
 | `Mod+Shift+Y` | Play the top suggestion next | `ui.queue_suggestion` |
 | `F10` | Preparation mode: two headphone players on decks 3 and 4 | `ui.prep` |
@@ -261,6 +264,17 @@ Besides the engine's control table the keymap can call these application actions
 | `Mod+Shift+A` | Start or stop automix | `automix.run` |
 | `Mod+Shift+K` | Pause or resume automix | `automix.pause` |
 | `Mod+Shift+N` | Automix: start the next transition now, on the next bar | `automix.skip` |
+| `Mod+Shift+R` | Start or stop the step sequencer | `seq.run` |
+| `Mod+Shift+T` | Sequencer: record sampler hits into the pattern while it runs | `seq.record` |
+| `Mod+Shift+X` | Sequencer: empty the pattern being played | `seq.clear` |
+| `Mod+Alt+Shift+1` | Sequencer: play pattern 1 from the next bar | `seq.pattern.1.queue` |
+| `Mod+Alt+Shift+2` | Sequencer: play pattern 2 from the next bar | `seq.pattern.2.queue` |
+| `Mod+Alt+Shift+3` | Sequencer: play pattern 3 from the next bar | `seq.pattern.3.queue` |
+| `Mod+Alt+Shift+4` | Sequencer: play pattern 4 from the next bar | `seq.pattern.4.queue` |
+| `Mod+Alt+Shift+5` | Sequencer: play pattern 5 from the next bar | `seq.pattern.5.queue` |
+| `Mod+Alt+Shift+6` | Sequencer: play pattern 6 from the next bar | `seq.pattern.6.queue` |
+| `Mod+Alt+Shift+7` | Sequencer: play pattern 7 from the next bar | `seq.pattern.7.queue` |
+| `Mod+Alt+Shift+8` | Sequencer: play pattern 8 from the next bar | `seq.pattern.8.queue` |
 
 ### Pre-listen
 

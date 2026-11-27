@@ -266,9 +266,9 @@ void test_transitions_backfill_and_migration() {
                   "ALTER TABLE track_phrases DROP COLUMN energy_outro; UPDATE schema_version SET version = 8;");
   }
   {
-    Library lib(path);  // migrates 8 -> 9 and backfills from the history and the stored phrases
+    Library lib(path);  // migrates 8 -> 10 and backfills from the history and the stored phrases
     Stmt s(lib.db(), "SELECT max(version) FROM schema_version");
-    CHECK(s.step() && s.i64(0) == 9 && kLibrarySchemaVersion == 9);
+    CHECK(s.step() && s.i64(0) == 10 && kLibrarySchemaVersion == 10);
     CHECK(lib.transition(a, b)->count == 1 && lib.transition(b, c)->count == 1 && lib.transition(c, a)->count == 1);
     CHECK(!lib.transition(a, c));
     const std::string esql = "SELECT energy_intro, energy_outro FROM track_phrases WHERE track_id = " + std::to_string(a);

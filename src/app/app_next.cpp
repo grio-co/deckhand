@@ -94,6 +94,8 @@ std::string App::next_reason(const NextTrack& n) {
       else add(T("suggest.r_history_back", {{"count", n.reverse_count}}));
     } else if (f.id == "explore") {
       add(T("suggest.r_new"));
+    } else if (f.id == "link") {
+      add(T("suggest.r_link", {{"count", static_cast<int>(f.detail)}}));
     } else if (f.id == "recent") {
       add(T("suggest.r_recent"));
     }

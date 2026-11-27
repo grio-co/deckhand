@@ -999,6 +999,7 @@ struct AutomixService::Impl {
     const double sr = std::max(1.0, e_rate());
     if (!skip_req && last_plan_check != 0 && clock < last_plan_check + static_cast<std::uint64_t>(0.1 * sr)) return;
     last_plan_check = clock;
+    refresh_current_points(clock);
     PlanInput in = make_input(dv, b, true);
     in.earliest_frame_a = A.position + (skip_req ? kSkipMarginSeconds : kLateMarginSeconds) * rate;
     in.immediate = skip_req;
@@ -1032,6 +1033,24 @@ struct AutomixService::Impl {
 
   double e_rate() { return static_cast<double>(eng().sample_rate()); }
   static double sr_of(const DeckView& d) { return d.sample_rate > 0 ? d.sample_rate : 44100.0; }
+
+  // The playing track's own points were read when it was loaded as the next one, before it played and before the queue's
+  // front was the track that follows it. A linked mix point (host.facts looks at the queue and the playing decks) is only
+  // visible now: read them again, when the pair changes and every few seconds (links can be edited meanwhile).
+  void refresh_current_points(std::uint64_t clock) {
+    if (cur < 0 || prep.s != Prep::Ready) return;
+    const std::pair<std::int64_t, std::int64_t> key{cur_entry.id, prep.entry.id};
+    const std::uint64_t every = static_cast<std::uint64_t>(3.0 * std::max(1.0, e_rate()));
+    if (key == points_key && clock < points_clock + every) return;
+    points_key = key;
+    points_clock = clock;
+    const TrackFacts f = host.facts(cur_entry.track_id);
+    if (!f.ok) return;
+    cur_facts.points = f.points;
+    cur_res = automix::resolve_track(cur_facts, cur_entry.overrides, st);
+  }
+  std::pair<std::int64_t, std::int64_t> points_key{0, 0};
+  std::uint64_t points_clock = 0;
 
   PlanInput make_input(const DeckView dv[], int b, bool has_b) {
     PlanInput in;
@@ -1348,6 +1367,39 @@ void AutomixService::on_engine_event(const EngineEvent& e) {
     }
     return;
   }
+}
+
+
+bool apply_mix_links(Library& lib, IEngine& engine, TrackFacts& f) {
+  std::int64_t next = 0;
+  try {
+    const std::vector<QueueRow> rows = lib.play_queue();
+    if (rows.empty()) return false;
+    next = rows.front().track_id;
+  } catch (const std::exception&) {
+    return false;
+  }
+  for (int d = 0; d < kMaxDecks; ++d) {
+    const DeckView v = engine.deck(d);
+    if (!v.loaded || !v.playing || v.track_id <= 0 || v.track_id == next) continue;
+    const double pos_ms = v.sample_rate > 0 ? v.position * 1000.0 / v.sample_rate : 0.0;
+    if (f.id == next) {
+      if (const auto link = lib.mix_link_for_transition(v.track_id, next, pos_ms)) {
+        if (link->from_ms + 1000.0 < pos_ms) continue;  // already passed
+        f.points.mix_in_ms = link->to_ms;
+        return true;
+      }
+    } else if (f.id == v.track_id) {
+      if (const auto link = lib.mix_link_for_transition(f.id, next, pos_ms)) {
+        if (link->from_ms + 1000.0 < pos_ms) continue;
+        f.points.mix_out_ms = link->from_ms;
+        if (link->transition_beats) f.points.transition_beats = link->transition_beats;
+        if (link->transition_type) f.points.transition_type = link->transition_type;
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 }  // namespace deckhand

@@ -29,7 +29,7 @@ absolute control, see below). Annotated examples that use every directive:
 numbers, not real devices).
 
 ## Actions
-Transport and mixer: `play cue sync tempo_range seek_start jog_touch jog tempo loop_in loop_out
+Transport and mixer: `deck_switch play cue sync tempo_range seek_start jog_touch jog tempo loop_in loop_out
 loop_toggle reloop cue_call beatloop beatjump hotcue hotcue_clear trim eq_high eq_mid eq_low filter
 fader crossfader head_mix head_level master_level pfl browse browse_press load pad_mode ignore`.
 Key sync and stems: `key_sync key_match key_reset stem_mute stem_solo stem_isolate stem_preset stem_enable` (see below).
@@ -49,6 +49,9 @@ Key sync and stems: `key_sync key_match key_reset stem_mute stem_solo stem_isola
 | `sampler` | button | trigger slot `slot=N` (+ `offset=`); with a modifier named `shift` held: stop it |
 | `sampler_stop` | button | stop slot `slot=N`, or every slot when no slot is given |
 | `sampler_level` | abs | sampler bus level |
+| `slice` | button | play slice `slot=J` (1..16) of the sampler slot `value=K` (default 1), once; with a modifier named `shift` held: cut that slot into 8 slices (again: off) |
+| `seq_run` `seq_record` | button | step sequencer run / stop, record sampler hits into the pattern (toggle; `value=1\|0` sets) |
+| `seq_pattern` | button | switch to pattern `slot=N` (1..8) at once; with a modifier named `shift` held: from the next bar |
 | `master_bpm` | button / abs / rel | `value=X` sets (0 = follow the decks); abs sweeps `lo=`..`hi=` (default 60..180); rel: `scale=` BPM per tick |
 | `fx_assign` | button | `unit=N target=deck1\|deck2\|deck3\|deck4\|master`: unit N now addresses that channel (press only) |
 | `master_cue` | button | headphones monitor the master, see Master cue; `value=1\|0` sets, `hold=1` momentary |
@@ -311,9 +314,35 @@ hub, live, also when it runs in the engine process:
 * soft takeover for knobs and faders: as the mapping says, on, or off;
 * LED feedback: off keeps the controller's LEDs dark.
 
-Not available in the panel (the hub has no such setting): a deck side switch (1/2 versus 3/4), jog touch behaviour,
-per-knob behaviour of master / headphone level. A mapping file cannot be revealed in the file manager from the core (no
-platform hook): its path is shown.
+* deck assignment (two-deck mappings only; a mapping that itself addresses deck 3 or 4 is never shifted): the left and
+  right halves (`deck=1`, `deck=2` in the file) drive decks 1/2, decks 3/4, or 1/2 with a switch. With the switch, a
+  mapping rule `in button <status> <note> deck_switch` (toggle; `value=0|1` sets the layer; `hold=1` = layer 3/4 while held)
+  moves the controller. Switching releases everything that is held (cue, pads, platter touch, modifiers: each gets its
+  release on the old deck, and its own later release is ignored), re-arms soft takeover on every absolute control and makes
+  every LED resend for the new decks. Pad modes belong to the deck, not to the side. `ControllerHub::switch_decks()` does
+  the same from code; `deck_layer()` reports it. `deck_switch` only acts while the device's option is "1/2, switchable";
+* jog touch: vinyl mode (default: touching the platter scratches / holds, the side bends) or bend-only (touch is ignored,
+  every turn bends; the calibration counter still works); and "finish the scratch": releasing a platter that is still
+  spinning keeps it touched until it has been still for one tick (at most 1.5 s), then lets go;
+* mixer controls (shaped in the hub, before soft takeover, so the mapping's own `invert=`, `deadzone=` and `pickup=` still
+  apply): crossfader curve (engine: as is; cut: the last 10 % of travel at each end is already full; smooth: soft ends),
+  EQ kill (the lowest 4 % of travel is a full kill, the centre stays at 0.5), filter snap (a flat 3 % zone at the centre),
+  and invert for channel faders, the crossfader and tempo faders.
+
+Needs the engine, so not offered: the gain law of the channel fader and the crossfader (constant power, linear, reverse /
+hamster), the EQ kill depth and band frequencies, the trim range, a trim or filter curve. The hub only shapes positions.
+
+Where the options travel. `DeviceOptions::to_text()` / `from_text()` is a `key=value` text (`jog_scale=1.5 deck_pair=2
+jog_vinyl=0 ...`, only non-default keys; keys it does not know and values it cannot read are ignored, so builds of any age
+can exchange it). The panel stores the newer options as the library setting `controller.<name>.options` in that text form;
+the older keys stay separate. Across the engine-helper IPC (`hub_set_options`, today carrying `jog_scale`, `ticks_per_rev`,
+`pickup`, `leds`) the integrator must carry the rest: simplest is one more string field holding
+`DeviceOptions::to_text()`, applied on the engine side with `DeviceOptions::from_text()` (it covers all of: `deck_pair`,
+`jog_vinyl`, `jog_finish_scratch`, `crossfader_curve`, `eq_kill`, `filter_snap`, `invert_fader`, `invert_crossfader`,
+`invert_tempo`). A switch request for the panel (`switch_decks(name, layer)`) would need a request of its own; the mapped
+`deck_switch` button needs nothing, it runs inside the hub.
+
+A mapping file cannot be revealed in the file manager from the core (no platform hook): its path is shown.
 
 ## Key sync, stems pad mode (application side)
 `deckN.key_sync` (follow), `deckN.key_match` (once), `deckN.key_reset`, `deckN.key_sync_mode` (0 match, 1 any compatible key)
@@ -321,3 +350,14 @@ and the shortcuts `Cmd+Alt+A/S/F` (deck 1) and `Cmd+Alt+;/L/J` (deck 2; add Shif
 sync; the track's key reaches the engine when the track loads (`LoadedTrack::key_index`). The default skin shows a KEY SYNC
 and a MATCH button with a status line under each deck. The stems pad mode is the `stems` pad mode of a mapping (see above):
 the FLX4 mapping puts it behind a second press of the sampler mode button.
+
+## Controller options over the engine process, and "switch decks now"
+
+With the engine in its own process the app sends a controller's options as the one text of `DeviceOptions::to_text()` (the hub request
+`kReqHubDevice`, verb 0: mapping name, text; the answer is the text the hub is using after sanitising), so every option added to
+`DeviceOptions` reaches the helper without a protocol change; keys an older build does not know are ignored. Verb 4 switches the deck
+side of a controller whose deck assignment is "switchable" (layer 0 / 1, -1 toggles) and answers the layer it is on now. In the app: the
+button "Switch decks now" in the Controller panel (shown for a connected controller with a switchable assignment) and the control
+`ui.controller.switch_decks` (value 0 / 1 = the pair, none = switch; default shortcut Mod+Shift+D), which also work from the REST control
+API (`POST /v1/commands`) and scripts. The helper's `--fake-midi NAME` option (tests) runs the hub over a pretend port that lists one input
+device called NAME.

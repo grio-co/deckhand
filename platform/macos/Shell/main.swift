@@ -550,7 +550,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     window.acceptsMouseMovedEvents = true
     guard let device = MTLCreateSystemDefaultDevice() else { fail("DeckHand needs a Metal-capable graphics device."); return }
     let view = DeckHandView(frame: rect, device: device)
-    guard view.start() else { fail("DeckHand could not start. See deckhand.log in its data folder."); return }
+    guard view.start() else { fail(startFailureMessage()); return }
     classicView = view
     classicWindow = window
     window.contentView = view
@@ -575,7 +575,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       return
     }
     guard let shell = Shell(device: device) else {
-      fail("DeckHand could not start. See deckhand.log in its data folder.")
+      fail(startFailureMessage())
       return
     }
     self.shell = shell
@@ -610,6 +610,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     guard let shell else { return }
     let id = UInt32(item.tag)
     shell.setVisible(id, item.state != .on)
+  }
+
+  // Why dh_app_create said no. A second copy on the same data folder brings the first one forward and says so.
+  private func startFailureMessage() -> String {
+    if let c = dh_app_last_error(), c.pointee != 0 {
+      if let id = Bundle.main.bundleIdentifier {
+        let me = NSRunningApplication.current
+        for other in NSRunningApplication.runningApplications(withBundleIdentifier: id) where other != me {
+          other.activate(options: [.activateAllWindows])
+          break
+        }
+      }
+      return String(cString: c)
+    }
+    return "DeckHand could not start. See deckhand.log in its data folder."
   }
 
   private func fail(_ message: String) {

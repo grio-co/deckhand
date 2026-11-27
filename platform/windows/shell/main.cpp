@@ -581,7 +581,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
   platform.user = nullptr;
   ui.core = dh_app_create(&platform, &config);
   if (!ui.core) {
-    const std::string msg = "DeckHand could not start. See deckhand.log in " + data;
+    const char* why = dh_app_last_error();  // a second copy on the same data folder says so
+    const std::string msg = why && *why ? std::string(why) : "DeckHand could not start. See deckhand.log in " + data;
     if (offscreen) std::fprintf(stderr, "%s\n", msg.c_str());
     else show_error(widen(msg));
     return 1;

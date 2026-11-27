@@ -15,7 +15,9 @@ class AppAutomixHost final : public AutomixHost {
   IEngine& engine() override { return engine_; }
   TrackFacts facts(std::int64_t id) override {
     std::lock_guard<std::mutex> lock(m_);
-    return read_track_facts(lib_, id);
+    TrackFacts f = read_track_facts(lib_, id);
+    if (f.ok) apply_mix_links(lib_, engine_, f);
+    return f;
   }
   bool request_load(int deck, std::int64_t id) override { return load_(deck, id); }
   LoadState load_state(int deck, std::int64_t id) override { return state_(deck, id); }

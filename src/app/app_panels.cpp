@@ -224,6 +224,7 @@ void App::open_panel(Panel p) {
     }
     case Panel::Tags:
     case Panel::Relink: {
+      tags_links_stale_ = true;
       const auto row = lib_->track(edit_track_);
       if (!row) {
         panel_ = Panel::None;
@@ -286,9 +287,9 @@ Rect App::panel_size(float w, float h, std::string& title) {
   Rect m;
   switch (panel_) {
     case Panel::Settings: m = {0, 0, std::min(640.0f, w - 24), std::min(600.0f, h - 24)}; title = T("settings.title"); break;
-    case Panel::Sampler: m = {0, 0, std::min(560.0f, w - 24), std::min(420.0f, h - 24)}; title = T("sampler.title"); break;
+    case Panel::Sampler: m = {0, 0, std::min(640.0f, w - 24), std::min(640.0f, h - 24)}; title = T("sampler.title"); break;
     case Panel::Learn: m = {0, 0, std::min(680.0f, w - 24), std::min(540.0f, h - 24)}; title = T("learn.title"); break;
-    case Panel::Tags: m = {0, 0, std::min(520.0f, w - 24), std::min(400.0f, h - 24)}; title = T("tags.title"); break;
+    case Panel::Tags: m = {0, 0, std::min(520.0f, w - 24), std::min(580.0f, h - 24)}; title = T("tags.title"); break;
     case Panel::Relink: m = {0, 0, std::min(560.0f, w - 24), std::min(250.0f, h - 24)}; title = T("relink.title"); break;
     case Panel::Columns: m = {0, 0, std::min(400.0f, w - 24), std::min(496.0f, h - 24)}; title = T("browser.columns_title"); break;
     case Panel::Smart: m = {0, 0, std::min(720.0f, w - 24), std::min(470.0f, h - 24)}; title = T("smart.title"); break;
@@ -884,7 +885,8 @@ void App::draw_sampler_grid(const Rect& r, int cols, int rows, const ui::Input& 
 
 void App::draw_sampler(const Rect& m) {
   const ui::Theme& th = theme_;
-  const Rect grid{m.x + 16, m.y + 44, m.w - 32, m.h - 44 - 84};
+  const bool tall = m.h >= 560;  // room for the sequencer under the pads
+  const Rect grid{m.x + 16, m.y + 44, m.w - 32, tall ? 150.0f : m.h - 44 - 84};
   draw_sampler_grid(grid, 4, 4, ov_);
   float y = grid.bottom() + 12;
   dl_.text(m.x + 16, y + 5, T("sampler.level"), 12, th.dim);
@@ -908,16 +910,102 @@ void App::draw_sampler(const Rect& m) {
     c.i = -1;
     engine_->send(c);
   }
+  y += 38;
+  if (tall) {
+    draw_sequencer({m.x + 16, y, m.w - 32, m.bottom() - y - 52});
+    y = m.bottom() - 48;
+  }
   {  // the hint wraps onto a second line at a word boundary when it does not fit
     const std::string hint = T("sampler.hint");
     const float full = dl_.text_width(hint, 11, 0), room = m.w - 32;
     std::size_t cut = std::string::npos;
     if (full > room) cut = hint.rfind(' ', static_cast<std::size_t>(static_cast<float>(hint.size()) * room / full));
+    const float hy = tall ? y : y;
     if (cut == std::string::npos) {
-      dl_.text(m.x + 16, y + 38, skin_->fit(hint, 11, 0, room), 11, th.dim, Align::Left, room);
+      dl_.text(m.x + 16, hy, skin_->fit(hint, 11, 0, room), 11, th.dim, Align::Left, room);
     } else {
-      dl_.text(m.x + 16, y + 38, skin_->fit(hint.substr(0, cut), 11, 0, room), 11, th.dim, Align::Left, room);
-      dl_.text(m.x + 16, y + 53, skin_->fit(hint.substr(cut + 1), 11, 0, room), 11, th.dim, Align::Left, room);
+      dl_.text(m.x + 16, hy, skin_->fit(hint.substr(0, cut), 11, 0, room), 11, th.dim, Align::Left, room);
+      dl_.text(m.x + 16, hy + 15, skin_->fit(hint.substr(cut + 1), 11, 0, room), 11, th.dim, Align::Left, room);
+    }
+  }
+}
+
+// The step sequencer: transport, tempo and swing, eight patterns and a grid of 16 steps for every loaded slot.
+// Clicking a cell toggles it in the pattern being played; shift-click on a pattern queues it for the next bar.
+void App::draw_sequencer(const Rect& r) {
+  const ui::Theme& th = theme_;
+  const StepSeqView sq = engine_->step_seq();
+  const auto ctl = [&](const std::string& name, bool has, double value) {
+    std::string error;
+    apply_control(*engine_, name, has, value, error);
+  };
+  float x = r.x;
+  float y = r.y;
+  dl_.text(x, y + 5, T("sampler.seq_title"), 12, th.text);
+  x += 100;
+  if (ui_button({x, y, 56, 26}, T(sq.running ? "sampler.seq_stop" : "sampler.seq_run"), sq.running != 0)) ctl("seq.run", false, 0);
+  x += 62;
+  if (ui_button({x, y, 56, 26}, T("sampler.seq_rec"), sq.recording != 0, sq.recording ? th.warn : 0)) ctl("seq.record", false, 0);
+  x += 62;
+  if (ui_button({x, y, 56, 26}, T("sampler.seq_clear"), false)) ctl("seq.clear", false, 0);
+  x += 70;
+  {  // tempo and swing: a step button each way; the tempo follows a deck when one leads
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.1f", static_cast<double>(sq.bpm));
+    dl_.text(x, y + 5, T(sq.locked ? "sampler.seq_tempo_deck" : "sampler.seq_tempo", {{"bpm", std::string(buf)}}), 12, th.dim);
+  }
+  x = r.x + 100;
+  y += 32;
+  if (ui_button({x, y, 26, 24}, "-", false)) ctl("seq.bpm", true, std::max(40.0, std::round(static_cast<double>(sq.bpm)) - 1));
+  if (ui_button({x + 30, y, 26, 24}, "+", false)) ctl("seq.bpm", true, std::min(300.0, std::round(static_cast<double>(sq.bpm)) + 1));
+  {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%d", static_cast<int>(std::lround(sq.swing / 0.75 * 100)));
+    dl_.text(x + 70, y + 5, T("sampler.seq_swing", {{"percent", std::string(buf)}}), 12, th.dim);
+  }
+  if (ui_button({x + 190, y, 26, 24}, "-", false)) ctl("seq.swing", true, std::max(0.0, static_cast<double>(sq.swing) - 0.05));
+  if (ui_button({x + 220, y, 26, 24}, "+", false)) ctl("seq.swing", true, std::min(0.75, static_cast<double>(sq.swing) + 0.05));
+  dl_.text(r.x, y + 5, T("sampler.seq_pattern"), 12, th.dim);
+  y += 32;
+  {  // patterns 1..8: lit = playing, outlined = waiting for the next bar
+    const float bw = (r.w - 7 * 4) / 8;
+    for (int i = 0; i < kSeqPatterns; ++i) {
+      const Rect b{r.x + static_cast<float>(i) * (bw + 4), y, bw, 24};
+      const bool queued = sq.queued == i;
+      if (ui_button(b, std::to_string(i + 1), sq.current == i)) ctl("seq.pattern." + std::to_string(i + 1) + (ov_.shift || sq.running ? ".queue" : ".select"), false, 0);
+      if (queued) dl_.rrect_outline(b.x, b.y, b.w, b.h, 4, th.accent, 2);
+    }
+  }
+  y += 32;
+  // the grid: loaded slots (and slots that already hold steps) as rows
+  std::vector<int> rows;
+  for (int k = 0; k < kSamplerSlots; ++k) {
+    bool used = samplers_[k].loaded;
+    for (int st = 0; st < kSeqSteps && !used; ++st) used = (sq.pattern[sq.current].cell[st][k] & 0x80) != 0;
+    if (used) rows.push_back(k);
+  }
+  if (rows.empty()) {
+    dl_.text(r.x, y + 4, T("sampler.seq_empty"), 11, th.dim);
+    return;
+  }
+  const float label_w = 26, gap = 2;
+  const float cw = (r.w - label_w - gap * (kSeqSteps - 1)) / kSeqSteps;
+  const float ch = std::clamp((r.bottom() - y - gap * static_cast<float>(rows.size())) / static_cast<float>(rows.size()), 10.0f, 20.0f);
+  for (std::size_t ri = 0; ri < rows.size(); ++ri) {
+    const int k = rows[ri];
+    const float ry = y + static_cast<float>(ri) * (ch + gap);
+    if (ry + ch > r.bottom() + 1) break;
+    dl_.text(r.x, ry + 2, std::to_string(k + 1), 10, th.dim);
+    for (int st = 0; st < kSeqSteps; ++st) {
+      const Rect c{r.x + label_w + static_cast<float>(st) * (cw + gap), ry, cw, ch};
+      const std::uint8_t cell = sq.pattern[sq.current].cell[st][k];
+      const bool on = (cell & 0x80) != 0;
+      const bool here = sq.step == st;
+      Color fill = mix(th.panel, th.bg, st % 4 == 0 ? 0.2f : 0.5f);
+      if (on) fill = mix(th.panel2, th.accent, 0.35f + 0.6f * static_cast<float>(cell & 0x7F) / static_cast<float>(kSeqVelMax));
+      if (here) fill = mix(fill, rgba(255, 255, 255), on ? 0.35f : 0.15f);
+      dl_.rrect(c.x, c.y, c.w, c.h, 2, fill);
+      if (ov_.pressed && c.contains(ov_.x, ov_.y)) ctl("seq.step." + std::to_string(st + 1) + ".slot" + std::to_string(k + 1), false, 0);
     }
   }
 }
@@ -1086,6 +1174,8 @@ void App::draw_tags(const Rect& m) {
     }
     confirm_remove_ = true;
   }
+  y += 40;
+  if (m.bottom() - y > 70) draw_tag_links({x, y, m.w - 40, m.bottom() - y - 12});
 }
 
 void App::draw_relink(const Rect& m) {

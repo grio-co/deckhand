@@ -31,6 +31,7 @@
 #include "deckhand/app/keymap.hpp"
 #include "deckhand/app/lighting_bridge.hpp"
 #include "deckhand/app/next_tracks.hpp"
+#include "deckhand/app/seq_store.hpp"
 #include "deckhand/app/prep_mode.hpp"
 #include "deckhand/app/stems_service.hpp"
 #include "deckhand/app/stream_bridge.hpp"
@@ -116,6 +117,9 @@ struct DeckInfo {
   std::vector<MemCue> mem;
   bool grid_locked = false;
   StoredPhrases phrases;  // sections drawn on the waveform; empty until analysed
+  std::vector<MixLink> links_out, links_in;  // linked mix points: out of this track (marked at from_ms), into it (marked at to_ms)
+  StoredVocals vocals;    // where the singing is (thin band on the waveform); empty until analysed
+  bool has_vocals = false;
   DeckInfo() {
     for (int& c : hot_color) c = -1;
   }
@@ -123,7 +127,7 @@ struct DeckInfo {
 
 struct Job {
   enum Kind { Load, Reattach, AddFile, Import, SaveMainCue, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample, Sync, SyncInfo, RestoreSamples,
-              SaveGrid, SaveMemCues, SaveHotStyle, SaveTrackColor, Reanalyse, PreviewLoad, SuggestCues, SyncCues, StemsReady, VerifyStick } kind = Load;
+              SaveGrid, SaveMemCues, SaveHotStyle, SaveTrackColor, Reanalyse, PreviewLoad, SuggestCues, SyncCues, StemsReady, VerifyStick, SeqSave, RefreshLinks } kind = Load;
   int deck = -1;
   std::int64_t track_id = 0;
   std::string path;
@@ -434,6 +438,10 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::vector<std::string> ctl_names_, ctl_synced_;
   std::size_t ctl_connected_count_ = 0;
   std::atomic<bool> ctl_resync_{false};
+  std::atomic<bool> seq_ready_{false};  // the stored patterns are in the engine: changes may be saved now
+  SeqWatch seq_watch_;                  // control thread only
+  double seq_dirty_at_ = 0;
+  bool seq_dirty_ = false;
   int ctl_sel_ = 0;
   ControllerPrefs ctl_prefs_;
   Field f_ctl_ticks_;
@@ -441,9 +449,38 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   double ctl_measured_ = 0, ctl_measure_poll_ = 0, ctl_last_sync_ = 0;
   std::string ctl_note_;
   void controller_reload();
+  // ---- linked mix points and vocal regions (app_links.cpp) ----
+  std::atomic<int> links_rev_{0};  // bumped when links or vocal regions changed (the API, the panel, a finished analysis)
+  int links_seen_ = 0;             // control thread
+  std::thread vocals_thread_;
+  std::mutex vocals_mutex_;
+  std::condition_variable vocals_cv_;
+  struct VocalWork {
+    std::int64_t track_id = 0;
+    std::string root, key;
+  };
+  std::deque<VocalWork> vocals_queue_;
+  std::set<std::int64_t> vocals_pending_;
+  std::vector<MixLink> tag_links_out_, tag_links_in_;  // the track details panel
+  std::map<std::int64_t, std::string> tag_link_titles_;
+  bool tags_links_stale_ = true;
+  void deck_extras_load(Library& lib, DeckInfo& info, std::int64_t track_id);
+  void queue_vocals(Library& lib, std::int64_t track_id, bool force);
+  void vocals_main();
+  void links_refresh_loop();  // control thread: reload what decks draw when links_rev_ moved
+  bool link_decks(int from_deck, int to_deck);  // 0-based; UI thread
+  void tag_links_refresh();
+  void draw_tag_links(const Rect& r);
+  void draw_link_marks(const DeckInfo& info, const Rect& r, double sr, const std::function<float(double)>& x_of, const ui::Theme& th);
+  std::int64_t api_deck_track(int deck) override {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return deck >= 0 && deck < kMaxDecks && decks_[deck].audio ? decks_[deck].row.id : 0;
+  }
+  void api_links_changed() override { ++links_rev_; }
   void controller_sync(double now);
   void controller_select(int index);
   void controller_apply();
+  bool controller_switch_decks(int layer = -1);  // every connected controller with switchable deck sides; true when one switched
   void draw_controller(const Rect& m);
   std::string controllers_json(Library& lib);  // called from API threads with the API's own library handle
   std::string api_controllers_json(Library& lib) override { return controllers_json(lib); }
@@ -559,6 +596,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void keys_export_cheat_sheet();
   void draw_settings(const Rect& m);
   void draw_sampler(const Rect& m);
+  void draw_sequencer(const Rect& r);
   void draw_learn(const Rect& m);
   void draw_tags(const Rect& m);
   void draw_relink(const Rect& m);

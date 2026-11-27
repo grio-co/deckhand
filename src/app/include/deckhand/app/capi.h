@@ -88,6 +88,10 @@ enum { DH_MOD_SHIFT = 1, DH_MOD_COMMAND = 2, DH_MOD_ALT = 4, DH_MOD_CONTROL = 8 
 
 dh_app* dh_app_create(const dh_platform* platform, const dh_config* config);
 void    dh_app_destroy(dh_app* app);
+/* Why the last dh_app_create() on this thread returned NULL, as text for the user, or "" when the reason is only in the log.
+   Set when another DeckHand already runs on the same data folder (one instance per folder; the shell may bring that
+   window to the front). */
+const char* dh_app_last_error(void);
 
 void    dh_app_set_display(dh_app* app, float w_px, float h_px, float scale,
                            float inset_l, float inset_t, float inset_r, float inset_b);

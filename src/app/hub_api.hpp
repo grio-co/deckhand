@@ -25,6 +25,8 @@ class HubApi {
   // Per-controller settings (jog sensitivity, calibration, soft takeover, LEDs), mapping reload and choice. The defaults
   // do nothing (a hub that cannot).
   virtual bool set_options(const std::string& mapping, const DeviceOptions& o) { (void)mapping; (void)o; return false; }
+  // "Switch decks now" for a controller with switchable deck sides: layer 0 / 1, -1 = toggle. `now` = the layer afterwards.
+  virtual bool switch_decks(const std::string& mapping, int layer, int* now = nullptr) { (void)mapping; (void)layer; (void)now; return false; }
   virtual double jog_ticks(const std::string& mapping) { (void)mapping; return 0; }
   virtual bool reload_mappings(const std::vector<Mapping>& mappings) { (void)mappings; return false; }
   virtual bool prefer_mappings(const std::vector<std::string>& names) { (void)names; return false; }
@@ -43,6 +45,11 @@ class LocalHub final : public HubApi {
   std::vector<std::string> connected() override { return h_.connected(); }
   bool audio_hint(std::string& m, int& a, int& b) override { return h_.audio_hint(m, a, b); }
   bool set_options(const std::string& mapping, const DeviceOptions& o) override { h_.set_device_options(mapping, o); return true; }
+  bool switch_decks(const std::string& mapping, int layer, int* now) override {
+    const bool ok = h_.switch_decks(mapping, layer);
+    if (now) *now = h_.deck_layer(mapping);
+    return ok;
+  }
   double jog_ticks(const std::string& mapping) override { return h_.last_jog_ticks(mapping); }
   bool reload_mappings(const std::vector<Mapping>& mappings) override { h_.reload_mappings(mappings); return true; }
   bool prefer_mappings(const std::vector<std::string>& names) override { h_.prefer_mappings(names); return true; }
@@ -70,8 +77,9 @@ class RemoteHub final : public HubApi {
   std::vector<std::string> connected() override { return e_.hub_connected(); }
   bool audio_hint(std::string& m, int& a, int& b) override { return e_.hub_audio_hint(m, a, b); }
   bool set_options(const std::string& mapping, const DeviceOptions& o) override {
-    return e_.hub_set_options(mapping, o.jog_scale, o.ticks_per_rev, o.pickup, o.leds);
+    return e_.hub_set_options(mapping, o.to_text());
   }
+  bool switch_decks(const std::string& mapping, int layer, int* now) override { return e_.hub_switch_decks(mapping, layer, now); }
   double jog_ticks(const std::string& mapping) override { return e_.hub_jog_ticks(mapping); }
   bool reload_mappings(const std::vector<Mapping>&) override { return e_.hub_reload_mappings(); }  // the engine process reads its own folders
   bool prefer_mappings(const std::vector<std::string>& names) override { return e_.hub_prefer_mappings(names); }

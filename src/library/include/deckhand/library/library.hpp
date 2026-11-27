@@ -74,6 +74,29 @@ struct AutomixPoints {
   bool empty() const { return !mix_in_ms && !mix_out_ms && !transition_beats && !transition_type && !max_play_ms; }
 };
 
+// ---- linked mix points (schema 10) ----------------------------------------------------------------------------------
+// "When track A reaches from_ms, track B starts from to_ms." The positions follow grid edits of their own track like cues do.
+struct MixLink {
+  std::int64_t id = 0;                         // 0 when adding
+  std::int64_t from_track = 0, to_track = 0;
+  double from_ms = 0, to_ms = 0;
+  std::optional<double> transition_beats;      // unset = the automix default
+  std::optional<std::string> transition_type;  // unset or "crossfade" | "cut" | "fade" | "echo_out"
+  std::string label;
+  std::int64_t created_at = 0;                 // unix seconds
+};
+
+// ---- vocal regions (schema 10) ----------------------------------------------------------------------------------------
+constexpr int kVocalAnalysisVersion = 1;  // bump when the detector changes: older rows are re-analysed lazily
+struct StoredVocalRegion {
+  double start_ms = 0, end_ms = 0;
+};
+struct StoredVocals {
+  int version = kVocalAnalysisVersion;
+  std::vector<StoredVocalRegion> regions;  // sorted, non-overlapping; may be empty (analysed, no vocals found)
+  std::string source;                      // free text: what it was computed from (e.g. the stem cache key)
+};
+
 // One row of the persisted play queue. `pending` is the entry whose transition has been scheduled but has not started
 // (it is put back at the front when the application restarts).
 struct QueueRow {
@@ -198,12 +221,14 @@ struct GridCommit {
   CueFollow mode = CueFollow::Never;
   bool applied = false;       // the cue moves were made (mode Always)
   CueFollowProposal proposal; // what moves (applied, or offered under Ask)
+  int mix_links_moved = 0;    // linked mix point ends of this track that follow the grid (made when applied, else only offered)
 };
 enum class FollowStatus { Ok, NoGridEdit, AlreadyApplied, Conflict };
 struct FollowResult {
   FollowStatus status = FollowStatus::NoGridEdit;
   CueFollowProposal proposal;
   std::int64_t batch_id = 0;
+  int mix_links_moved = 0;
 };
 
 // ---- analysis removal -------------------------------------------------------------------------------------------------
@@ -266,6 +291,7 @@ struct MergeResult {
   int hot_cues_copied = 0, memory_cues_copied = 0, loops_copied = 0;
   bool grid_copied = false;
   int history_moved = 0;
+  int mix_links_moved = 0;     // linked mix points of the removed tracks that now belong to the kept track
   std::vector<std::string> fields_filled;
   std::vector<std::string> warnings;
 };
@@ -469,6 +495,33 @@ class Library {
   std::vector<HistoryEntry> history(std::int64_t session_id);
 
   // Small key/value store for application settings.
+  // ---- linked mix points (mix_links.inc) ----
+  // Creates a link; throws std::invalid_argument for a missing track, the same track on both ends, a negative position or
+  // an unknown transition type. A link between two positions that already exist (within 1 ms) updates that link instead.
+  // Journalled (field "mix_links" of the from-track: the whole set of its links; undo restores it) and undoable.
+  std::int64_t add_mix_link(const MixLink& link);
+  std::optional<MixLink> mix_link(std::int64_t id);
+  // Replaces positions, length, type and label of link `link.id` (the two tracks stay). False when it does not exist.
+  bool update_mix_link(const MixLink& link);
+  bool remove_mix_link(std::int64_t id);
+  int remove_mix_links(std::int64_t track_id);  // every link out of or into the track; returns how many
+  // Links out of / into / between tracks (tracks in the trash are left out), ordered by position in the from-track.
+  std::vector<MixLink> mix_links_from(std::int64_t track_id);
+  std::vector<MixLink> mix_links_to(std::int64_t track_id);
+  std::vector<MixLink> mix_links_between(std::int64_t from_track, std::int64_t to_track);
+  // The link automix follows when `from_track` plays at `position_ms` and `to_track` is next: the first link whose from
+  // position is still ahead (within `slack_ms` behind), else the last one. nullopt when none.
+  std::optional<MixLink> mix_link_for_transition(std::int64_t from_track, std::int64_t to_track, double position_ms = 0, double slack_ms = 1000);
+  // Track -> number of links from `from_track` (used by the suggestions).
+  std::map<std::int64_t, int> mix_link_targets(std::int64_t from_track);
+
+  // ---- vocal regions (mix_links.inc) ----
+  // Derived data, not journalled. nullopt when never analysed.
+  std::optional<StoredVocals> vocals(std::int64_t track_id);
+  void set_vocals(std::int64_t track_id, const StoredVocals& v);
+  void clear_vocals(std::int64_t track_id);
+  std::vector<std::int64_t> tracks_with_vocals();
+
   // ---- transition history and suggestions (suggest.cpp) ----
   // Called by add_history(): counts previous-track -> this-track of the same session. 0 when nothing was counted.
   int record_transition(std::int64_t session_id, std::int64_t track_id, std::int64_t at_ms);
@@ -499,7 +552,12 @@ class Library {
   void tracked(std::int64_t track_id, const char* source, const std::function<void()>& change);
   UndoResult undo_records(const std::vector<TrackEditRecord>& newest_first);
   int undo_one(const TrackEditRecord& e);  // 0 restored, 1 conflict, 2 track gone
+  int undo_mix_links(const TrackEditRecord& e);
   int undo_whole(const TrackEditRecord& e);  // the "grid" and "cues" rows
+  int follow_mix_links(std::int64_t track_id, const std::vector<BeatSection>& old_grid, const std::vector<BeatSection>& new_grid,
+                       double tolerance_ms, bool apply);  // moved (apply) or movable (!apply) link ends
+  void write_link_set(std::int64_t from_track, const std::vector<MixLink>& links);  // replaces the set, ids kept
+  std::vector<MixLink> read_links(const char* where, std::int64_t a, std::int64_t b);
   void apply_cue_moves(std::int64_t track_id, const std::vector<Cue>& before, const CueFollowProposal& p);
   std::vector<TrackEditRecord> read_edits(const char* where, std::int64_t arg, int limit, bool include_analysis = true);
   bool use_fts(const std::string& search) const;

@@ -95,6 +95,14 @@ enum class Action : std::uint8_t {
   StemIsolate,  // same for isolate; momentary unless value= is given
   StemPreset,   // preset=reset|acapella|instrumental|drums|no_drums
   StemEnable,   // play the stems / the original mix (toggle; value=1|0 sets)
+  // appended: deck layer
+  // appended: sampler slices and the step sequencer (the sequencer and the sampler are shared: no deck needed)
+  SeqRun,       // start / stop the sequencer (toggle; value=1|0 sets)
+  SeqRecord,    // record sampler hits into the pattern (toggle; value=1|0 sets)
+  SeqPattern,   // slot=N: select pattern N now; with a modifier named shift held (or while it runs: shift not needed) from the next bar
+  Slice,        // slot=J: play slice J (1..16) of the sampler slot value=K (default 1); shift held: slice the slot into 8 (off when already sliced)
+  DeckSwitch,   // two-deck controller: switch its halves between decks 1/2 and 3/4 (toggle; value=0|1 sets the layer;
+                // hold=1 = layer 3/4 while held). Works only when DeviceOptions::deck_pair is DeckPair::Switchable.
 };
 
 enum class LedState : std::uint8_t {
@@ -164,6 +172,7 @@ struct OutRule {
   // appended
   float amount = 1, value = 0;
   bool has_value = false, master_unit = false;
+  bool has_deck = false;             // deck= was written (a deck layer shift applies to the rule)
   int effect = -1, offset = 0, modifier = -1;
   int fx_unit = -1, fx_target = -1;  // fx_on: follow unit N's assignment; fx_assign: lit while unit N is on target
 };
@@ -242,11 +251,33 @@ enum class LearnState : std::uint8_t { Idle, Waiting, Observing, Done, Failed };
 // The name of a pad mode as mappings write it (mode=<name>): "hotcue", "padfx1", ... "stems"; "" when out of range.
 const char* pad_mode_name(int mode);
 
+// Which decks the two halves of a two-deck controller drive (mappings write deck=1 for the left half, deck=2 for the
+// right). Mappings that address decks 3 or 4 themselves (four-deck controllers) are never shifted.
+enum class DeckPair : int { Decks12 = 0, Decks34 = 1, Switchable = 2 };  // Switchable: starts on 1/2, deck_switch moves it
+enum class CrossfaderCurve : int { Engine = 0, Cut = 1, Smooth = 2 };
+
+// Extensible and tolerant: the text form is "key=value" pairs (see DeviceOptions::to_text); keys this build does not
+// know and values it cannot read are ignored, so older and newer builds can exchange it.
 struct DeviceOptions {
   double jog_scale = 1.0;      // jog sensitivity: every jog turn is multiplied by this (0.1 .. 8)
   double ticks_per_rev = 0;    // > 0 replaces the mapping's jog ticks_per_rev (calibration: one full turn = this many ticks)
   int pickup = -1;             // soft takeover for absolute controls: -1 as the mapping says, 0 off, 1 on
   bool leds = true;            // false: the hub keeps the controller's LEDs dark
+  // deck assignment
+  int deck_pair = 0;           // DeckPair
+  // jog
+  bool jog_vinyl = true;       // true: touching the platter scratches / holds, the side bends; false: touch is ignored, every turn bends
+  bool jog_finish_scratch = false;  // releasing a platter that is still spinning keeps it "touched" until it has stopped (max 1.5 s)
+  // mixer controls (response shaping done in the hub; the engine's own gain laws are not touched)
+  int crossfader_curve = 0;    // CrossfaderCurve: Cut = shortened travel (the last 10 % at each end saturates), Smooth = soft ends
+  bool eq_kill = false;        // EQ knobs: the lowest 4 % of travel is a full kill (0), the rest is rescaled around the centre
+  bool filter_snap = false;    // filter knob: a flat 3 % zone around the centre (never detuned)
+  bool invert_fader = false;       // channel faders
+  bool invert_crossfader = false;
+  bool invert_tempo = false;       // tempo faders
+  std::string to_text() const;     // only what differs from the default; "" when everything is default
+  static DeviceOptions from_text(const std::string& text);  // missing keys keep their defaults
+  bool operator==(const DeviceOptions& o) const { return to_text() == o.to_text(); }
 };
 
 class ControllerHub {
@@ -292,6 +323,11 @@ class ControllerHub {
   // ---- per-controller settings (see DeviceOptions); keyed by mapping name, effective at once ----
   void set_device_options(const std::string& mapping_name, const DeviceOptions& o);
   DeviceOptions device_options(const std::string& mapping_name) const;
+  // Deck layer of a connected two-deck controller (0 = decks 1/2, 1 = decks 3/4) and a switch for the panel / API
+  // (layer -1 toggles). Only works while the device's deck_pair is Switchable. Releases every held button first (no stuck
+  // cues, touches or modifiers), re-arms soft takeover and makes the LEDs resend for the new decks.
+  int deck_layer(const std::string& mapping_name) const;
+  bool switch_decks(const std::string& mapping_name, int layer);
   // Ticks of the platter turn the last touch-and-turn produced (|sum| while the platter was touched); 0 = none yet.
   // One full turn of the platter should give the mapping's ticks_per_rev.
   double last_jog_ticks(const std::string& mapping_name) const;
@@ -317,9 +353,17 @@ class ControllerHub {
     int pad_mode[kMaxDecks] = {0, 0, 0, 0};
     int range_index[kMaxDecks] = {0, 0, 0, 0};
     double jog_ticks[kMaxDecks] = {0, 0, 0, 0};
+    int deck_off = 0;                               // 0 or 2: added to the deck of every deck=1/2 rule of a two-deck mapping
+    bool two_deck = false;                          // the mapping only addresses decks 1 and 2
+    bool touched[kMaxDecks] = {false, false, false, false};   // JogTouch 1 sent to the engine
+    bool release_pending[kMaxDecks] = {false, false, false, false};  // finish_scratch: JogTouch 0 held back
+    double release_since[kMaxDecks] = {0, 0, 0, 0};
+    int jog_turns[kMaxDecks] = {0, 0, 0, 0};        // jog turn messages since the last tick / in the tick before
+    int jog_turns_prev[kMaxDecks] = {0, 0, 0, 0};
     int last_cue[kMaxDecks] = {-1, -1, -1, -1};     // hot cue pressed last (keyboard pads)
     std::vector<std::array<bool, kMaxDecks + 1>> held;  // modifiers: [0] global, [1 + deck] per deck
     std::vector<char> down, engaged;                // per rule: pressed / soft takeover engaged
+    std::vector<char> swallow;                      // per rule: released by a deck switch; its own release is ignored
     std::vector<float> last_v;                      // per rule: previous absolute value (-1 = none)
     std::vector<int> aux;                           // per rule: cue held by a keyboard pad
   };
@@ -328,10 +372,14 @@ class ControllerHub {
     bool have_deck[kMaxDecks] = {false, false, false, false};
     MixerView mixer;
     bool have_mixer = false;
+    std::uint8_t slices[kSamplerSlots] = {};  // sampler slots cut into 8 / 16 slices (from tick(), else our own commands)
   };
   struct Learn;
   struct HidTrack;  // last report of a device/report id, and which of its bytes change all the time
   void fit(Active& a);
+  InRule effective(const Active& a, const InRule& r) const;  // the rule as it applies to the current deck layer
+  void apply_layer(Active& a, int layer);
+  void shape_options(const std::string& name, const DeviceOptions& before, const DeviceOptions& after);
   bool allowed(const Active& a, const InRule& r) const;
   bool held(const Active& a, const std::string& name, int deck) const;
   void handle(Active& a, std::uint8_t status, std::uint8_t d1, std::uint8_t d2);
@@ -371,6 +419,7 @@ class ControllerHub {
   std::map<std::string, double> last_ticks_;
   std::vector<std::string> preferred_;
   int fx_assigned_[kFxUnits] = {kFxMaster, kFxMaster, kFxMaster, kFxMaster};
+  double now_ = 0;            // time of the last tick
   bool master_cue_ = false;   // master_cue is on (head mix forced to master)
   float master_cue_saved_ = 0.5f;
 };

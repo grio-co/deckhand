@@ -395,6 +395,7 @@ std::vector<UiActionInfo> list_ui_actions() {
   add("ui.sampler", "trigger", "none", "Open or close the sampler");
   add("ui.learn", "trigger", "none", "Open or close MIDI learn");
   add("ui.controller", "trigger", "none", "Open or close the panel of the connected controller (mapping and per-controller settings)");
+  add("ui.controller.switch_decks", "toggle", "0 / 1 = the deck pair, none = switch", "Switch a controller with switchable deck sides to its other pair of decks (1/2 <-> 3/4)");
   add("ui.columns", "trigger", "none", "Open or close the browser columns");
   add("ui.close_panel", "trigger", "none", "Close the open panel, or clear the search");
   add("ui.window.browser", "trigger", "none", "Show or hide the browser window");
@@ -402,6 +403,11 @@ std::vector<UiActionInfo> list_ui_actions() {
   add("ui.layout", "trigger", "none", "Switch between the two- and four-deck layouts");
   add("ui.skin_next", "trigger", "none", "Switch to the next skin");
   add("ui.cheat_sheet", "trigger", "none", "Write the shortcut cheat sheet (HTML) into the data folder");
+  for (int a = 1; a <= kMaxDecks; ++a)
+    for (int b = 1; b <= kMaxDecks; ++b)
+      if (a != b)
+        o.push_back({"ui.link." + std::to_string(a) + "." + std::to_string(b), "trigger", "none",
+                     "Link the playhead of deck " + std::to_string(a) + " to the playhead of deck " + std::to_string(b) + " (a mix point between the two tracks)"});
   for (int d = 1; d <= kMaxDecks; ++d) {
     o.push_back({"ui.nudge." + std::to_string(d), "value", "jog revolutions per event, signed (+ = forward); bind it as mode=repeat",
                  "Nudge the deck's pitch while the key is down (jog side bend)"});

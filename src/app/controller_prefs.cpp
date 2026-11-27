@@ -52,6 +52,16 @@ ControllerPrefs load_controller_prefs(Library& lib, const std::string& name) {
   p.pickup = pk == "1" ? 1 : pk == "0" ? 0 : -1;
   p.leds = lib.setting(key(name, "leds")) != "0";
   p.mapping = lib.setting(key(name, "mapping"));
+  const DeviceOptions x = DeviceOptions::from_text(lib.setting(key(name, "options")));  // older data has no such setting
+  p.deck_pair = x.deck_pair;
+  p.jog_vinyl = x.jog_vinyl;
+  p.jog_finish_scratch = x.jog_finish_scratch;
+  p.crossfader_curve = x.crossfader_curve;
+  p.eq_kill = x.eq_kill;
+  p.filter_snap = x.filter_snap;
+  p.invert_fader = x.invert_fader;
+  p.invert_crossfader = x.invert_crossfader;
+  p.invert_tempo = x.invert_tempo;
   return p;
 }
 
@@ -64,6 +74,17 @@ void save_controller_prefs(Library& lib, const std::string& name, const Controll
   lib.set_setting(key(name, "pickup"), p.pickup < 0 ? "" : (p.pickup ? "1" : "0"));
   lib.set_setting(key(name, "leds"), p.leds ? "" : "0");
   lib.set_setting(key(name, "mapping"), p.mapping);
+  DeviceOptions x;  // the newer options travel as one self-describing text; only what differs from the default
+  x.deck_pair = p.deck_pair;
+  x.jog_vinyl = p.jog_vinyl;
+  x.jog_finish_scratch = p.jog_finish_scratch;
+  x.crossfader_curve = p.crossfader_curve;
+  x.eq_kill = p.eq_kill;
+  x.filter_snap = p.filter_snap;
+  x.invert_fader = p.invert_fader;
+  x.invert_crossfader = p.invert_crossfader;
+  x.invert_tempo = p.invert_tempo;
+  lib.set_setting(key(name, "options"), x.to_text());
 }
 
 DeviceOptions to_device_options(const ControllerPrefs& p) {
@@ -72,6 +93,15 @@ DeviceOptions to_device_options(const ControllerPrefs& p) {
   o.ticks_per_rev = p.ticks_per_rev;
   o.pickup = p.pickup;
   o.leds = p.leds;
+  o.deck_pair = p.deck_pair;
+  o.jog_vinyl = p.jog_vinyl;
+  o.jog_finish_scratch = p.jog_finish_scratch;
+  o.crossfader_curve = p.crossfader_curve;
+  o.eq_kill = p.eq_kill;
+  o.filter_snap = p.filter_snap;
+  o.invert_fader = p.invert_fader;
+  o.invert_crossfader = p.invert_crossfader;
+  o.invert_tempo = p.invert_tempo;
   return o;
 }
 

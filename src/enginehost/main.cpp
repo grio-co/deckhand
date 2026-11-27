@@ -33,6 +33,7 @@
 
 #include "deckhand/audio/engine.hpp"
 #include "deckhand/audio/ipc.hpp"
+#include "deckhand/audio/ui_liveness.hpp"
 #include "deckhand/log/log.hpp"
 #include "deckhand/midi/controller.hpp"
 
@@ -67,9 +68,21 @@ bool is_absolute_path(const std::string& p) {
   return false;
 }
 
+// A MIDI port with one pretend input and no hardware behind it (--fake-midi, for tests of the hub over the control socket).
+class FakeMidi final : public MidiIO {
+ public:
+  explicit FakeMidi(std::string name) : name_(std::move(name)) {}
+  std::vector<std::string> devices() override { return {name_}; }
+  void send(const std::string&, const std::uint8_t*, std::size_t) override {}
+
+ private:
+  std::string name_;
+};
+
 struct Options {
   std::string data_dir, resource_dir;
   bool null_audio = false, no_midi = false, probe = false;
+  std::string fake_midi;  // test seam: the hub runs over a fake MIDI port that lists this one input device and drops output
   int log_level = 2;
   // Leave by itself when no UI attached within this many seconds of starting and nothing is loaded, playing or recorded
   // (0 = never). A UI passes it when it starts the helper, so a helper that came up after the UI gave up does not linger.
@@ -153,6 +166,7 @@ class Host final : public ControlSink {
 
   DeckMeta meta_[kMaxDecks];  // service thread only
   std::atomic<bool> ui_alive_{false}, stream_on_{false};
+  UiLiveness liveness_;  // service thread only
   std::uint64_t start_ns_ = 0;
   std::atomic<bool> attached_once_{false};  // some UI attached since this engine started (crash survival: then it never leaves by itself)
   std::atomic<bool> quit_{false}, service_stop_{false}, server_stop_{false}, recheck_{false}, reset_request_{false};
@@ -191,7 +205,15 @@ bool Host::init(std::string& error) {
   publish_device();
   if (!listener_.listen(names_.socket, error)) return false;
 
-  if (!opt_.no_midi) {
+  if (!opt_.no_midi && !opt_.fake_midi.empty()) {
+    std::vector<std::string> folders;
+    if (!opt_.resource_dir.empty()) folders.push_back(opt_.resource_dir + "/controllers");
+    folders.push_back(opt_.data_dir + "/controllers");
+    hub_ = std::make_unique<ControllerHub>(*this, load_mappings(folders));
+    midi_ = std::make_unique<FakeMidi>(opt_.fake_midi);
+    hub_->set_io(midi_.get());
+    hub_->devices_changed();
+  } else if (!opt_.no_midi) {
     std::vector<std::string> folders;
     if (!opt_.resource_dir.empty()) folders.push_back(opt_.resource_dir + "/controllers");
     folders.push_back(opt_.data_dir + "/controllers");
@@ -385,6 +407,7 @@ void Host::publish_views() {
   sh_->preview.write(engine_.preview());
   publish_input();
   for (int i = 0; i < kSamplerSlots; ++i) sh_->sampler[i].write(engine_.sampler(i));
+  sh_->stepseq.write(engine_.step_seq());
   RecInfo r;
   r.st = engine_.recorder_status();
   {
@@ -485,9 +508,15 @@ void Host::service_main() {
     }
     sh_->hdr.engine_heartbeat_ns.store(t, std::memory_order_relaxed);
     const std::uint32_t ui = sh_->hdr.ui_pid.load(std::memory_order_relaxed);
-    const bool alive = ui != 0 && t - sh_->hdr.ui_heartbeat_ns.load(std::memory_order_relaxed) < 3000 * ms;
-    if (alive != ui_alive_.exchange(alive))
-      DH_LOG(Info, alive ? "UI attached (pid %u)" : "UI heartbeat lost (pid %u): audio and controllers keep running", ui);
+    {  // a stalled UI is not a lost one (see ui_liveness.hpp); the log is rate limited
+      const UiLivenessReport rep = liveness_.update(ui, sh_->hdr.ui_heartbeat_ns.load(std::memory_order_relaxed), t,
+                                                    [](std::uint32_t pid) { return process_alive(pid); });
+      ui_alive_.store(liveness_.alive());
+      if (rep.kind == UiLivenessReport::Attached) DH_LOG(Info, "UI attached (pid %u)", rep.pid);
+      else if (rep.kind == UiLivenessReport::Lost) DH_LOG(Info, "UI heartbeat lost (pid %u): audio and controllers keep running", rep.pid);
+      else if (rep.kind == UiLivenessReport::Summary)
+        DH_LOG(Info, "UI heartbeat (pid %u): lost %d and regained %d more times in the last minute (the UI is busy; audio is unaffected)", rep.pid, rep.lost, rep.attached);
+    }
     if (t - last_idle >= 250 * ms) {
       last_idle = t;
       leave_if_abandoned(t);
@@ -817,6 +846,12 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
       out.u8(1);
       return;
     }
+    case kReqSeqPattern: {
+      const int pattern = rd.i32();
+      const std::string text = rd.str();
+      out.u8(rd.ok() && engine_.seq_pattern_set(pattern, text) ? 1 : 0);
+      return;
+    }
     case kReqSchedule: {
       WireCommand w;
       w.op = rd.u8();
@@ -889,17 +924,21 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
       return;
     case kReqHubDevice: {
       const std::uint8_t verb = rd.u8();
+      {  // publish_hub() below takes the same lock: hold it only for the hub call
       std::lock_guard<std::mutex> lock(hub_mutex_);
       if (verb == 0) {
-        DeviceOptions o;
         const std::string name = rd.str();
-        o.jog_scale = rd.f64();
-        o.ticks_per_rev = rd.f64();
-        o.pickup = rd.i32();
-        o.leds = rd.u8() != 0;
+        const std::string text = rd.str();
         const bool ok = hub_ && rd.ok() && !name.empty();
-        if (ok) hub_->set_device_options(name, o);
+        if (ok) hub_->set_device_options(name, DeviceOptions::from_text(text));
         out.u8(ok ? 1 : 0);
+        out.str(ok ? hub_->device_options(name).to_text() : std::string());
+      } else if (verb == 4) {
+        const std::string name = rd.str();
+        const int layer = rd.i32();
+        const bool ok = hub_ && rd.ok() && !name.empty() && hub_->switch_decks(name, layer);
+        out.u8(ok ? 1 : 0);
+        out.i32(hub_ ? hub_->deck_layer(name) : 0);
       } else if (verb == 1) {
         const std::string name = rd.str();
         out.f64(hub_ && rd.ok() ? hub_->last_jog_ticks(name) : 0.0);
@@ -917,6 +956,7 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
         out.u8(hub_ && rd.ok() ? 1 : 0);
       } else {
         out.u8(0);
+      }
       }
       publish_hub();
       return;
@@ -955,6 +995,7 @@ bool parse_args(int argc, char** argv, Options& o) {
     else if (a == "--log-level") o.log_level = std::atoi(value().c_str());
     else if (a == "--null-audio") o.null_audio = true;
     else if (a == "--no-midi") o.no_midi = true;
+    else if (a == "--fake-midi") o.fake_midi = value();
     else if (a == "--exit-unattached") o.exit_unattached_s = std::max(0, std::atoi(value().c_str()));
     else if (a == "--probe") o.probe = true;
     else if (a == "--version") {

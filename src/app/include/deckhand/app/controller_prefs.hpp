@@ -19,8 +19,20 @@ struct ControllerPrefs {
   int pickup = -1;            // -1 as the mapping says, 0 off, 1 on
   bool leds = true;
   std::string mapping;        // preferred mapping name when several match; "" = automatic
+  // Deck assignment, jog touch and mixer-control behaviour (see DeviceOptions). Stored together as one text setting
+  // (controller.<slug>.options, "key=value ...") so more can be added without migrating anything.
+  int deck_pair = 0;          // DeckPair: 0 decks 1/2, 1 decks 3/4, 2 switchable
+  bool jog_vinyl = true;
+  bool jog_finish_scratch = false;
+  int crossfader_curve = 0;   // CrossfaderCurve: 0 engine, 1 cut, 2 smooth
+  bool eq_kill = false;
+  bool filter_snap = false;
+  bool invert_fader = false, invert_crossfader = false, invert_tempo = false;
   bool operator==(const ControllerPrefs& o) const {
-    return jog_scale == o.jog_scale && ticks_per_rev == o.ticks_per_rev && pickup == o.pickup && leds == o.leds && mapping == o.mapping;
+    return jog_scale == o.jog_scale && ticks_per_rev == o.ticks_per_rev && pickup == o.pickup && leds == o.leds && mapping == o.mapping &&
+           deck_pair == o.deck_pair && jog_vinyl == o.jog_vinyl && jog_finish_scratch == o.jog_finish_scratch &&
+           crossfader_curve == o.crossfader_curve && eq_kill == o.eq_kill && filter_snap == o.filter_snap &&
+           invert_fader == o.invert_fader && invert_crossfader == o.invert_crossfader && invert_tempo == o.invert_tempo;
   }
 };
 

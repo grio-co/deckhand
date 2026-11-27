@@ -700,7 +700,7 @@ out 94 73 color_fx deck=1 effect=crush
     // Saving creates or updates a user mapping; a re-learned action replaces its old line.
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / "dh_test_learn";
-    fs::remove_all(dir);
+    { std::error_code rm_ec; fs::remove_all(dir, rm_ec); }
     std::string err;
     CHECK(save_user_mapping("Mystery Controller", {"in button 90 0B play deck=1", "in abs B0 07 filter deck=2"},
                             dir.string(), &err));
@@ -710,7 +710,7 @@ out 94 73 color_fx deck=1 effect=crush
     const std::vector<Mapping> loaded = load_mappings({dir.string()});
     CHECK(loaded.size() == 1 && loaded[0].name == "Mystery Controller" && loaded[0].in.size() == 2);
     CHECK(loaded[0].in[0].data1 == 0x0C && loaded[0].in[1].data1 == 0x08 && loaded[0].in[1].pickup == 1);
-    fs::remove_all(dir);
+    { std::error_code rm_ec; fs::remove_all(dir, rm_ec); }
   }
 
   // ---- per-controller options: jog feel, calibration, soft takeover, LEDs, last measured turn, mapping choice ----

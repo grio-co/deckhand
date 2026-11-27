@@ -261,6 +261,7 @@ NextTrackWeights Library::suggest_weights() {
   get("history", w.history);
   get("explore", w.explore);
   get("recent", w.recent);
+  get("linked", w.linked);
   return w;
 }
 
@@ -322,6 +323,27 @@ std::vector<NextTrack> Library::suggest(std::int64_t seed_id, const NextTrackOpt
     }
   }
 
+  // Linked mix points from the seed: those tracks are candidates whatever their tempo and key.
+  const std::map<std::int64_t, int> links = mix_link_targets(seed_id);
+  for (const auto& [lid, count] : links) {
+    (void)count;
+    if (opt.exclude.count(lid) || lid == seed_id) continue;
+    if (!in_playlist.empty() && !in_playlist.count(lid)) continue;
+    if (std::any_of(cands.begin(), cands.end(), [&](const Cand& c) { return c.id == lid; })) continue;
+    Stmt s(db_, "SELECT t.id, coalesce(t.bpm, 0), coalesce(t.key, ''), coalesce(t.genre, ''), coalesce(t.rating, 0), p.energy_intro"
+                " FROM tracks t LEFT JOIN track_phrases p ON p.track_id = t.id WHERE t.id = ?1");
+    s.bind(1, lid);
+    if (!s.step()) continue;
+    Cand c;
+    c.id = lid;
+    c.bpm = s.f64(1);
+    c.key = s.text(2);
+    c.genre = s.text(3);
+    c.rating = static_cast<int>(s.i64(4));
+    c.intro = s.is_null(5) ? -1 : s.f64(5);
+    cands.push_back(std::move(c));
+  }
+
   // History: pairs, tracks ever played, tracks played in this session.
   std::unordered_map<std::int64_t, int> fwd, rev;
   {
@@ -359,6 +381,8 @@ std::vector<NextTrack> Library::suggest(std::int64_t seed_id, const NextTrackOpt
   for (const Cand& c : cands) {
     NextTrack sg;
     sg.track_id = c.id;
+    const auto link_it = links.find(c.id);
+    const bool linked = link_it != links.end();
     double wsum = 0, wval = 0;
     NextTrackFactor f_tempo, f_key, f_energy, f_genre, f_rating;
     bool h_tempo = false, h_key = false, h_energy = false, h_genre = false, h_rating = false;
@@ -373,10 +397,10 @@ std::vector<NextTrack> Library::suggest(std::int64_t seed_id, const NextTrackOpt
           best = k;
         }
       }
-      if (best < 0 || std::fabs(best_p) > mp + 1e-9) continue;
+      if (best < 0 || (std::fabs(best_p) > mp + 1e-9 && !linked)) continue;
       sg.pitch_change = best_p;
       f_tempo.id = "tempo";
-      f_tempo.value = (1 - std::fabs(best_p) / mp) * (best == 0 ? 1.0 : 0.9);
+      f_tempo.value = std::max(0.0, 1 - std::fabs(best_p) / mp) * (best == 0 ? 1.0 : 0.9);
       f_tempo.detail = c.bpm - targets[best];
       f_tempo.tag = target_tag[best];
       h_tempo = true;
@@ -386,7 +410,7 @@ std::vector<NextTrack> Library::suggest(std::int64_t seed_id, const NextTrackOpt
       if (it == key_cache.end()) it = key_cache.emplace(c.key, parse_key(c.key)).first;
       if (it->second) {
         const KeyRel rel = key_relation(seed_ki, it->second);
-        if (rel == KeyRel::None && opt.harmonic_only) continue;
+        if (rel == KeyRel::None && opt.harmonic_only && !linked) continue;
         f_key.id = "key";
         f_key.value = key_rel_value(rel);
         f_key.tag = key_rel_name(rel);
@@ -454,6 +478,16 @@ std::vector<NextTrack> Library::suggest(std::int64_t seed_id, const NextTrackOpt
       h.points = W.history * h.value;
       score += h.points;
       sg.factors.push_back(h);
+    }
+    if (linked && W.linked != 0) {
+      NextTrackFactor l;
+      l.id = "link";
+      l.value = 1;
+      l.detail = link_it->second;
+      l.tag = "mix_link";
+      l.points = W.linked;
+      score += l.points;
+      sg.factors.push_back(l);
     }
     const auto rp = recent_pos.find(c.id);
     if (rp != recent_pos.end()) {

@@ -160,6 +160,19 @@ enum class Op : std::uint8_t {
   KeySyncConfig,   // deck, i = mode (0 match, 1 compatible) | fine (bit 8: cents instead of whole semitones), f = limit in semitones (0..12)
   // ---- appended after protocol 7 was cut (same protocol: a new op value and one DeckView field) ----
   CueOnly,         // deck, i = 1 headphones only (nothing of this deck reaches the master, whatever the fader or crossfader do), 0 normal, -1 toggle
+  // ---- sampler: slicing, scratch and the step sequencer (protocol 8) ----
+  SamplerSlice,    // deck = slot, i = 0 (off), 8 or 16: cut the slot's sample into that many equal slices
+  SamplerSliceTrigger,  // deck = slot, i = slice 0..15, f = velocity (0 = full); plays that slice once, then stops
+  SamplerScratch,  // deck = slot, i = 1 grab (the slot starts holding its position), 0 release (plays on from where it is),
+                   //   2 move by d seconds of the sample (signed; the motion is spread over the next audio block)
+  SeqRun,          // i = 1 run, 0 stop, -1 toggle
+  SeqBpm,          // f = tempo used when no deck leads (0 = follow MasterBpm, else 120)
+  SeqSwing,        // f = 0..0.75: how far every second step is delayed, as a fraction of a step
+  SeqStep,         // deck = slot, i = pattern * 16 + step, d = 1 on / 0 off, f = velocity 0..1 (< 0 keeps it)
+  SeqSelect,       // i = pattern 0..7, d = 1 waits for the next bar (when running), 0 switches at once
+  SeqRecord,       // i = 1 on, 0 off, -1 toggle: sampler triggers while running are written into the current pattern
+  SeqClear,        // i = pattern (-1 = all), d = slot (< 0 = all slots)
+  SeqPatternSwap,  // internal pointer command (IEngine::seq_pattern_set): i = pattern, Command::seq = 16 x 16 cells
   Count,           // number of ops; not a command
 };
 
@@ -298,6 +311,9 @@ struct LoadedSample {
   float gain = 1.0f;
 };
 
+// A whole step-sequencer pattern, built off the audio thread (see StepSeqView for the cell layout).
+struct SeqPatternData;
+
 struct Command {
   Op op{};
   std::uint8_t deck = 0;
@@ -306,6 +322,7 @@ struct Command {
   double d = 0;
   LoadedTrack* track = nullptr;
   LoadedSample* sample = nullptr;
+  SeqPatternData* seq = nullptr;  // Op::SeqPatternSwap only (internal)
   FxChainState* chain = nullptr;  // Op::FxChainSwap only (internal)
   StemSet* stems = nullptr;       // Op::StemAttach only (internal)
 };
@@ -462,8 +479,38 @@ constexpr float kMicHighPassHz = 80.0f;
 
 struct SamplerView {
   bool loaded = false, playing = false, loop = false, sync = false;
+  bool scratching = false;       // protocol 8
+  std::uint8_t slices = 0;       // 0 (not sliced), 8 or 16
+  std::uint8_t slice = 0xFF;     // slice triggered last (0xFF = none)
+  std::uint8_t pad_ = 0;
   double position = 0, length = 0;  // frames
 };
+
+// ---- step sequencer (protocol 8) ----
+constexpr int kSeqPatterns = 8, kSeqSteps = 16;
+constexpr int kSeqVelMax = 127;
+// A cell is one slot on one step: bit 7 = on, bits 0..6 = velocity 1..127. [step][slot].
+struct SeqPatternData {
+  std::uint8_t cell[kSeqSteps][kSamplerSlots] = {};
+};
+struct StepSeqView {
+  std::uint32_t rev = 0;           // changes whenever a cell changes
+  std::uint8_t running = 0, recording = 0, current = 0;  // current = playing pattern
+  std::uint8_t queued = 0xFF;      // pattern waiting for the next bar (0xFF = none)
+  std::uint8_t step = 0xFF;        // step playing now (0xFF = stopped)
+  std::uint8_t locked = 0;         // 1 = follows a deck's beat grid, 0 = free-running at `bpm`
+  std::uint16_t pad_ = 0;
+  float bpm = 120, swing = 0;      // tempo in use; swing 0..0.75
+  std::uint32_t pad2_ = 0;
+  SeqPatternData pattern[kSeqPatterns];
+};
+static_assert(sizeof(StepSeqView) % 8 == 0);
+
+// Compact text form of one pattern: "dhseq1" then 16 tokens (one per step) separated by ';'. A token is "-" for an empty
+// step or "<mask>:<velocities>": mask = 4 hex digits (bit n = slot n is on), then 2 hex digits of velocity (1..7f) for
+// each slot in the mask, lowest slot first. Example: "dhseq1;0005:7f40;-;-;..."
+std::string seq_pattern_to_text(const SeqPatternData& p);
+bool seq_pattern_from_text(const std::string& text, SeqPatternData& out);
 
 struct RecorderStatus {
   bool open = false;        // a file is open (armed or recording)
@@ -529,6 +576,21 @@ class IEngine {
   virtual MixerView mixer() const = 0;
   virtual SamplerView sampler(int slot) const = 0;
   virtual void sampler_load(int slot, std::unique_ptr<LoadedSample> sample) = 0;
+  // ---- step sequencer (protocol 8) ----
+  virtual StepSeqView step_seq() const = 0;
+  // Replaces a whole pattern from its text form (see seq_pattern_to_text). False for a bad pattern index or text.
+  virtual bool seq_pattern_set(int pattern, const std::string& text) = 0;
+  std::string seq_pattern_text(int pattern) const;  // text form of a pattern from the latest snapshot
+  void seq_run(int on);                              // 1 / 0 / -1 toggle
+  void seq_bpm(double bpm);
+  void seq_swing(double swing);
+  void seq_step(int pattern, int step, int slot, bool on, float velocity = -1);
+  void seq_select(int pattern, bool at_next_bar);
+  void seq_record(int on);                           // 1 / 0 / -1 toggle
+  void seq_clear(int pattern = -1, int slot = -1);
+  void sampler_slice(int slot, int slices);          // 0, 8 or 16
+  void sampler_slice_trigger(int slot, int slice, float velocity = 0);
+  void sampler_scratch(int slot, int mode, double seconds = 0);  // mode 1 grab, 0 release, 2 move
 
   // include_mic: the microphone channel is part of the recording / stream tap (default).
   virtual bool record_open(const std::string& path, bool pre_clip, std::string& error, bool include_mic = true) = 0;
@@ -644,6 +706,8 @@ class Engine final : public IEngine {
 
   // Sampler: hand a sample to a slot (non-real-time caller).
   void sampler_load(int slot, std::unique_ptr<LoadedSample> sample) override;
+  StepSeqView step_seq() const override;
+  bool seq_pattern_set(int pattern, const std::string& text) override;
 
   // Recording of the master bus to 24-bit WAV (RF64 beyond 4 GB; the header is refreshed about once a
   // second, so a crash still leaves a playable file). record_open opens the file and the writer thread and

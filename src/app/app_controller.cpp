@@ -79,6 +79,15 @@ std::string App::controllers_json(Library& lib) {
     s.set("soft_takeover", p.pickup < 0 ? Json("mapping") : Json(p.pickup ? "on" : "off"));
     s.set("leds", p.leds);
     s.set("mapping", p.mapping);
+    s.set("deck_assignment", p.deck_pair == 1 ? "3_4" : p.deck_pair == 2 ? "switchable" : "1_2");
+    s.set("jog_vinyl_mode", p.jog_vinyl);
+    s.set("jog_finish_scratch", p.jog_finish_scratch);
+    s.set("crossfader_curve", p.crossfader_curve == 1 ? "cut" : p.crossfader_curve == 2 ? "smooth" : "engine");
+    s.set("eq_kill", p.eq_kill);
+    s.set("filter_snap", p.filter_snap);
+    s.set("invert_fader", p.invert_fader);
+    s.set("invert_crossfader", p.invert_crossfader);
+    s.set("invert_tempo", p.invert_tempo);
     c.set("settings", std::move(s));
     c.set("settings_prefix", "controller." + controller_slug(n) + ".");
     for (const MappingFileInfo& f : files) {
@@ -105,6 +114,18 @@ std::string App::controllers_json(Library& lib) {
   }
   root.set("controllers", std::move(list));
   return root.dump();
+}
+
+// "Switch decks now": the controllers whose deck assignment is "switchable" move to the other pair of decks.
+bool App::controller_switch_decks(int layer) {
+  if (!hub_) return false;
+  bool any = false;
+  for (const std::string& n : hub_->connected()) {
+    int now = 0;
+    if (hub_->switch_decks(n, layer, &now)) any = true;
+  }
+  ctl_note_ = any ? T("controller.switched") : T("controller.switch_none");
+  return any;
 }
 
 void App::controller_select(int index) {
@@ -262,6 +283,44 @@ void App::draw_controller(const Rect& m) {
       controller_apply();
     }
     cy += 32;
+
+    // deck assignment, jog touch and mixer-control behaviour (applied by the hub; saved per controller)
+    const auto cycle = [&](const char* label, const char* value_key, float bw) {
+      dl_.text(x, cy + 5, T(label), 12, th.text);
+      const bool hit = ui_button({x + 250, cy, bw, 26}, T(value_key), false);
+      cy += 34;
+      return hit;
+    };
+    static const char* kPairKeys[] = {"controller.decks_12", "controller.decks_34", "controller.decks_switch"};
+    if (cycle("controller.decks_assign", kPairKeys[std::clamp(ctl_prefs_.deck_pair, 0, 2)], rw - 250 > 120 ? std::min(rw - 250, 420.0f) : 120)) {
+      ctl_prefs_.deck_pair = (ctl_prefs_.deck_pair + 1) % 3;
+      controller_apply();
+    }
+    if (ctl_prefs_.deck_pair == 2 && connected) {
+      cy -= 6;
+      if (ui_button({x + 250, cy, 200, 26}, T("controller.switch_now"), false)) controller_switch_decks(-1);
+      cy += 34;
+    }
+    const auto flag = [&](const char* label, bool& v) {
+      if (ui_toggle({x, cy, rw, 24}, T(label), v)) {
+        v = !v;
+        controller_apply();
+      }
+      cy += 28;
+    };
+    flag("controller.jog_vinyl", ctl_prefs_.jog_vinyl);
+    if (ctl_prefs_.jog_vinyl) flag("controller.jog_finish", ctl_prefs_.jog_finish_scratch);
+    static const char* kXfadeKeys[] = {"controller.xfade_engine", "controller.xfade_cut", "controller.xfade_smooth"};
+    if (cycle("controller.xfade_curve", kXfadeKeys[std::clamp(ctl_prefs_.crossfader_curve, 0, 2)], 200)) {
+      ctl_prefs_.crossfader_curve = (ctl_prefs_.crossfader_curve + 1) % 3;
+      controller_apply();
+    }
+    flag("controller.eq_kill", ctl_prefs_.eq_kill);
+    flag("controller.filter_snap", ctl_prefs_.filter_snap);
+    flag("controller.invert_fader", ctl_prefs_.invert_fader);
+    flag("controller.invert_xfader", ctl_prefs_.invert_crossfader);
+    flag("controller.invert_tempo", ctl_prefs_.invert_tempo);
+    cy += 6;
 
     // actions
     float ax = x;

@@ -16,6 +16,7 @@ struct NextTrackWeights {
   double history = 25;   // played right after the seed before (at full: three or more times)
   double explore = 3;    // never played at all
   double recent = 40;    // played earlier in this session (most recent at full)
+  double linked = 40;    // a linked mix point from the seed to the candidate exists (the candidate also bypasses the tempo and key filters)
 };
 
 struct NextTrackOptions {
@@ -31,12 +32,12 @@ struct NextTrackOptions {
 };
 
 struct NextTrackFactor {
-  std::string id;       // tempo | key | energy | genre | rating | history | explore | recent
+  std::string id;       // tempo | key | energy | genre | rating | history | explore | recent | link
   double points = 0;    // contribution to the score (negative for recent)
   double value = 0;     // the factor's own 0..1 value
   double detail = 0;    // tempo: BPM difference after the match; energy: outro of the seed minus intro of the candidate;
                         // history: times played in that order; recent: how many tracks ago
-  std::string tag;      // tempo: direct | half | double; key: same | adjacent | relative | boost; genre: the shared genre
+  std::string tag;      // link: mix_link (detail = number of links); tempo: direct | half | double; key: same | adjacent | relative | boost; genre: the shared genre
 };
 
 struct NextTrack {

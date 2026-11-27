@@ -63,6 +63,13 @@ PhrasePoints phrase_mix_points(const StoredPhrases& phrases, double first_sound_
 
 enum class LoadState { Pending, Ready, Failed };
 
+// Linked mix points: when the playing track and the next queued one (first row of the library's play queue) have a link
+// that has not passed yet, it replaces the computed mix-out of the playing track and the mix-in of the next one (and the
+// transition length and type, when the link sets them). Entry overrides of the queue still win, as they sit above a
+// track's own points in the planner. Used by the application's host; tests drive it with a simulated one.
+// Returns true when `f` was changed.
+bool apply_mix_links(Library& lib, IEngine& engine, TrackFacts& f);
+
 class AutomixHost {
  public:
   virtual ~AutomixHost() = default;

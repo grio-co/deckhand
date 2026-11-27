@@ -732,6 +732,7 @@ void App::draw_wave(int di, const Rect& r, const DeckView& v, const DeckInfo& in
     dl_.triangle(x - 5, r.y + r.h, x + 5, r.y + r.h, x, r.y + r.h - 9, mc);
     if (!c.label.empty() && r.h > 30) dl_.text(x + 6, r.y + r.h - 24, skin_->fit(c.label, 10, 1, 110), 10, mc, Align::Left, 0, 1);
   }
+  draw_link_marks(info, r, sr, x_of, th);  // linked mix points and the vocal band
   dl_.pop_clip();
   dl_.rect(cx - 1, r.y, 2, r.h, rgba(255, 255, 255));  // playhead
 

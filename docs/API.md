@@ -170,3 +170,53 @@ WebSocket `events` topic: `queue.changed` (`revision`, `size`), `automix.state`,
 (a track that cannot be loaded is skipped), `automix.override`, `automix.finished`. After a restart the queue is restored
 (an entry whose transition was scheduled but had not started is first again) and automix waits for `start`; `resume_available`
 says it was running.
+
+## Step sequencer and slicing
+
+The sampler has a 16-step pattern player (8 patterns, 16 slots, see docs/SEQUENCER.md). Everything is also a named control, so it
+works in `POST /v1/commands`, over the WebSocket, as a keyboard shortcut and scheduled like any engine control:
+`seq.run`, `seq.record` (toggles), `seq.bpm` (0 follows the decks), `seq.swing` (0..0.75), `seq.pattern.<1..8>.select` and `.queue` (from
+the next bar), `seq.clear` (none = the pattern being played, 0 = all, 1..8 = that one), `seq.step.<1..16>.slot<1..16>` (a cell of the pattern
+being played: 0 off, 0..1 on at that velocity, none = toggle), `sampler.slot.<1..16>.slices` (0, 8 or 16), `sampler.slot.<n>.slice.<1..16>`
+(plays one slice, value = velocity), `sampler.slot.<n>.scratch` (1 holds the sample's position, 0 lets it go) and
+`sampler.slot.<n>.scratch.delta` (moves the held sample by that many seconds of the sample, signed).
+
+| Route | Scope | Purpose |
+|---|---|---|
+| `GET /v1/sequencer` | `read` | Running, recording, pattern (1..8), queued pattern (0 = none), step (1..16, 0 = stopped), `bpm`, `swing`, `follows_deck`, and `patterns` (all eight as text) |
+| `GET`/`PUT /v1/sequencer/patterns/{n}` | `read` / `control` | One pattern as text (`{"text": "dhseq1;..."}`); PUT replaces it (400 for a text that is not valid) |
+| `POST /v1/sequencer/step` | `control` | `{"pattern": 3, "step": 5, "slot": 2, "on": true, "velocity": 0.8}` (pattern defaults to the one being played) |
+| `POST /v1/sequencer/{action}` | `control` | `run`, `record` (`{"on": true}`, none = toggle), `bpm`, `swing` (`{"value": n}`), `select`, `queue` (`{"pattern": n}`), `clear` (`{"pattern": n}`, `{"all": true}`, `slot` limits it to one slot) |
+| `GET /v1/sampler/slices` | `read` | Per slot: `loaded`, `slices`, `last_slice` (1-based, 0 = none), `scratching` |
+| `POST /v1/sampler/{slot}/slices` | `control` | `{"count": 0 / 8 / 16}` |
+| `POST /v1/sampler/{slot}/slices/{index}/trigger` | `control` | Plays slice `index` once; `{"velocity": 0..1}` optional |
+
+The eight patterns, the tempo (while the sequencer runs on its own tempo, not a deck's), the swing and the selected pattern are kept
+in the library settings (`seq.pattern.1..8`, `seq.bpm`, `seq.swing`, `seq.current`) a moment after each change, and sent to the engine at
+start and again after an engine process restart.
+
+## Linked mix points and vocal regions
+
+A linked mix point says: when track A reaches `from_ms`, track B starts from `to_ms` (optionally with its own `transition_beats` and
+`transition_type`). Automix uses the link between the playing track and the next queued one instead of the computed mix-out and mix-in;
+the suggestions list shows a "linked mix point" reason (and lets linked tracks through the tempo and key filters); the positions follow
+grid edits of their own track like cues do; the waveform marks them (a forward flag at the start of a link out of the track, a backward
+flag at the end of a link into it). Merging duplicates moves the links of the removed tracks to the kept track.
+
+| Route | Scope | Purpose |
+|---|---|---|
+| `GET /v1/library/mix-links?track=` (or `from=`, `to=`, or `from=&to=`) | `library:read` | Links out of and into a track / out of one / into one / between two tracks |
+| `GET /v1/library/tracks/{id}/mix-links` | `library:read` | `{"from": [...], "to": [...]}` |
+| `POST /v1/library/mix-links` | `library:write` | `{"from_track", "from_ms", "to_track", "to_ms", "transition_beats"?, "transition_type"?, "label"?}` (201) |
+| `GET`/`PUT`/`DELETE /v1/library/mix-links/{id}` | `library:read` / `library:write` | One link; PUT changes the fields given (`transition_*` may be `null`) |
+| `POST /v1/mix-links/from-decks` | `library:write` | `{"from_deck": 1, "to_deck": 2}`: link the two playheads (the same as the `ui.link.1.2` shortcut control) |
+| `GET /v1/library/tracks/{id}/vocals` | `library:read` | Vocal regions found in the vocals stem (`regions` as `start_ms` / `end_ms`); filled in the background after a stem separation, drawn as a thin band on the waveform |
+
+The grid edit reply (`POST /v1/library/tracks/{id}/grid`) and `POST .../cues/follow-grid` carry `mix_links_moved`; a duplicate merge
+carries `mix_links_moved` too.
+
+## One instance per data folder
+
+A second DeckHand started on the same data folder is refused before it touches the engine process: the first holds an OS lock on
+`<data folder>/deckhand.lock` (released by the OS when it ends, however it ends). The second shows the message (macOS also brings the first
+window forward) and exits. Portable mode keeps its data beside the app, so it has its own lock.

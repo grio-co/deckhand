@@ -3,6 +3,7 @@
 // code-drawn fallback in app_legacy.cpp.
 #include "deckhand/sync/sync.hpp"
 #include "app_impl.hpp"
+#include "deckhand/app/instance_lock.hpp"
 #include "deckhand/analysis/analysis.hpp"
 #include "deckhand/core/key_math.hpp"
 #include "deckhand/broadcast/json.hpp"
@@ -92,6 +93,7 @@ App::App(const dh_platform& platform, const dh_config& config)
   setup_automix();
   loader_ = std::thread([this] { loader_main(); });
   control_ = std::thread([this] { control_main(); });
+  vocals_thread_ = std::thread([this] { vocals_main(); });
   if (remote_ && remote_->attached_existing()) {
     for (int i = 0; i < kMaxDecks; ++i) {  // rebuild the deck displays (waveforms) from what the engine holds
       std::int64_t id = 0;
@@ -160,6 +162,8 @@ App::~App() {
   stream_.reset();
   quit_ = true;
   job_cv_.notify_all();
+  vocals_cv_.notify_all();
+  if (vocals_thread_.joinable()) vocals_thread_.join();
   if (loader_.joinable()) loader_.join();
   if (control_.joinable()) control_.join();
   stop_signal_watch();
@@ -218,6 +222,7 @@ void App::setup_engine(const std::vector<std::string>& mapping_folders) {
               for (DeckInfo& d : decks_) d = DeckInfo{};  // the new engine has empty decks
             }
             ctl_resync_ = true;  // the new engine has no controller settings yet
+            seq_ready_ = false;  // nor patterns: do not save its empty ones over the stored ones
             start_audio();
             apply_input(true);  // the new engine has no input open
             Job j;  // the new engine has empty sampler slots too
@@ -493,6 +498,19 @@ void App::control_main() {
       for (int i = 0; i < kSamplerSlots; ++i) samplers[i] = engine_->sampler(i);
       if (local_hub_) local_hub_->tick(views, kMaxDecks, &mixer, samplers, kSamplerSlots, now);
     }
+    links_refresh_loop();
+    if (seq_ready_) {  // save sequencer edits (patterns, tempo, swing) a moment after the last change
+      if (seq_watch_.changed(engine_->step_seq())) seq_dirty_ = true, seq_dirty_at_ = now;
+      if (seq_dirty_ && now - seq_dirty_at_ > 1.5) {
+        seq_dirty_ = false;
+        Job j;
+        j.kind = Job::SeqSave;
+        post(j);
+      }
+    } else {
+      seq_watch_ = SeqWatch{};
+      seq_dirty_ = false;
+    }
     engine_->collect_garbage();
 
     // Follow controllers being plugged in or removed: use their audio interface when present.
@@ -555,7 +573,20 @@ void App::run_job(Library& lib, const Job& j) {
   switch (j.kind) {
     case Job::Load: load_track(lib, j.deck, j.track_id); break;
     case Job::Reattach: load_track(lib, j.deck, j.track_id, true); break;
+    case Job::RefreshLinks: {
+      DeckInfo fresh;
+      deck_extras_load(lib, fresh, j.track_id);
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      if (j.deck >= 0 && j.deck < kMaxDecks && decks_[j.deck].row.id == j.track_id) {
+        decks_[j.deck].links_out = std::move(fresh.links_out);
+        decks_[j.deck].links_in = std::move(fresh.links_in);
+        decks_[j.deck].vocals = std::move(fresh.vocals);
+        decks_[j.deck].has_vocals = fresh.has_vocals;
+      }
+      break;
+    }
     case Job::StemsReady:  // a separation finished: a deck that holds this track and has no stems yet gets them live
+      queue_vocals(lib, j.track_id, true);  // and its vocal regions are found, off this thread
       for (int d = 0; d < kMaxDecks; ++d) {
         const DeckView v = engine_->deck(d);
         if (v.loaded && v.track_id == j.track_id && v.stems_state == 0) attach_stems(lib, d, j.track_id);
@@ -579,7 +610,12 @@ void App::run_job(Library& lib, const Job& j) {
     }
     case Job::Sync: sync_job(lib, true); break;
     case Job::SyncInfo: sync_job(lib, false); break;
-    case Job::RestoreSamples: restore_sampler(lib, j.slot != 0); break;
+    case Job::RestoreSamples:
+      restore_sampler(lib, j.slot != 0);
+      if (j.slot != 0) restore_sequencer(lib, *engine_);  // a fresh engine has empty patterns; an attached one kept its own
+      seq_ready_ = true;
+      break;
+    case Job::SeqSave: save_sequencer(lib, engine_->step_seq()); break;
     case Job::Import: {
       {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -615,7 +651,8 @@ void App::run_job(Library& lib, const Job& j) {
         if (!c.proposal.moves.empty()) {
           lib.set_setting("cues_follow_pending", std::to_string(j.track_id) + ":" + std::to_string(c.batch_id));
           set_status(std::to_string(c.proposal.moves.size()) + " cues sit on the old grid; move them with the cues/follow-grid API call (edit batch " +
-                     std::to_string(c.batch_id) + ")");
+                     std::to_string(c.batch_id) + ")" +
+                     (c.mix_links_moved > 0 ? ", with " + std::to_string(c.mix_links_moved) + " linked mix points" : std::string()));
         }
       } else {
         lib.set_grid_locked(j.track_id, j.flag);
@@ -937,6 +974,7 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
   std::sort(info.mem.begin(), info.mem.end(), [](const MemCue& a, const MemCue& b) { return a.frame < b.frame; });
   info.grid_locked = grid_locked;
   if (auto sp = lib.phrases(track_id)) info.phrases = std::move(*sp);
+  deck_extras_load(lib, info, track_id);
 
   info.row = *row;
   info.row.key = key_text;
@@ -1005,7 +1043,9 @@ void App::load_track(Library& lib, int deck, std::int64_t track_id, bool attach_
 }
 
 void App::attach_stems(Library& lib, int deck, std::int64_t track_id) {
-  if (!stems_ || lib.setting("stems.auto_attach", "1") == "0") return;
+  if (!stems_) return;
+  queue_vocals(lib, track_id, false);  // a track with stems but no (or old) vocal regions gets them
+  if (lib.setting("stems.auto_attach", "1") == "0") return;
   const std::string file = stems_->stems_file(track_id);
   if (file.empty()) return;
   std::string error;
@@ -1508,22 +1548,41 @@ void App::collect_uploads(std::vector<dh_tex_upload>& uploads, std::vector<std::
 
 // ---- C interface -----------------------------------------------------------------------------
 struct dh_app {
+  std::unique_ptr<deckhand::InstanceLock> lock;  // first member: released last, after the engine process was told to go
   deckhand::App app;
-  dh_app(const dh_platform& p, const dh_config& c) : app(p, c) {}
+  dh_app(std::unique_ptr<deckhand::InstanceLock> l, const dh_platform& p, const dh_config& c) : lock(std::move(l)), app(p, c) {}
 };
+
+namespace {
+std::string& last_error() {
+  static thread_local std::string e;
+  return e;
+}
+}  // namespace
 
 extern "C" {
 
 dh_app* dh_app_create(const dh_platform* platform, const dh_config* config) {
   if (!platform || !config) return nullptr;
+  last_error().clear();
   try {
-    return new dh_app(*platform, *config);
+    // One instance per data folder, decided before any engine process is started or attached to. A folder that cannot
+    // hold the lock file (read-only, say) does not stop the start: only a held lock does.
+    std::string holder, lock_error;
+    std::unique_ptr<deckhand::InstanceLock> lock = deckhand::InstanceLock::acquire(config->data_dir ? config->data_dir : "", holder, lock_error);
+    if (!lock && lock_error.empty()) {
+      last_error() = deckhand::instance_conflict_message(config->data_dir ? config->data_dir : "", holder);
+      std::fprintf(stderr, "%s\n", last_error().c_str());
+      return nullptr;
+    }
+    return new dh_app(std::move(lock), *platform, *config);
   } catch (const std::exception& e) {
     std::fprintf(stderr, "DeckHand failed to start: %s\n", e.what());
     return nullptr;
   }
 }
 void dh_app_destroy(dh_app* app) { delete app; }
+const char* dh_app_last_error(void) { return last_error().c_str(); }
 void dh_app_set_display(dh_app* app, float w, float h, float scale, float il, float it, float ir, float ib) {
   app->app.set_display(w, h, scale, il, it, ir, ib);
 }

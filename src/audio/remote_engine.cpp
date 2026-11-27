@@ -157,6 +157,7 @@ bool RemoteEngine::establish(std::string& error, bool allow_spawn, bool& spawned
       args.push_back(opt_.resource_dir);
     }
     if (opt_.null_audio) args.push_back("--null-audio");
+    for (const std::string& a : opt_.extra_args) args.push_back(a);
     // A helper that comes up after we gave up must not stay beside the in-process fallback: it leaves by itself when no
     // UI attached (and nothing is loaded) shortly after our own wait would have ended.
     args.push_back("--exit-unattached");
@@ -588,6 +589,24 @@ void RemoteEngine::sampler_load(int slot, std::unique_ptr<LoadedSample> sample) 
   }
 }
 
+StepSeqView RemoteEngine::step_seq() const {
+  const auto l = link();
+  return l ? l->sh->stepseq.read() : StepSeqView{};
+}
+
+bool RemoteEngine::seq_pattern_set(int pattern, const std::string& text) {
+  const auto l = link();
+  SeqPatternData probe;
+  if (!l || pattern < 0 || pattern >= kSeqPatterns || !seq_pattern_from_text(text, probe)) return false;
+  Wr w;
+  w.i32(pattern);
+  w.str(text);
+  std::vector<std::uint8_t> r;
+  if (!rpc(*l, kReqSeqPattern, w.bytes(), r, 3000)) return false;
+  Rd rd(r.data(), r.size());
+  return rd.u8() != 0;
+}
+
 bool RemoteEngine::deck_info(int deck, std::int64_t& track_id, std::string& path) const {
   const auto l = link();
   if (!l || deck < 0 || deck >= kMaxDecks) return false;
@@ -861,18 +880,31 @@ std::string RemoteEngine::hub_learn_error() const {
   const HubInfo h = l->sh->hub.read();
   return cstr(h.learn_error, sizeof h.learn_error);
 }
-bool RemoteEngine::hub_set_options(const std::string& mapping, double jog_scale, double ticks_per_rev, int pickup, bool leds) {
+bool RemoteEngine::hub_set_options(const std::string& mapping, const std::string& options_text, std::string* applied) {
   Wr w;
   w.u8(0);
   w.str(mapping);
-  w.f64(jog_scale);
-  w.f64(ticks_per_rev);
-  w.i32(pickup);
-  w.u8(leds ? 1 : 0);
+  w.str(options_text);
   std::vector<std::uint8_t> r;
   if (!rpc(kReqHubDevice, w.bytes(), r, 3000)) return false;
   Rd rd(r.data(), r.size());
-  return rd.u8() != 0;
+  const bool ok = rd.u8() != 0;
+  const std::string text = rd.str();
+  if (applied && rd.ok()) *applied = text;
+  return ok;
+}
+bool RemoteEngine::hub_switch_decks(const std::string& mapping, int layer, int* now) {
+  Wr w;
+  w.u8(4);
+  w.str(mapping);
+  w.i32(layer);
+  std::vector<std::uint8_t> r;
+  if (!rpc(kReqHubDevice, w.bytes(), r, 3000)) return false;
+  Rd rd(r.data(), r.size());
+  const bool ok = rd.u8() != 0;
+  const int l = rd.i32();
+  if (now && rd.ok()) *now = l;
+  return ok;
 }
 double RemoteEngine::hub_jog_ticks(const std::string& mapping) {
   Wr w;

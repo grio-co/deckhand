@@ -25,6 +25,8 @@
 
 namespace deckhand::ipc {
 
+// 8: sampler slicing, scratch and the step sequencer (SamplerSlice / SamplerSliceTrigger / SamplerScratch / Seq* ops,
+//    SamplerView scratching / slices / slice, the StepSeqView snapshot in the segment, kReqSeqPattern).
 // 7: 16 hot cue slots (kHotCues 8 -> 16: DeckView, track block header), key sync (TrackKey / KeyMatch / KeyFollow / KeyReset /
 //    KeySyncConfig ops, DeckView key_* fields, BlockHeader::key_index), CueOnly op + DeckView::cue_only (a deck that never
 //    reaches the master; added before protocol 7 shipped, so no further bump).
@@ -36,7 +38,7 @@ namespace deckhand::ipc {
 // 2: microphone channel (Mic* ops, MixerView fields, InputInfo snapshot, input requests, include-mic flags).
 // Bump whenever a wire layout or the meaning of a request changes: a UI that finds an engine with another version
 // asks it to quit and starts a fresh one (RemoteEngine::establish), and the segment's fingerprint covers the sizes.
-constexpr std::uint32_t kProtocolVersion = 7;
+constexpr std::uint32_t kProtocolVersion = 8;
 constexpr int kBlockSlots = 64;  // track / sample blocks in flight at once
 
 // What the OS hands out for a file or socket: a descriptor on POSIX, a HANDLE / SOCKET on Windows (-1 = none).
@@ -435,6 +437,7 @@ struct Shared {
   SeqSlot<HubInfo> hub;
   SeqSlot<InputInfo> input;
   SeqSlot<PreviewView> preview;
+  SeqSlot<StepSeqView> stepseq;
   CmdRing<kCmdRingSize> cmd;
   SpscShared<WireEvent, kEventRingSize> events;
   StreamShared<kStreamFrames> stream;
@@ -555,8 +558,10 @@ enum Req : std::uint8_t {
   kReqSetTrackMeta,    // u8 deck, i64 track id, f64 bpm, u32 n grid, (f64 frame, f64 bpm, i32 bar_beat)..., u32 n cues, f64... -> u8 ok
   kReqFxChain,         // u8 verb, u8 target, i32 id, i32 pos, u8 kind, i32 field, f64 value, str text -> u8 ok, i32 id, str error, str text, chain info
   kReqStemsAttach,     // u8 deck, i64 track id, str path (.dhstems) -> u8 ok, str error   (loads in the background)
-  kReqHubDevice,       // u8 verb: 0 options (str mapping, f64 jog scale, f64 ticks per rev, i32 pickup, u8 leds) -> u8 ok;
-                       //   1 jog ticks (str mapping) -> f64; 2 reload the mappings -> u8 ok; 3 prefer (u16 n, str...) -> u8 ok
+  kReqSeqPattern,      // i32 pattern, str text (see seq_pattern_to_text) -> u8 ok
+  kReqHubDevice,       // u8 verb: 0 options (str mapping, str DeviceOptions text) -> u8 ok, str the options as applied (text);
+                       //   1 jog ticks (str mapping) -> f64; 2 reload the mappings -> u8 ok; 3 prefer (u16 n, str...) -> u8 ok;
+                       //   4 switch decks (str mapping, i32 layer 0 / 1 / -1 toggle) -> u8 ok, i32 layer now
 };
 
 class Wr {

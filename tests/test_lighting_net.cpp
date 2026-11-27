@@ -1,6 +1,7 @@
 // Lighting outputs over UDP, loopback (127.0.0.1) only, ephemeral ports: nothing here touches the real network.
 #include <memory>
 #include <string>
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -12,11 +13,14 @@
 using namespace deckhand::lighting;
 
 // Loopback delivery is immediate on the platforms we run on; a few yields cover scheduler noise without sleeping.
-static long recv_one(UdpSocket& s, std::uint8_t* buf, std::size_t cap, std::string* from = nullptr, std::uint16_t* fp = nullptr) {
-  for (int i = 0; i < 2000; ++i) {
+static long recv_one(UdpSocket& s, std::uint8_t* buf, std::size_t cap, std::string* from = nullptr, std::uint16_t* fp = nullptr,
+                     int wait_ms = 10000) {
+  // Wait by the clock, not by a count of yields: a loaded machine can deliver the datagram late.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+  while (std::chrono::steady_clock::now() < deadline) {
     const long n = s.recv_from(buf, cap, from, fp);
     if (n != 0) return n;
-    std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   return 0;
 }
@@ -72,7 +76,7 @@ static void test_artnet_loopback() {
   CHECK(console.open("127.0.0.1", 0, false));
   const std::uint8_t poll[14] = {'A', 'r', 't', '-', 'N', 'e', 't', 0, 0x00, 0x20, 0, 14, 0, 0};
   CHECK(console.send_to("127.0.0.1", c.listen_port, poll, 14) == 14);
-  for (int i = 0; i < 2000 && out->stats().poll_replies == 0; ++i) { out->service(); std::this_thread::yield(); }
+  for (const auto dl = std::chrono::steady_clock::now() + std::chrono::seconds(10); out->stats().poll_replies == 0 && std::chrono::steady_clock::now() < dl;) { out->service(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
   CHECK(out->stats().poll_replies == 1);
   const long n = recv_one(console, buf, sizeof buf);
   CHECK(n == 239 && buf[8] == 0x00 && buf[9] == 0x21 && buf[173] == 1);
@@ -128,7 +132,7 @@ static void test_sacn_loopback() {
   out->close();
   int term = 0;
   std::uint8_t b2[700];
-  while (recv_one(rx, b2, sizeof b2) == 638) { if (b2[112] & 0x40) ++term; if (term >= 3) break; }
+  while (recv_one(rx, b2, sizeof b2, nullptr, nullptr, 500) == 638) { if (b2[112] & 0x40) ++term; if (term >= 3) break; }
   CHECK(term >= 3);
 }
 
@@ -190,7 +194,7 @@ static void test_engine_outputs_off_by_default() {
   eng.stop();  // sends a final dark frame
   std::uint8_t buf[700];
   int got = 0;
-  while (recv_one(rx, buf, sizeof buf) == 530 && got < 100) ++got;
+  while (recv_one(rx, buf, sizeof buf, nullptr, nullptr, 500) == 530 && got < 100) ++got;
   CHECK(got >= 3);
 }
 

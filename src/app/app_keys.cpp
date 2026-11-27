@@ -342,6 +342,10 @@ void App::do_ui_action(const std::string& name, bool has_value, double value) {
   } else if (n == "controller") {
     if (panel_ == Panel::Controller) close_panel();
     else open_panel(Panel::Controller);
+  } else if (n.compare(0, 5, "link.") == 0 && n.size() == 8 && n[6] == '.' && n[5] >= '1' && n[5] <= '4' && n[7] >= '1' && n[7] <= '4') {
+    link_decks(n[5] - '1', n[7] - '1');
+  } else if (n == "controller.switch_decks") {
+    controller_switch_decks(has_value ? (value != 0 ? 1 : 0) : -1);
   } else if (n == "shortcuts") {
     if (panel_ == Panel::Shortcuts) close_panel();
     else open_panel(Panel::Shortcuts);

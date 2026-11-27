@@ -25,6 +25,7 @@ class RemoteEngine final : public IEngine {
     std::string resource_dir;  // controller mappings are read from <resource_dir>/controllers
     std::string helper_path;   // empty: deckhand-engine beside this executable
     bool null_audio = false;   // tests: the engine opens miniaudio's null device
+    std::vector<std::string> extra_args;  // tests: more helper arguments (e.g. --fake-midi NAME)
     int log_level = 2;
     bool auto_restart = true;
     int backoff_ms = 500;      // first restart delay; doubles after each quick failure
@@ -76,7 +77,10 @@ class RemoteEngine final : public IEngine {
   std::string hub_learn_error() const;
   std::vector<std::string> hub_connected() const;
   // Per-controller settings, live (the hub runs in the engine process). False when the engine did not answer.
-  bool hub_set_options(const std::string& mapping, double jog_scale, double ticks_per_rev, int pickup, bool leds);
+  // options_text = DeviceOptions::to_text(); `applied` (optional) receives the text the hub is using after sanitising.
+  bool hub_set_options(const std::string& mapping, const std::string& options_text, std::string* applied = nullptr);
+  // layer 0 / 1, -1 = toggle; false when the mapping is not switchable or no such controller is connected. `now` = layer after.
+  bool hub_switch_decks(const std::string& mapping, int layer, int* now = nullptr);
   double hub_jog_ticks(const std::string& mapping);
   bool hub_reload_mappings();
   bool hub_prefer_mappings(const std::vector<std::string>& names);
@@ -99,6 +103,8 @@ class RemoteEngine final : public IEngine {
   MixerView mixer() const override;
   SamplerView sampler(int slot) const override;
   void sampler_load(int slot, std::unique_ptr<LoadedSample> sample) override;
+  StepSeqView step_seq() const override;
+  bool seq_pattern_set(int pattern, const std::string& text) override;
   bool record_open(const std::string& path, bool pre_clip, std::string& error, bool include_mic = true) override;
   void record_stop() override;
   void record_close() override;

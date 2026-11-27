@@ -338,6 +338,24 @@ void Library::migrate() {
     tx.commit();
     DH_LOG(Info, "library migrated to schema %d (suggestions, transition history)", 9);
   }
+  if (version < 10) {
+    // Linked mix points (a position in one track tied to a position in another) and vocal regions from cached stems.
+    Transaction tx(db_);
+    db_.exec(
+        "CREATE TABLE IF NOT EXISTS mix_links ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, from_track INTEGER NOT NULL, from_ms REAL NOT NULL, to_track INTEGER NOT NULL,"
+        " to_ms REAL NOT NULL, transition_beats REAL, transition_type TEXT, label TEXT NOT NULL DEFAULT '',"
+        " created_at INTEGER NOT NULL DEFAULT 0);"
+        "CREATE INDEX IF NOT EXISTS idx_mix_links_from ON mix_links(from_track, from_ms);"
+        "CREATE INDEX IF NOT EXISTS idx_mix_links_to ON mix_links(to_track);"
+        "CREATE TABLE IF NOT EXISTS track_vocals ("
+        " track_id INTEGER PRIMARY KEY, version INTEGER NOT NULL, source TEXT NOT NULL DEFAULT '', analysed_at INTEGER NOT NULL DEFAULT 0);"
+        "CREATE TABLE IF NOT EXISTS vocal_regions ("
+        " track_id INTEGER NOT NULL, idx INTEGER NOT NULL, start_ms REAL NOT NULL, end_ms REAL NOT NULL, PRIMARY KEY(track_id, idx));"
+        "UPDATE schema_version SET version = 10;");
+    tx.commit();
+    DH_LOG(Info, "library migrated to schema %d (linked mix points, vocal regions)", 10);
+  }
   {
     // Substring search index (FTS5 trigram, case-insensitive) kept in step with `tracks` by triggers. Optional: an
     // SQLite build without FTS5 keeps working with the LIKE scan. Tried on every start until it exists.
@@ -1133,6 +1151,11 @@ bool Library::restore_track(std::int64_t track_id, std::int64_t* restored) {
     Stmt h(db_, "UPDATE track_edits SET track_id = ?1 WHERE track_id = ?2");
     h.bind(1, id).bind(2, track_id);
     h.run();
+    for (const char* sql : {"UPDATE mix_links SET from_track = ?1 WHERE from_track = ?2", "UPDATE mix_links SET to_track = ?1 WHERE to_track = ?2"}) {
+      Stmt x(db_, sql);
+      x.bind(1, id).bind(2, track_id);
+      x.run();
+    }
   }
   for (const char* t : {"trash_cues", "trash_beatgrids", "trash_playlist_tracks", "trash_import_map"}) {
     Stmt d(db_, (std::string("DELETE FROM ") + t + " WHERE track_id = ?1").c_str());
@@ -1169,6 +1192,12 @@ int Library::purge_deleted(int older_than_days) {
     Stmt h(db_, "DELETE FROM track_edits WHERE track_id = ?1 AND NOT EXISTS (SELECT 1 FROM tracks WHERE id = ?1)");
     h.bind(1, id);
     h.run();
+    for (const char* sql : {"DELETE FROM mix_links WHERE from_track = ?1 OR to_track = ?1", "DELETE FROM track_vocals WHERE track_id = ?1",
+                            "DELETE FROM vocal_regions WHERE track_id = ?1"}) {
+      Stmt x(db_, sql);
+      x.bind(1, id);
+      x.run();
+    }
   }
   tx.commit();
   return static_cast<int>(ids.size());
@@ -1278,7 +1307,7 @@ void Library::set_date_added(std::int64_t track_id, std::int64_t unix_seconds) {
 }
 
 int Library::undo_one(const TrackEditRecord& e) {
-  if (e.field == "grid" || e.field == "cues") return undo_whole(e);
+  if (e.field == "grid" || e.field == "cues" || e.field == "mix_links") return undo_whole(e);
   if (!is_edit_field(e.field)) return 1;
   const FieldValues now = edit_snapshot(e.track_id);
   if (now.empty()) return 2;
@@ -1889,5 +1918,6 @@ void Library::set_setting(const std::string& key, const std::string& value) {
 }
 
 #include "library_tools.inc"
+#include "mix_links.inc"
 
 }  // namespace deckhand

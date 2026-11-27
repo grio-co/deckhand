@@ -8,7 +8,7 @@
 namespace deckhand {
 
 // The schema this build writes. Bump it together with Library::migrate().
-constexpr int kLibrarySchemaVersion = 9;
+constexpr int kLibrarySchemaVersion = 10;
 // Automatic pre-upgrade copies kept; older ones are removed. Manual and pre-restore copies are never removed.
 constexpr int kUpgradeBackupsKept = 5;
 

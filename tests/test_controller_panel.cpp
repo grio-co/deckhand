@@ -20,7 +20,8 @@ int main() {
   CHECK(controller_slug(std::string(100, 'a')).size() == 40);
 
   const fs::path dir = fs::temp_directory_path() / "deckhand_test_controller_panel";
-  fs::remove_all(dir);
+  std::error_code rm_ec;
+  fs::remove_all(dir, rm_ec);
   fs::create_directories(dir);
   {
     Library lib((dir / "library.db").string());
@@ -57,6 +58,32 @@ int main() {
     // the hub sees the same numbers
     const DeviceOptions o = to_device_options(a);
     CHECK(o.jog_scale == 1.5 && o.ticks_per_rev == 1440 && o.pickup == 1 && !o.leds);
+    // deck assignment, jog touch and mixer behaviour: stored as one self-describing text, and older data reads as defaults
+    {
+      ControllerPrefs x;
+      x.deck_pair = 2;
+      x.jog_vinyl = false;
+      x.jog_finish_scratch = true;
+      x.crossfader_curve = 1;
+      x.eq_kill = true;
+      x.filter_snap = true;
+      x.invert_fader = x.invert_crossfader = x.invert_tempo = true;
+      save_controller_prefs(lib, "Newer Box", x);
+      CHECK(load_controller_prefs(lib, "Newer Box") == x);
+      CHECK(!lib.setting("controller.newer_box.options").empty());
+      const DeviceOptions dx = to_device_options(x);
+      CHECK(dx.deck_pair == 2 && !dx.jog_vinyl && dx.jog_finish_scratch && dx.crossfader_curve == 1 && dx.eq_kill && dx.filter_snap);
+      CHECK(dx.invert_fader && dx.invert_crossfader && dx.invert_tempo);
+      save_controller_prefs(lib, "Newer Box", ControllerPrefs{});
+      CHECK(lib.setting("controller.newer_box.options").empty() && load_controller_prefs(lib, "Newer Box") == ControllerPrefs{});
+      // data written by an older build has only the old keys; a newer build's unknown keys are ignored
+      lib.set_setting("controller.old_box.jog_scale", "2");
+      CHECK(load_controller_prefs(lib, "Old Box").jog_scale == 2.0 && load_controller_prefs(lib, "Old Box").jog_vinyl);
+      lib.set_setting("controller.future_box.options", "deck_pair=1 something_new=3 jog_vinyl=0");
+      CHECK(load_controller_prefs(lib, "Future Box").deck_pair == 1 && !load_controller_prefs(lib, "Future Box").jog_vinyl);
+      lib.set_setting("controller.junk_box.options", "\x01\x02 ===");
+      CHECK(load_controller_prefs(lib, "Junk Box") == ControllerPrefs{});
+    }
     // controllers seen before, and the mapping choices to hand to the hub
     note_seen_controller(lib, "DDJ-FLX4");
     note_seen_controller(lib, "Other Box");
@@ -101,7 +128,7 @@ int main() {
       }
     CHECK(n == 1);
   }
-  fs::remove_all(dir);
+  fs::remove_all(dir, rm_ec);
 
   // the click target: the status row's controller name opens the panel, in every skin that shows it
   {

@@ -337,6 +337,15 @@ void StemService::set_ready_sink(std::function<void(std::int64_t)> fn) {
   ready_ = std::move(fn);
 }
 
+bool StemService::cache_ref(std::int64_t id, std::string& root, std::string& key) {
+  std::lock_guard<std::mutex> lock(mu_);
+  const auto k = track_key_.find(id);
+  if (k == track_key_.end() || !cache_.has_stems(k->second)) return false;
+  root = cache_.config().root.string();
+  key = k->second;
+  return true;
+}
+
 StemTrackInfo StemService::track(std::int64_t id) {
   StemTrackInfo t;
   std::lock_guard<std::mutex> lock(mu_);

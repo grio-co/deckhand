@@ -84,6 +84,8 @@ class StemService {
   StemTrackInfo track(std::int64_t track_id);
   // Path of the cache file holding the stems of this track ("" when there is none yet): what the engine reads for playback.
   std::string stems_file(std::int64_t track_id);
+  // Where the cached stems of a track live: the cache folder and the entry key (false when there are none yet).
+  bool cache_ref(std::int64_t track_id, std::string& root, std::string& key);
   // Called (from the queue's thread) when a separation of `track_id` finished and its stems are in the cache.
   void set_ready_sink(std::function<void(std::int64_t track_id)> fn);
   bool evict_track(std::int64_t track_id);  // drops the cached stems of this track; true when something was removed

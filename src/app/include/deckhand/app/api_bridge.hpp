@@ -97,6 +97,10 @@ class ApiHost {
   virtual LightingBridge* api_lighting() { return nullptr; }
   // The connected and previously seen controllers with their mapping and per-controller settings, as JSON text.
   virtual std::string api_controllers_json(Library& lib) { (void)lib; return "{\"controllers\":[]}"; }
+  // The library track on a deck (0-based; 0 = nothing loaded or not a library track).
+  virtual std::int64_t api_deck_track(int deck) { (void)deck; return 0; }
+  // Linked mix points or vocal regions were written through the API: decks drawing them reload.
+  virtual void api_links_changed() {}
   virtual std::string api_status() = 0;
   virtual std::string api_audio_device() = 0;
   // Debug (admin scope): the windows the UI has (JSON array) and what a click at (x, y) of a window would do (JSON object).

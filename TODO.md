@@ -77,7 +77,7 @@ Library and discovery
 - [x] First-sound load cue (user's main cue remembered), grid drift fix, downbeat tests (synthetic audio only)
 - [~] Phrase analysis shown on the waveform (tuned on synthetic tracks; unseen on screen; builds at
       150 BPM and above can read as drops)
-- [ ] Vocal position detection on the waveform (falls out of stems)
+- [~] Vocal regions on the main waveform from cached stems (synthetic tests only; not on the overview)
 - [~] Cue suggestions from phrases and the user's habits (free slots only, undoable; suggested cues
       currently feed back into the habit summary)
 - [~] Track suggestions from the library by tempo, key, genre, energy and play history (unseen on screen)
@@ -98,8 +98,8 @@ Performance
 - [~] Key sync and 16 hot cue slots (unheard, unseen; USB export writes the first eight cues and reports the rest)
 - [~] Stems: offline separation with a disk cache (in progress); then per-deck stem playback,
       mute/solo/FX per stem, stem pads on controllers
-- [ ] Linked mix points: tie a cue in one track to a cue in another for a timed hand-over
-- [ ] Sampler: 16 slots, 8-pattern step sequencer, sample scratch, loop slicing
+- [~] Linked mix points between tracks, used by automix and suggestions (unseen, unheard; not synced between devices)
+- [~] Sampler: 16 slots, 8-pattern step sequencer, sample scratch, loop slicing (unheard; steps play whole samples, not slices)
 - [ ] More effects: beat-synced set, build-up/drop "merge" effect, isolator and mixer-style effects
 - [ ] Timecode vinyl control (DVS): needs an audio interface with phono inputs to test
 - [x] MIDI learn, custom mappings (`.dhmap`), master output from the computer
@@ -148,13 +148,10 @@ Beyond the list
 ## Known limits of the current build
 - If the engine helper misses its start-up limit (60 s), the app falls back to in-process audio
   and the late helper exits by itself; the wait shows only in the status line and the log.
-- Controller panel: deck side (1/2 vs 3/4), jog touch behaviour and per-knob behaviour are not
-  settable; the mapping file's path is shown but cannot be revealed in the file manager.
-- The engine logs "UI heartbeat lost / UI attached" in pairs many times a minute while the Mac is
-  under heavy load (seen in a build from before these changes too); audio is unaffected, but the
-  detection threshold and the log volume need attention.
-- A second copy started on the same data folder fights the first for the engine; there is no
-  single-instance guard per data folder yet.
+- Controller panel: channel fader and crossfader gain laws, EQ kill depth and trim range need the
+  engine; no mappings for other makers' controllers yet (each needs the maker's MIDI document).
+- The single-instance lock and the shell messages are compile-checked only on Windows; the Swift
+  shell change has not been run.
 - Tracks are decoded fully into memory.
 - Analysis can split a steady track at a long breakdown; such splits are merged when the tempo agrees.
 - HID controllers and MIDI learn are not supported yet.

@@ -278,7 +278,9 @@ int main(int argc, char** argv) {
   config.manage_audio = true;
   dh_app* core = dh_app_create(&platform, &config);
   if (!core) {
-    std::fprintf(stderr, "DeckHand could not start. See deckhand.log in %s\n", data.c_str());
+    const char* why = dh_app_last_error();  // a second copy on the same data folder says so
+    if (why && *why) std::fprintf(stderr, "%s\n", why);
+    else std::fprintf(stderr, "DeckHand could not start. See deckhand.log in %s\n", data.c_str());
     SDL_GL_DestroyContext(gl);
     SDL_DestroyWindow(window);
     SDL_Quit();

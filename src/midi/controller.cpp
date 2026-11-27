@@ -110,6 +110,8 @@ const Named kActions[] = {
     {"key_sync", int(Action::KeySync)}, {"key_match", int(Action::KeyMatch)}, {"key_reset", int(Action::KeyReset)},
     {"stem_mute", int(Action::StemMute)}, {"stem_solo", int(Action::StemSolo)}, {"stem_isolate", int(Action::StemIsolate)},
     {"stem_preset", int(Action::StemPreset)}, {"stem_enable", int(Action::StemEnable)},
+    {"deck_switch", int(Action::DeckSwitch)}, {"seq_run", int(Action::SeqRun)}, {"seq_record", int(Action::SeqRecord)},
+    {"seq_pattern", int(Action::SeqPattern)}, {"slice", int(Action::Slice)},
 };
 const Named kStates[] = {
     {"playing", int(LedState::Playing)}, {"cue", int(LedState::Cue)}, {"sync", int(LedState::Sync)},
@@ -568,6 +570,12 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
       case Action::PadFx:
         if (r.slot >= kFxSlots) { why = "effect slot out of range (1.." + std::to_string(kFxSlots) + ")"; return false; }
         break;
+      case Action::SeqPattern:
+        if (r.slot >= kSeqPatterns) { why = "seq_pattern slot out of range (1..8)"; return false; }
+        break;
+      case Action::Slice:
+        if (r.slot >= 16) { why = "slice slot out of range (1..16)"; return false; }
+        break;
       case Action::Sampler: case Action::SamplerStop:
         if (r.slot + r.offset >= kSamplerSlots) { why = "sampler slot plus offset out of range"; return false; }
         break;
@@ -607,6 +615,7 @@ bool parse_line(Mapping& m, const std::string& line, std::string& why) {
     }
     r.state = static_cast<LedState>(state);
     r.deck = a.deck;
+    r.has_deck = a.has_deck;
     r.slot = a.slot;
     r.mode = a.mode;
     r.mode_not = a.mode_not;
@@ -899,10 +908,20 @@ void ControllerHub::hid_learn_allow(int vid, int pid) {
 }
 
 void ControllerHub::fit(Active& a) {
+  if (a.down.empty()) {  // first time for this device: which decks it starts on
+    const auto oi = options_.find(a.map->name);
+    a.deck_off = oi != options_.end() && oi->second.deck_pair == static_cast<int>(DeckPair::Decks34) ? 2 : 0;
+  }
+  a.two_deck = true;
+  for (const InRule& r : a.map->in)
+    if (r.has_deck && r.deck > 1) a.two_deck = false;
+  for (const OutRule& r : a.map->out)
+    if (r.has_deck && r.deck > 1) a.two_deck = false;
   const std::size_t n = a.map->in.size();
   a.msb.resize(n, 0);
   a.lsb.resize(n, 0);
   a.down.resize(n, 0);
+  a.swallow.resize(n, 0);
   a.engaged.resize(n, 0);
   a.last_v.resize(n, -1.0f);
   a.aux.resize(n, -1);
@@ -1033,13 +1052,177 @@ void ControllerHub::midi_devices_changed(const std::vector<std::string>& names) 
   }
 }
 
-void ControllerHub::set_device_options(const std::string& mapping_name, const DeviceOptions& o) {
-  DeviceOptions v = o;
+namespace {
+bool parse_bool(const std::string& v, bool& out) {
+  if (v == "1" || v == "true" || v == "on") { out = true; return true; }
+  if (v == "0" || v == "false" || v == "off") { out = false; return true; }
+  return false;
+}
+bool parse_number(const std::string& v, double& out) {
+  if (v.empty()) return false;
+  char* end = nullptr;
+  const double x = std::strtod(v.c_str(), &end);
+  if (end == v.c_str() || *end != '\0' || !std::isfinite(x)) return false;
+  out = x;
+  return true;
+}
+std::string number_text(double v) {
+  char buf[40];
+  std::snprintf(buf, sizeof buf, "%.6g", v);
+  return buf;
+}
+DeviceOptions sanitised(DeviceOptions v) {
   v.jog_scale = std::isfinite(v.jog_scale) ? std::clamp(v.jog_scale, 0.1, 8.0) : 1.0;
   v.ticks_per_rev = std::isfinite(v.ticks_per_rev) && v.ticks_per_rev > 0 ? std::clamp(v.ticks_per_rev, 16.0, 100000.0) : 0.0;
   v.pickup = v.pickup < 0 ? -1 : (v.pickup > 0 ? 1 : 0);
+  v.deck_pair = v.deck_pair >= 0 && v.deck_pair <= 2 ? v.deck_pair : 0;
+  v.crossfader_curve = v.crossfader_curve >= 0 && v.crossfader_curve <= 2 ? v.crossfader_curve : 0;
+  return v;
+}
+}  // namespace
+
+std::string DeviceOptions::to_text() const {
+  const DeviceOptions d, o = sanitised(*this);
+  std::string out;
+  const auto add = [&](const char* k, const std::string& v) { out += (out.empty() ? "" : " ") + std::string(k) + "=" + v; };
+  if (o.jog_scale != d.jog_scale) add("jog_scale", number_text(o.jog_scale));
+  if (o.ticks_per_rev != d.ticks_per_rev) add("ticks_per_rev", number_text(o.ticks_per_rev));
+  if (o.pickup != d.pickup) add("pickup", std::to_string(o.pickup));
+  if (o.leds != d.leds) add("leds", o.leds ? "1" : "0");
+  if (o.deck_pair != d.deck_pair) add("deck_pair", std::to_string(o.deck_pair));
+  if (o.jog_vinyl != d.jog_vinyl) add("jog_vinyl", o.jog_vinyl ? "1" : "0");
+  if (o.jog_finish_scratch != d.jog_finish_scratch) add("jog_finish_scratch", o.jog_finish_scratch ? "1" : "0");
+  if (o.crossfader_curve != d.crossfader_curve) add("crossfader_curve", std::to_string(o.crossfader_curve));
+  if (o.eq_kill != d.eq_kill) add("eq_kill", o.eq_kill ? "1" : "0");
+  if (o.filter_snap != d.filter_snap) add("filter_snap", o.filter_snap ? "1" : "0");
+  if (o.invert_fader != d.invert_fader) add("invert_fader", o.invert_fader ? "1" : "0");
+  if (o.invert_crossfader != d.invert_crossfader) add("invert_crossfader", o.invert_crossfader ? "1" : "0");
+  if (o.invert_tempo != d.invert_tempo) add("invert_tempo", o.invert_tempo ? "1" : "0");
+  return out;
+}
+
+DeviceOptions DeviceOptions::from_text(const std::string& text) {
+  DeviceOptions o;
+  std::string flat = text;
+  for (char& c : flat)
+    if (c == ';' || c == ',' || c == '\n' || c == '\r' || c == '\t') c = ' ';
+  std::istringstream in(flat);
+  std::string tok;
+  while (in >> tok) {
+    const auto eq = tok.find('=');
+    if (eq == std::string::npos) continue;
+    const std::string k = tok.substr(0, eq), v = tok.substr(eq + 1);
+    double n = 0;
+    bool b = false;
+    if (k == "jog_scale") { if (parse_number(v, n)) o.jog_scale = n; }
+    else if (k == "ticks_per_rev") { if (parse_number(v, n)) o.ticks_per_rev = n; }
+    else if (k == "pickup") { if (parse_number(v, n)) o.pickup = static_cast<int>(n); }
+    else if (k == "leds") { if (parse_bool(v, b)) o.leds = b; }
+    else if (k == "deck_pair") { if (parse_number(v, n)) o.deck_pair = static_cast<int>(n); }
+    else if (k == "jog_vinyl") { if (parse_bool(v, b)) o.jog_vinyl = b; }
+    else if (k == "jog_finish_scratch") { if (parse_bool(v, b)) o.jog_finish_scratch = b; }
+    else if (k == "crossfader_curve") { if (parse_number(v, n)) o.crossfader_curve = static_cast<int>(n); }
+    else if (k == "eq_kill") { if (parse_bool(v, b)) o.eq_kill = b; }
+    else if (k == "filter_snap") { if (parse_bool(v, b)) o.filter_snap = b; }
+    else if (k == "invert_fader") { if (parse_bool(v, b)) o.invert_fader = b; }
+    else if (k == "invert_crossfader") { if (parse_bool(v, b)) o.invert_crossfader = b; }
+    else if (k == "invert_tempo") { if (parse_bool(v, b)) o.invert_tempo = b; }
+    // anything else: a key from a newer build, ignored
+  }
+  return sanitised(o);
+}
+
+InRule ControllerHub::effective(const Active& a, const InRule& r) const {
+  InRule e = r;
+  if (a.deck_off && a.two_deck && r.has_deck) e.deck = r.deck + a.deck_off;
+  return e;
+}
+
+// Moves a two-deck controller to the deck layer (0: decks 1/2, 1: decks 3/4) without leaving anything pressed.
+void ControllerHub::apply_layer(Active& a, int layer) {
+  const int off = layer ? 2 : 0;
+  if (!a.two_deck || off == a.deck_off) return;
+  for (std::size_t i = 0; i < a.map->in.size(); ++i) {  // release what is held, on the decks it was pressed for
+    if (!a.down[i] || a.map->in[i].action == Action::DeckSwitch) continue;
+    a.down[i] = 0;
+    a.swallow[i] = 1;
+    button(a, i, effective(a, a.map->in[i]), false);
+  }
+  for (int d = 0; d < kMaxDecks; ++d) {
+    if (a.release_pending[d] || a.touched[d]) {  // a platter still counted as touched: let go
+      Command c;
+      c.deck = static_cast<std::uint8_t>(d);
+      c.op = Op::JogTouch;
+      c.i = 0;
+      sink_.command(c);
+    }
+    a.release_pending[d] = false;
+    a.touched[d] = false;
+    a.jog_ticks[d] = 0;
+    a.jog_turns[d] = a.jog_turns_prev[d] = 0;
+  }
+  for (auto& h : a.held) h.fill(false);
+  a.deck_off = off;
+  std::fill(a.engaged.begin(), a.engaged.end(), 0);   // soft takeover starts over against the new decks
+  std::fill(a.last_v.begin(), a.last_v.end(), -1.0f);
+  std::fill(a.aux.begin(), a.aux.end(), -1);
+  a.last_out.clear();                                  // every LED is sent again on the next tick
+  for (auto& s : a.hid_sent) s.clear();
+  std::fill(a.hid_time.begin(), a.hid_time.end(), -1e9);
+  DH_LOG(Info, "controller %s: decks %s", a.map->name.c_str(), off ? "3/4" : "1/2");
+}
+
+void ControllerHub::set_device_options(const std::string& mapping_name, const DeviceOptions& o) {
+  const DeviceOptions v = sanitised(o);
   std::lock_guard<std::mutex> lock(mutex_);
+  const auto it = options_.find(mapping_name);
+  const DeviceOptions before = it == options_.end() ? DeviceOptions{} : it->second;
   options_[mapping_name] = v;
+  shape_options(mapping_name, before, v);
+}
+
+// What a change of options does to controllers that are already connected.
+void ControllerHub::shape_options(const std::string& name, const DeviceOptions& before, const DeviceOptions& after) {
+  for (Active& a : active_) {
+    if (a.map->name != name) continue;
+    if (before.deck_pair != after.deck_pair) apply_layer(a, after.deck_pair == 1 ? 1 : 0);
+    for (int d = 0; d < kMaxDecks; ++d) {  // touch now ignored, or no longer held back: let go of the platter
+      if (!a.touched[d] || !(!after.jog_vinyl || (a.release_pending[d] && !after.jog_finish_scratch))) continue;
+      Command c;
+      c.deck = static_cast<std::uint8_t>(d);
+      c.op = Op::JogTouch;
+      c.i = 0;
+      sink_.command(c);
+      a.touched[d] = false;
+      a.release_pending[d] = false;
+    }
+    if (before.pickup != after.pickup || before.crossfader_curve != after.crossfader_curve || before.eq_kill != after.eq_kill ||
+        before.invert_fader != after.invert_fader || before.invert_crossfader != after.invert_crossfader ||
+        before.invert_tempo != after.invert_tempo || before.filter_snap != after.filter_snap) {
+      std::fill(a.engaged.begin(), a.engaged.end(), 0);  // the control now means something else: take over again
+      std::fill(a.last_v.begin(), a.last_v.end(), -1.0f);
+    }
+  }
+}
+
+int ControllerHub::deck_layer(const std::string& mapping_name) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const Active& a : active_)
+    if (a.map->name == mapping_name) return a.deck_off ? 1 : 0;
+  return 0;
+}
+
+bool ControllerHub::switch_decks(const std::string& mapping_name, int layer) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto oi = options_.find(mapping_name);
+  if (oi == options_.end() || oi->second.deck_pair != static_cast<int>(DeckPair::Switchable)) return false;
+  bool any = false;
+  for (Active& a : active_) {
+    if (a.map->name != mapping_name || !a.two_deck) continue;
+    apply_layer(a, layer < 0 ? (a.deck_off ? 0 : 1) : (layer ? 1 : 0));
+    any = true;
+  }
+  return any;
 }
 
 DeviceOptions ControllerHub::device_options(const std::string& mapping_name) const {
@@ -1141,7 +1324,7 @@ void ControllerHub::handle(Active& a, std::uint8_t status, std::uint8_t d1, std:
   const auto range = a.map->index.equal_range(static_cast<std::uint16_t>(status << 8 | d1));
   for (auto it = range.first; it != range.second; ++it) {
     const std::size_t idx = it->second;
-    const InRule& r = a.map->in[idx];
+    const InRule r = effective(a, a.map->in[idx]);
     switch (r.kind) {
       case InKind::Button: dispatch_button(a, idx, r, d2 > 0); break;
       case InKind::Abs:
@@ -1164,9 +1347,14 @@ void ControllerHub::dispatch_button(Active& a, std::size_t idx, const InRule& r,
   if (pressed) {
     if (!allowed(a, r)) return;
     a.down[idx] = 1;
+    a.swallow[idx] = 0;
   } else {
     const bool was = a.down[idx] != 0;
     a.down[idx] = 0;
+    if (!was && a.swallow[idx]) {  // a deck switch already released it
+      a.swallow[idx] = 0;
+      return;
+    }
     if (filtered && !was) return;  // its press was routed elsewhere (other layer or mode)
   }
   button(a, idx, r, pressed);
@@ -1200,7 +1388,7 @@ void ControllerHub::handle_hid(Active& a, int report_id, const std::uint8_t* d, 
   const auto rules = a.map->hid_index.find(report_id);
   if (rules == a.map->hid_index.end()) return;
   for (const std::size_t idx : rules->second) {
-    const InRule& r = a.map->in[idx];
+    const InRule r = effective(a, a.map->in[idx]);
     std::int64_t raw = 0;
     if (!hid_read(r.hid, d, n, raw)) continue;  // short report: ignore
     const bool had = a.hid_seen[idx] != 0;
@@ -1304,10 +1492,27 @@ void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pre
         press(Op::TempoRange);
       }
       break;
-    case Action::JogTouch:
-      c.op = Op::JogTouch;
-      c.i = pressed ? 1 : 0;
-      sink_.command(c);
+    case Action::JogTouch: {
+      const auto oi = options_.find(a.map->name);
+      const bool vinyl = oi == options_.end() || oi->second.jog_vinyl;
+      const bool finish = oi != options_.end() && oi->second.jog_finish_scratch;
+      if (vinyl) {
+        if (pressed) {
+          a.jog_turns[r.deck] = a.jog_turns_prev[r.deck] = 0;
+          if (a.release_pending[r.deck]) a.release_pending[r.deck] = false;  // grabbed again: still touched
+          else if (!a.touched[r.deck]) { c.op = Op::JogTouch; c.i = 1; sink_.command(c); }
+          a.touched[r.deck] = true;
+        } else if (finish && a.touched[r.deck] && a.jog_turns[r.deck] + a.jog_turns_prev[r.deck] > 0) {
+          a.release_pending[r.deck] = true;  // still spinning: tick() lets go once it has stopped
+          a.release_since[r.deck] = now_;
+        } else if (a.touched[r.deck] || a.release_pending[r.deck]) {
+          a.touched[r.deck] = false;
+          a.release_pending[r.deck] = false;
+          c.op = Op::JogTouch;
+          c.i = 0;
+          sink_.command(c);
+        }
+      }
       if (!pressed && a.jog_ticks[r.deck] != 0) {
         DH_LOG(Debug, "jog deck %d: %.0f ticks while touched (one full turn should equal ticks_per_rev)",
                r.deck + 1, a.jog_ticks[r.deck]);
@@ -1315,6 +1520,14 @@ void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pre
       if (!pressed && a.jog_ticks[r.deck] != 0) last_ticks_[a.map->name] = std::fabs(a.jog_ticks[r.deck]);
       a.jog_ticks[r.deck] = 0;
       break;
+    }
+    case Action::DeckSwitch: {
+      const auto oi = options_.find(a.map->name);
+      if (oi == options_.end() || oi->second.deck_pair != static_cast<int>(DeckPair::Switchable)) break;
+      if (r.hold) apply_layer(a, pressed ? 1 : 0);
+      else if (pressed) apply_layer(a, r.has_value ? (r.value > 0 ? 1 : 0) : (a.deck_off ? 0 : 1));
+      break;
+    }
     case Action::LoopIn: press(Op::LoopIn); break;
     case Action::LoopOut: press(Op::LoopOut); break;
     case Action::LoopToggle: c.f = r.amount; press(Op::LoopToggle); break;
@@ -1549,6 +1762,37 @@ void ControllerHub::button(Active& a, std::size_t idx, const InRule& r, bool pre
         }
       }
       break;
+    case Action::SeqRun:
+    case Action::SeqRecord:
+      if (pressed) {
+        c.i = r.has_value ? (r.value > 0 ? 1 : 0) : -1;
+        send(r.action == Action::SeqRun ? Op::SeqRun : Op::SeqRecord);
+      }
+      break;
+    case Action::SeqPattern:
+      if (pressed) {
+        c.i = r.slot;
+        c.d = held(a, "shift", r.deck) ? 1.0 : 0.0;
+        send(Op::SeqSelect);
+      }
+      break;
+    case Action::Slice:
+      if (pressed) {
+        const int k = r.has_value ? static_cast<int>(r.value) - 1 : 0;
+        if (k >= 0 && k < kSamplerSlots) {
+          c.deck = static_cast<std::uint8_t>(k);
+          if (held(a, "shift", r.deck)) {
+            c.i = cache_.slices[k] ? 0 : 8;
+            cache_.slices[k] = static_cast<std::uint8_t>(c.i);
+            send(Op::SamplerSlice);
+          } else {
+            c.i = r.slot;
+            c.f = 0;
+            send(Op::SamplerSliceTrigger);
+          }
+        }
+      }
+      break;
     case Action::SamplerStop:
       if (pressed) {
         c.deck = static_cast<std::uint8_t>(r.has_slot ? sampler_slot : 0);
@@ -1642,14 +1886,41 @@ bool ControllerHub::engine_value(const InRule& r, float& e) const {
 }
 
 void ControllerHub::value(Active& a, std::size_t idx, const InRule& r, float v) {
-  if (r.invert) v = 1.0f - v;
-  const float dz = r.deadzone >= 0 ? r.deadzone : a.map->deadzone_default;
+  const auto opt = options_.find(a.map->name);
+  const DeviceOptions none;
+  const DeviceOptions& o = opt != options_.end() ? opt->second : none;
+  bool invert = r.invert;
+  switch (r.action) {
+    case Action::Fader: invert = invert != o.invert_fader; break;
+    case Action::Crossfader: invert = invert != o.invert_crossfader; break;
+    case Action::Tempo: invert = invert != o.invert_tempo; break;
+    default: break;
+  }
+  if (invert) v = 1.0f - v;
+  float dz = r.deadzone >= 0 ? r.deadzone : a.map->deadzone_default;
+  if (r.action == Action::Filter && o.filter_snap) dz = std::max(dz, 0.03f);
   if (dz > 0) {  // centre detent: a flat zone around 0.5, rescaled so the ends stay reachable
     const float off = v - 0.5f;
     v = std::fabs(off) <= dz ? 0.5f : 0.5f + (off > 0 ? 1.0f : -1.0f) * (std::fabs(off) - dz) / (0.5f - dz) * 0.5f;
   }
-  const auto oi = options_.find(a.map->name);
-  const int dev_pickup = oi != options_.end() ? oi->second.pickup : -1;
+  switch (r.action) {  // response shaping, before soft takeover so both compare in the engine's terms
+    case Action::Crossfader:
+      if (o.crossfader_curve == static_cast<int>(CrossfaderCurve::Cut)) {
+        v = std::max(0.0f, std::min(1.0f, 0.5f + (v - 0.5f) / 0.8f));  // full on either side 10 % before the end
+      } else if (o.crossfader_curve == static_cast<int>(CrossfaderCurve::Smooth)) {
+        const float x = v * 2.0f - 1.0f;
+        v = 0.5f + 0.5f * (x < 0 ? -1.0f : 1.0f) * std::pow(std::fabs(x), 1.5f);  // soft near the ends, steeper through the middle
+      }
+      break;
+    case Action::EqHigh: case Action::EqMid: case Action::EqLow:
+      if (o.eq_kill) {
+        const float kill = 0.04f;
+        v = v <= kill ? 0.0f : (v < 0.5f ? (v - kill) / (0.5f - kill) * 0.5f : v);
+      }
+      break;
+    default: break;
+  }
+  const int dev_pickup = o.pickup;
   const bool pickup = r.pickup >= 0 ? r.pickup == 1 : dev_pickup >= 0 ? dev_pickup == 1 : a.map->pickup_default;
   if (pickup && !a.engaged[idx]) {
     float e = 0;
@@ -1710,10 +1981,11 @@ void ControllerHub::delta(Active& a, const InRule& r, int steps) {
     case Action::Browse: sink_.browse(static_cast<int>(std::lround(steps * r.amount))); break;
     case Action::Jog:
       a.jog_ticks[r.deck] += steps;
+      ++a.jog_turns[r.deck];
       c.op = Op::JogTurn;
-      c.i = r.top ? 1 : 0;
       {
         const auto oi = options_.find(a.map->name);
+        c.i = r.top && (oi == options_.end() || oi->second.jog_vinyl) ? 1 : 0;  // bend-only: the platter top bends too
         const double scale = oi != options_.end() ? oi->second.jog_scale : 1.0;
         const double own = oi != options_.end() && oi->second.ticks_per_rev > 0 ? oi->second.ticks_per_rev : 0.0;
         c.d = static_cast<double>(steps) * r.amount * scale / (own > 0 ? own : (r.ticks_per_rev > 0 ? r.ticks_per_rev : a.map->ticks_per_rev));
@@ -1783,8 +2055,26 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, double now) {
 
 void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView* mixer, const SamplerView* samplers,
                          int sampler_count, double now) {
-  if (!io_ && !hid_io_) return;
   std::lock_guard<std::mutex> lock(mutex_);
+  now_ = now;
+  if (samplers)
+    for (int k = 0; k < sampler_count && k < kSamplerSlots; ++k) cache_.slices[k] = samplers[k].slices;
+  for (Active& a : active_) {  // platters released while still spinning: let go once they have stopped
+    for (int d = 0; d < kMaxDecks; ++d) {
+      if (a.release_pending[d] && (a.jog_turns[d] == 0 || now - a.release_since[d] > 1.5)) {
+        a.release_pending[d] = false;
+        a.touched[d] = false;
+        Command c;
+        c.deck = static_cast<std::uint8_t>(d);
+        c.op = Op::JogTouch;
+        c.i = 0;
+        sink_.command(c);
+      }
+      a.jog_turns_prev[d] = a.jog_turns[d];
+      a.jog_turns[d] = 0;
+    }
+  }
+  if (!io_ && !hid_io_) return;
   for (int i = 0; i < deck_count && i < kMaxDecks; ++i) {
     cache_.deck[i] = decks[i];
     cache_.have_deck[i] = true;
@@ -1807,10 +2097,13 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
       const std::array<int, 6> hkey = {r.hid_field.report, r.hid_field.byte, r.hid_field.size, r.hid_field.lo,
                                        r.hid_field.hi, r.hid_field.big ? 1 : 0};
       const bool deckless = r.state == LedState::MicOn || r.state == LedState::MicTalkover || r.master_unit || r.fx_unit >= 0 || r.state == LedState::MasterCue || r.state == LedState::Modifier || r.state == LedState::SamplerPlaying;
-      if (r.deck >= deck_count && !deckless) continue;
-      const DeckView& d = r.deck < deck_count ? decks[r.deck] : blank;
+      const bool own_deck = r.has_deck && !r.master_unit && r.fx_unit < 0 && r.state != LedState::MicOn && r.state != LedState::MicTalkover &&
+                            r.state != LedState::MasterCue && r.state != LedState::SamplerPlaying;
+      const int rdeck = (a.deck_off && a.two_deck && own_deck) ? r.deck + a.deck_off : r.deck;
+      if (rdeck >= deck_count && !deckless) continue;
+      const DeckView& d = rdeck < deck_count ? decks[rdeck] : blank;
       const std::uint16_t addr = static_cast<std::uint16_t>(r.status << 8 | r.data1);
-      if (r.mode >= 0 && r.state != LedState::PadMode && (a.pad_mode[r.deck] == r.mode) == r.mode_not) {
+      if (r.mode >= 0 && r.state != LedState::PadMode && (a.pad_mode[rdeck] == r.mode) == r.mode_not) {
         if (r.hid) hwant.emplace(hkey, r.off);  // belongs to another pad mode: dark unless an active rule claims it
         else want.emplace(addr, r.off);
         continue;
@@ -1831,8 +2124,8 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
           case LedState::HotCue: on = d.hot_cue[r.slot] >= 0; break;
           case LedState::Loaded: on = d.loaded; break;
           case LedState::PadMode:
-            on = a.pad_mode[r.deck] == r.mode;
-            if (!on && r.alt >= 0 && a.pad_mode[r.deck] == r.alt) {  // the second mode of the pair: blinking, or its own level
+            on = a.pad_mode[rdeck] == r.mode;
+            if (!on && r.alt >= 0 && a.pad_mode[rdeck] == r.alt) {  // the second mode of the pair: blinking, or its own level
               if (r.alt_on >= 0) forced = r.alt_on;
               else on = blink_on;
             }
@@ -1849,7 +2142,7 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
           case LedState::Slip: on = d.slip; break;
           case LedState::Reverse: on = d.reverse; break;
           case LedState::FxOn: {
-            const int tgt = r.fx_unit >= 0 ? fx_assigned_[r.fx_unit] : (r.master_unit ? kFxMaster : r.deck);
+            const int tgt = r.fx_unit >= 0 ? fx_assigned_[r.fx_unit] : (r.master_unit ? kFxMaster : rdeck);
             const FxSlotView* fx = tgt == kFxMaster ? (mixer ? &mixer->fx[r.slot] : nullptr)
                                    : (tgt < deck_count ? &decks[tgt].fx[r.slot] : nullptr);
             on = fx && fx->on && (r.effect < 0 || static_cast<int>(fx->kind) == r.effect);
@@ -1875,7 +2168,7 @@ void ControllerHub::tick(const DeckView* decks, int deck_count, const MixerView*
           case LedState::ColorFx: on = r.effect >= 0 ? d.color_fx == r.effect : d.color_fx != static_cast<int>(ColorFx::Filter); break;
           case LedState::MicOn: on = mic_on_; break;
           case LedState::MicTalkover: on = mic_talk_; break;
-          case LedState::Modifier: on = r.modifier >= 0 && (a.held[r.modifier][0] || a.held[r.modifier][1 + r.deck]); break;
+          case LedState::Modifier: on = r.modifier >= 0 && (a.held[r.modifier][0] || a.held[r.modifier][1 + rdeck]); break;
           default: break;
         }
         byte = forced >= 0 ? forced : (on ? r.on : r.off);
@@ -2037,6 +2330,10 @@ std::vector<LearnChoice> learn_choices(int decks) {
   add("Master effect", "Wet/dry", "fx_wet unit=master slot=1");
   for (int s = 1; s <= 16; ++s) add("Sampler", "Sampler pad " + std::to_string(s), "sampler slot=" + std::to_string(s));
   add("Sampler", "Stop all samples", "sampler_stop");
+  add("Sampler", "Sequencer run / stop", "seq_run");
+  add("Sampler", "Sequencer record", "seq_record");
+  for (int n = 1; n <= kSeqPatterns; ++n) add("Sampler", "Sequencer pattern " + std::to_string(n), "seq_pattern slot=" + std::to_string(n));
+  for (int j = 1; j <= 16; ++j) add("Sampler", "Slice " + std::to_string(j) + " of sampler slot 1", "slice slot=" + std::to_string(j) + " value=1");
   return v;
 }
 

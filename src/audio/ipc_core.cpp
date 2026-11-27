@@ -21,7 +21,7 @@ bool finite_in(double v, double lo, double hi) { return std::isfinite(v) && v >=
 void fingerprint(std::uint32_t (&fp)[12]) {
   fp[0] = sizeof(DeckView);
   fp[1] = sizeof(MixerView);
-  fp[2] = sizeof(SamplerView);
+  fp[2] = static_cast<std::uint32_t>(sizeof(SamplerView) * 10000 + sizeof(StepSeqView));
   fp[3] = sizeof(RecInfo);
   fp[4] = sizeof(DeviceInfo);
   fp[5] = sizeof(HubInfo);
@@ -272,13 +272,15 @@ Scope scope_of(Op op) {
     case Op::MicOn: case Op::MicLevel: case Op::MicEqLow: case Op::MicEqHigh: case Op::MicTalkover:
     case Op::MicTalkoverDepth: case Op::MicMonitor: case Op::MicGate: case Op::MetronomeLevel:
     case Op::PreviewPlay: case Op::PreviewStop: case Op::PreviewSeek: case Op::PreviewLevel: case Op::PreviewMaster:
+    case Op::SeqRun: case Op::SeqBpm: case Op::SeqSwing: case Op::SeqSelect: case Op::SeqRecord: case Op::SeqClear:
       return Scope::Global;
     case Op::FxSelect: case Op::FxEnable: case Op::FxWet: case Op::FxTime: case Op::FxParam:
       return Scope::Fx;
     case Op::SamplerTrigger: case Op::SamplerSync: case Op::SamplerLoop: case Op::SamplerGain:
+    case Op::SamplerSlice: case Op::SamplerSliceTrigger: case Op::SamplerScratch: case Op::SeqStep:
       return Scope::Slot;
     case Op::Load: case Op::SamplerLoad: case Op::ReplaceMeta: case Op::PreviewLoad: case Op::SchedInsert: case Op::SchedCancel: case Op::SchedCancelAll:
-    case Op::FxChainSwap: case Op::FxUnitSet: case Op::FxChainSet: case Op::StemAttach: case Op::Count:
+    case Op::FxChainSwap: case Op::FxUnitSet: case Op::FxChainSet: case Op::StemAttach: case Op::SeqPatternSwap: case Op::Count:
       return Scope::Reject;
     default:
       return Scope::Deck;
@@ -313,6 +315,35 @@ bool validate_command(const WireCommand& w, Command& out) {
       break;
     case Op::SamplerStop:
       if (w.i < -1 || w.i >= kSamplerSlots) return false;
+      break;
+    case Op::SamplerSlice:
+      if (w.i != 0 && w.i != 8 && w.i != 16) return false;
+      break;
+    case Op::SamplerSliceTrigger:
+      if (w.i < 0 || w.i >= 16) return false;
+      if (!finite_in(w.f, -0.001, 1.001)) return false;
+      break;
+    case Op::SamplerScratch:
+      if (w.i < 0 || w.i > 2) return false;
+      if (!finite_in(w.d, -3600, 3600)) return false;
+      break;
+    case Op::SeqRun: case Op::SeqRecord:
+      if (w.i < -1 || w.i > 1) return false;
+      break;
+    case Op::SeqBpm:
+      if (!finite_in(w.f, -0.001, 400.001)) return false;
+      break;
+    case Op::SeqSwing:
+      if (!finite_in(w.f, -0.001, 0.751)) return false;
+      break;
+    case Op::SeqStep:
+      if (w.i < 0 || w.i >= kSeqPatterns * kSeqSteps || !finite_in(w.f, -1.001, 1.001)) return false;
+      break;
+    case Op::SeqSelect:
+      if (w.i < 0 || w.i >= kSeqPatterns) return false;
+      break;
+    case Op::SeqClear:
+      if (w.i < -1 || w.i >= kSeqPatterns || !finite_in(w.d, -1.001, 15.001)) return false;
       break;
     case Op::RecStart:
       if (w.i < 0 || w.i > 1) return false;  // bit 0: leave the microphone out

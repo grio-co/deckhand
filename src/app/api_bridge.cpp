@@ -175,10 +175,50 @@ Json merge_json(const MergeResult& m) {
   j.set("loops_copied", m.loops_copied);
   j.set("grid_copied", m.grid_copied);
   j.set("history_moved", m.history_moved);
+  j.set("mix_links_moved", m.mix_links_moved);
   Json filled = Json::array();
   for (const std::string& f : m.fields_filled) filled.push_back(f);
   j.set("fields_filled", std::move(filled));
   return j;
+}
+
+Json mix_link_json(const MixLink& l) {
+  Json j = Json::object();
+  j.set("id", l.id);
+  j.set("from_track", l.from_track);
+  j.set("from_ms", l.from_ms);
+  j.set("to_track", l.to_track);
+  j.set("to_ms", l.to_ms);
+  if (l.transition_beats) j.set("transition_beats", *l.transition_beats);
+  if (l.transition_type) j.set("transition_type", *l.transition_type);
+  if (!l.label.empty()) j.set("label", l.label);
+  j.set("created_at", l.created_at);
+  return j;
+}
+
+// Fills the fields of a link from a request body (only what is given). Returns an error text, empty when fine.
+std::string mix_link_from_body(const Json& b, MixLink& l) {
+  if (b["from_track"].is_number()) l.from_track = b["from_track"].as_int();
+  if (b["to_track"].is_number()) l.to_track = b["to_track"].as_int();
+  if (b["from_ms"].is_number()) l.from_ms = b["from_ms"].as_double();
+  if (b["to_ms"].is_number()) l.to_ms = b["to_ms"].as_double();
+  if (b["label"].is_string()) l.label = b["label"].as_string();
+  if (b.contains("transition_beats")) {
+    if (b["transition_beats"].is_null()) l.transition_beats.reset();
+    else if (b["transition_beats"].is_number() && b["transition_beats"].as_double() >= 0 && b["transition_beats"].as_double() <= 128) l.transition_beats = b["transition_beats"].as_double();
+    else return "transition_beats must be 0..128 or null";
+  }
+  if (b.contains("transition_type")) {
+    if (b["transition_type"].is_null()) l.transition_type.reset();
+    else {
+      const std::string t = b["transition_type"].is_string() ? b["transition_type"].as_string() : std::string();
+      if (t != "crossfade" && t != "cut" && t != "fade" && t != "echo_out") return "transition_type must be crossfade, cut, fade, echo_out or null";
+      l.transition_type = t;
+    }
+  }
+  if (l.from_track <= 0 || l.to_track <= 0 || l.from_track == l.to_track) return "from_track and to_track must be two different tracks";
+  if (!std::isfinite(l.from_ms) || !std::isfinite(l.to_ms) || l.from_ms < 0 || l.to_ms < 0) return "from_ms and to_ms must be positions in milliseconds";
+  return {};
 }
 
 bool id_list(const Json& v, std::vector<std::int64_t>& out) {
@@ -1336,6 +1376,150 @@ struct ApiBridge::Impl {
       Response resp = next_response(v.track_id, r);
       return resp;
     });
+    // ---- linked mix points (schema 10) and vocal regions ----
+    s.add_route("GET", "/v1/library/mix-links", "library:read", [this](const Request& r) {
+      const auto q = [&](const char* k) {
+        const auto it = r.query.find(k);
+        return it == r.query.end() ? std::string() : it->second;
+      };
+      const std::int64_t track = std::atoll(q("track").c_str()), from = std::atoll(q("from").c_str()), to = std::atoll(q("to").c_str());
+      if (!track && !from && !to) return Response::error(400, "give track (links out of and into it), from, to, or from and to (links between two tracks)");
+      std::vector<MixLink> links;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (from && to) links = lib.mix_links_between(from, to);
+        else if (from) links = lib.mix_links_from(from);
+        else if (to) links = lib.mix_links_to(to);
+        else {
+          links = lib.mix_links_from(track);
+          for (const MixLink& l : lib.mix_links_to(track)) links.push_back(l);
+        }
+      }
+      Json items = Json::array();
+      for (const MixLink& l : links) items.push_back(mix_link_json(l));
+      Json j = Json::object();
+      j.set("items", std::move(items));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("GET", "/v1/library/tracks/{id}/mix-links", "library:read", [this](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such track");
+      Json out = Json::array(), in = Json::array(), j = Json::object();
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      if (!lib.track(id)) return Response::error(404, "no such track");
+      for (const MixLink& l : lib.mix_links_from(id)) out.push_back(mix_link_json(l));
+      for (const MixLink& l : lib.mix_links_to(id)) in.push_back(mix_link_json(l));
+      j.set("track_id", id);
+      j.set("from", std::move(out));
+      j.set("to", std::move(in));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/mix-links", "library:write", [this](const Request& r) {
+      MixLink l;
+      const std::string bad = mix_link_from_body(r.body, l);
+      if (!bad.empty()) return Response::error(400, bad);
+      std::int64_t id = 0;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (!lib.track(l.from_track) || !lib.track(l.to_track)) return Response::error(404, "no such track");
+        EditScope api_edit("api");
+        id = lib.add_mix_link(l);
+        if (id > 0) l = *lib.mix_link(id);
+      }
+      if (id <= 0) return Response::error(400, "the link was not stored");
+      host.api_links_changed();
+      Response ok = Response::ok(mix_link_json(l));
+      ok.status = 201;
+      return ok;
+    });
+    s.add_route("GET", "/v1/library/mix-links/{id}", "library:read", [this](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such link");
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      const auto l = lib.mix_link(id);
+      if (!l) return Response::error(404, "no such link");
+      return Response::ok(mix_link_json(*l));
+    });
+    s.add_route("PUT", "/v1/library/mix-links/{id}", "library:write", [this](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such link");
+      MixLink l;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        const auto cur = lib.mix_link(id);
+        if (!cur) return Response::error(404, "no such link");
+        l = *cur;
+        const std::string bad = mix_link_from_body(r.body, l);
+        if (!bad.empty()) return Response::error(400, bad);
+        if (!lib.track(l.from_track) || !lib.track(l.to_track)) return Response::error(404, "no such track");
+        EditScope api_edit("api");
+        if (!lib.update_mix_link(l)) return Response::error(400, "the link was not changed");
+        l = *lib.mix_link(id);
+      }
+      host.api_links_changed();
+      return Response::ok(mix_link_json(l));
+    });
+    s.add_route("DELETE", "/v1/library/mix-links/{id}", "library:write", [this](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such link");
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        EditScope api_edit("api");
+        if (!lib.remove_mix_link(id)) return Response::error(404, "no such link");
+      }
+      host.api_links_changed();
+      return Response::ok();
+    });
+    // Links the two playheads: "when deck A reaches here, deck B starts from where it is now". body: from_deck, to_deck (1..4).
+    s.add_route("POST", "/v1/mix-links/from-decks", "library:write", [this](const Request& r) {
+      const std::int64_t a = r.body["from_deck"].as_int(0), b = r.body["to_deck"].as_int(0);
+      if (a < 1 || a > kMaxDecks || b < 1 || b > kMaxDecks || a == b) return Response::error(400, "from_deck and to_deck must be two different decks (1..4)");
+      IEngine& eng = host.api_engine();
+      MixLink l;
+      l.from_track = host.api_deck_track(static_cast<int>(a - 1));
+      l.to_track = host.api_deck_track(static_cast<int>(b - 1));
+      const DeckView da = eng.deck(static_cast<int>(a - 1)), db = eng.deck(static_cast<int>(b - 1));
+      if (l.from_track <= 0 || l.to_track <= 0 || da.sample_rate <= 0 || db.sample_rate <= 0) return Response::error(409, "both decks need a loaded library track");
+      if (l.from_track == l.to_track) return Response::error(409, "both decks hold the same track");
+      l.from_ms = da.position / da.sample_rate * 1000.0;
+      l.to_ms = db.position / db.sample_rate * 1000.0;
+      std::int64_t id = 0;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        EditScope api_edit("api");
+        id = lib.add_mix_link(l);
+        if (id > 0) l = *lib.mix_link(id);
+      }
+      if (id <= 0) return Response::error(400, "the link was not stored");
+      host.api_links_changed();
+      Response ok = Response::ok(mix_link_json(l));
+      ok.status = 201;
+      return ok;
+    });
+    s.add_route("GET", "/v1/library/tracks/{id}/vocals", "library:read", [this](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such track");
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      if (!lib.track(id)) return Response::error(404, "no such track");
+      const auto v = lib.vocals(id);
+      Json j = Json::object();
+      j.set("track_id", id);
+      j.set("analysed", v.has_value());
+      if (v) {
+        j.set("version", static_cast<std::int64_t>(v->version));
+        j.set("current_version", static_cast<std::int64_t>(kVocalAnalysisVersion));
+        j.set("source", v->source);
+        Json regions = Json::array();
+        for (const StoredVocalRegion& g : v->regions) {
+          Json o = Json::object();
+          o.set("start_ms", g.start_ms);
+          o.set("end_ms", g.end_ms);
+          regions.push_back(std::move(o));
+        }
+        j.set("regions", std::move(regions));
+      }
+      return Response::ok(std::move(j));
+    });
     s.add_route("GET", "/v1/library/tracks/{id}/transitions", "library:read", [this](const Request& r) {
       std::int64_t id = 0;
       std::lock_guard<std::mutex> lock(lib_mutex);
@@ -2171,6 +2355,113 @@ struct ApiBridge::Impl {
     s.add_route("POST", "/v1/sampler/{slot}/{control}", "control", [this](const Request& r) {
       return control("sampler." + r.params.at("slot") + "." + r.params.at("control"), r.body);
     });
+    // ---- step sequencer and slicing (protocol 8) ----
+    s.add_route("GET", "/v1/sequencer", "read", [this](const Request&) {
+      const StepSeqView v = host.api_engine().step_seq();
+      Json j = Json::object();
+      j.set("running", v.running != 0);
+      j.set("recording", v.recording != 0);
+      j.set("pattern", static_cast<std::int64_t>(v.current) + 1);
+      j.set("queued", v.queued == 0xFF ? static_cast<std::int64_t>(0) : static_cast<std::int64_t>(v.queued) + 1);
+      j.set("step", v.step == 0xFF ? static_cast<std::int64_t>(0) : static_cast<std::int64_t>(v.step) + 1);
+      j.set("follows_deck", v.locked != 0);
+      j.set("bpm", static_cast<double>(v.bpm));
+      j.set("swing", static_cast<double>(v.swing));
+      Json pats = Json::array();
+      for (int i = 0; i < kSeqPatterns; ++i) pats.push_back(Json(seq_pattern_to_text(v.pattern[i])));
+      j.set("patterns", std::move(pats));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("GET", "/v1/sequencer/patterns/{pattern}", "read", [this](const Request& r) {
+      std::int64_t n = 0;
+      if (!int_param(r, "pattern", n) || n < 1 || n > kSeqPatterns) return Response::error(404, "no such pattern (1..8)");
+      Json j = Json::object();
+      j.set("pattern", n);
+      j.set("text", host.api_engine().seq_pattern_text(static_cast<int>(n - 1)));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("PUT", "/v1/sequencer/patterns/{pattern}", "control", [this](const Request& r) {
+      std::int64_t n = 0;
+      if (!int_param(r, "pattern", n) || n < 1 || n > kSeqPatterns) return Response::error(404, "no such pattern (1..8)");
+      if (!host.api_engine().seq_pattern_set(static_cast<int>(n - 1), r.body["text"].as_string())) return Response::error(400, "not a valid pattern text (see docs/SEQUENCER.md)");
+      Json j = Json::object();
+      j.set("pattern", n);
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/sequencer/step", "control", [this](const Request& r) {
+      const std::int64_t pat = r.body["pattern"].is_number() ? r.body["pattern"].as_int() : host.api_engine().step_seq().current + 1;
+      const std::int64_t step = r.body["step"].as_int(0), slot = r.body["slot"].as_int(0);
+      if (pat < 1 || pat > kSeqPatterns || step < 1 || step > kSeqSteps || slot < 1 || slot > kSamplerSlots)
+        return Response::error(400, "pattern 1..8, step 1..16 and slot 1..16 are needed");
+      const double vel = r.body["velocity"].is_number() ? r.body["velocity"].as_double() : -1.0;
+      if (vel > 1.0) return Response::error(400, "velocity is 0..1");
+      host.api_engine().seq_step(static_cast<int>(pat - 1), static_cast<int>(step - 1), static_cast<int>(slot - 1), r.body["on"].as_bool(true),
+                                 static_cast<float>(vel));
+      return Response::ok();
+    });
+    s.add_route("POST", "/v1/sequencer/{action}", "control", [this](const Request& r) {
+      const std::string& a = r.params.at("action");
+      const Json& b = r.body;
+      std::string name, error;
+      if (a == "run" || a == "record") name = "seq." + a;
+      else if (a == "bpm" || a == "swing") name = "seq." + a;
+      else if (a == "select" || a == "queue") {
+        const std::int64_t n = b["pattern"].as_int(0);
+        if (n < 1 || n > kSeqPatterns) return Response::error(400, "pattern 1..8 is needed");
+        name = "seq.pattern." + std::to_string(n) + (a == "queue" || b["at_next_bar"].as_bool(false) ? ".queue" : ".select");
+      } else if (a == "clear") name = "seq.clear";
+      else return Response::error(404, "use run, record, bpm, swing, select, queue or clear");
+      bool has_value = false;
+      double v = 0;
+      if (a == "run" || a == "record") {
+        const Json& on = b["on"];
+        has_value = on.is_bool() || on.is_number();
+        v = on.is_bool() ? (on.as_bool() ? 1.0 : 0.0) : on.as_double();
+      } else if (a == "bpm" || a == "swing") {
+        if (!b["value"].is_number()) return Response::error(400, "value is needed");
+        has_value = true;
+        v = b["value"].as_double();
+      } else if (a == "clear") {  // none = the pattern being played; "all": true; "pattern": n
+        if (b["all"].as_bool(false)) has_value = true, v = 0;
+        else if (b["pattern"].is_number()) has_value = true, v = static_cast<double>(b["pattern"].as_int());
+      }
+      std::vector<Command> commands;
+      if (!build_control(host.api_engine(), name, has_value, v, commands, error)) return Response::error(400, error);
+      for (Command c : commands) {
+        if (a == "clear" && b["slot"].is_number() && b["slot"].as_int() >= 1 && b["slot"].as_int() <= kSamplerSlots) c.d = static_cast<double>(b["slot"].as_int() - 1);
+        host.api_engine().send(c);
+      }
+      Json j = Json::object();
+      j.set("control", name);
+      return Response::ok(std::move(j));
+    });
+    s.add_route("GET", "/v1/sampler/slices", "read", [this](const Request&) {
+      Json a = Json::array();
+      for (int i = 0; i < kSamplerSlots; ++i) {
+        const SamplerView sv = host.api_engine().sampler(i);
+        Json j = Json::object();
+        j.set("slot", static_cast<std::int64_t>(i) + 1);
+        j.set("loaded", sv.loaded);
+        j.set("slices", static_cast<std::int64_t>(sv.slices));
+        j.set("last_slice", sv.slice == 0xFF ? static_cast<std::int64_t>(0) : static_cast<std::int64_t>(sv.slice) + 1);
+        j.set("scratching", sv.scratching);
+        a.push_back(std::move(j));
+      }
+      return Response::ok(std::move(a));
+    });
+    s.add_route("POST", "/v1/sampler/{slot}/slices", "control", [this](const Request& r) {
+      std::int64_t slot = 0;
+      if (!int_param(r, "slot", slot) || slot < 1 || slot > kSamplerSlots) return Response::error(404, "no such slot");
+      return control("sampler.slot." + std::to_string(slot) + ".slices", [&] { Json b = Json::object(); b.set("value", r.body["count"]); return b; }());
+    });
+    s.add_route("POST", "/v1/sampler/{slot}/slices/{index}/trigger", "control", [this](const Request& r) {
+      std::int64_t slot = 0, idx = 0;
+      if (!int_param(r, "slot", slot) || slot < 1 || slot > kSamplerSlots) return Response::error(404, "no such slot");
+      if (!int_param(r, "index", idx) || idx < 1 || idx > 16) return Response::error(404, "no such slice (1..16)");
+      Json b = Json::object();
+      if (r.body["velocity"].is_number()) b.set("value", r.body["velocity"]);
+      return control("sampler.slot." + std::to_string(slot) + ".slice." + std::to_string(idx), b);
+    });
     s.add_route("GET", "/v1/recording", "read", [this](const Request&) {
       const RecorderStatus st = host.api_engine().recorder_status();
       Json j = Json::object();
@@ -2353,6 +2644,7 @@ struct ApiBridge::Impl {
         j.set("grid_changed", c.grid_changed);
         j.set("cues_follow", cue_follow_name(c.mode));
         j.set("cues_applied", c.applied);
+        j.set("mix_links_moved", c.mix_links_moved);
         j.set("cues", follow_json(c.proposal));
       }
       if (!dry) host.api_library_changed();
@@ -2374,6 +2666,7 @@ struct ApiBridge::Impl {
       host.api_library_changed();
       Json j = Json::object();
       j.set("batch_id", f.batch_id);
+      j.set("mix_links_moved", f.mix_links_moved);
       j.set("cues", follow_json(f.proposal));
       return Response::ok(std::move(j));
     });

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -32,6 +33,7 @@ struct Tk {
 struct Sim final : AutomixHost {
   Engine eng;
   std::map<std::int64_t, Tk> tracks;
+  Library* links = nullptr;  // set: the host applies linked mix points from this library (the adapter's code)
   PlayQueue queue;
   std::unique_ptr<AutomixService> svc;
   std::vector<AutomixEvent> events;
@@ -47,7 +49,7 @@ struct Sim final : AutomixHost {
   };
   std::vector<Sample> samples;
 
-  Sim() {
+  explicit Sim(Library* lib = nullptr) : links(lib), queue(lib) {
     eng.configure_offline(44100, 2);
     svc = std::make_unique<AutomixService>(*this, queue, nullptr);
     svc->set_listener([this](const AutomixEvent& e) { events.push_back(e); });
@@ -76,6 +78,7 @@ struct Sim final : AutomixHost {
     f.cues.load_cue_ms = t.grid ? t.first_ms : 0;
     f.cues.last_sound_ms = f.duration_ms;
     f.points = t.points;
+    if (links) apply_mix_links(*links, eng, f);
     return f;
   }
   bool request_load(int deck, std::int64_t id) override {
@@ -627,6 +630,60 @@ void test_skip_pause_endless() {
 
 }  // namespace
 
+
+// ---- 7. linked mix points through the same code the application's host uses ----------------------------------------------
+void test_links() {
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "deckhand_test_automix_links";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+  fs::create_directories(dir, ec);
+  double start_without = -1, start_with = -1, b_pos_with = -1, b_pos_without = -1;
+  for (const bool linked : {false, true}) {
+    Library lib((dir / (linked ? "linked.db" : "plain.db")).string());
+    const auto add_track = [&](const char* name) {
+      NewTrack t;
+      t.path = std::string("/music/") + name + ".mp3";
+      t.title = name;
+      t.bpm = 120;
+      t.duration_ms = 60000;
+      return lib.upsert_track(t);
+    };
+    const std::int64_t a = add_track("a"), b = add_track("b");
+    if (linked) {
+      MixLink l;
+      l.from_track = a;
+      l.from_ms = 20000;
+      l.to_track = b;
+      l.to_ms = 10000;
+      CHECK(lib.add_mix_link(l) > 0);
+    }
+    Sim sim(&lib);
+    sim.add(a, 120, 100, 60);
+    sim.add(b, 120, 100, 60);
+    sim.svc->set_settings(base_settings());  // 8 beats; the computed mix-out would be 4 bars (8 s) before the end
+    sim.queue.add_end({a, b});
+    start(sim);
+    CHECK(sim.run_until(80, [](Sim& s) { return s.count_events("automix.transition_start") >= 1; }));
+    const double t = transition_start_seconds(sim);
+    const int i = first_playing(sim, 1);
+    CHECK(i >= 0);
+    const DeckView bd = sim.samples[static_cast<std::size_t>(i)].d[1];
+    const double pos = bd.position / kSr;
+    (linked ? start_with : start_without) = t;
+    (linked ? b_pos_with : b_pos_without) = pos;
+    CHECK(sim.run_until(80, [](Sim& s) { return s.count_events("automix.transition_end") >= 1; }));
+    sim.run(0.5);
+  }
+  std::printf("automix: unlinked B starts at %.2f s (from %.2f s of B); linked at %.2f s (from %.2f s of B)\n", start_without, b_pos_without,
+              start_with, b_pos_with);
+  CHECK(start_without > 40.0);                       // the computed mix-out, near the end of a 60 s track
+  CHECK(start_with > 15.0 && start_with < 17.0);     // mix-out 20 s, 8 beats (4 s) before it
+  CHECK(b_pos_with > 9.5 && b_pos_with < 11.0);      // B comes in from its linked position, not from its start
+  CHECK(b_pos_without < 2.0);
+  fs::remove_all(dir, ec);
+}
+
 int main() {
   test_crossfade();
   test_gap_not_synced();
@@ -634,6 +691,7 @@ int main() {
   test_override();
   test_empty_and_failures();
   test_skip_pause_endless();
+  test_links();
   std::puts("test_automix ok");
   return 0;
 }

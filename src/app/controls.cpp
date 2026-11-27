@@ -402,6 +402,216 @@ bool read_stem_control(const IEngine& engine, std::string_view name, double& val
   }
   return false;
 }
+
+// ---- step sequencer and slicing controls (protocol 8) -------------------------------------------------------------------
+//   seq.run, seq.record (toggle)            seq.bpm (0 = follow the decks / 120)     seq.swing (0..0.75)
+//   seq.pattern.N.select / .queue (N 1..8)  seq.clear (none = this pattern, 0 = all, N = pattern N)
+//   seq.step.S.slotK (S 1..16, K 1..16): a step of the pattern being played: 0 off, 0..1 on at that velocity, none = toggle
+//   sampler.slot.K.slices (0 / 8 / 16)   sampler.slot.K.slice.J (J 1..16, value = velocity 0..1)
+//   sampler.slot.K.scratch (1 grab, 0 release, none = toggle)   sampler.slot.K.scratch.delta (seconds of the sample, signed)
+struct SeqCtl {
+  enum Kind { Run, Record, Bpm, Swing, Select, Queue, Clear, Step, Slices, Slice, Scratch, ScratchDelta } kind = Run;
+  int a = 0, b = 0;  // pattern | step, slot | slice (0-based)
+};
+
+bool parse_seq_control(std::string_view name, SeqCtl& out) {
+  const auto number = [](std::string_view s, int lo, int hi, int& v) { return parse_int(s, v) && v >= lo && v <= hi; };
+  if (name.substr(0, 4) == "seq.") {
+    const std::string_view r = name.substr(4);
+    if (r == "run") return out.kind = SeqCtl::Run, true;
+    if (r == "record") return out.kind = SeqCtl::Record, true;
+    if (r == "bpm") return out.kind = SeqCtl::Bpm, true;
+    if (r == "swing") return out.kind = SeqCtl::Swing, true;
+    if (r == "clear") return out.kind = SeqCtl::Clear, true;
+    if (r.substr(0, 8) == "pattern.") {
+      const auto dot = r.find('.', 8);
+      int n = 0;
+      if (dot == std::string_view::npos || !number(r.substr(8, dot - 8), 1, kSeqPatterns, n)) return false;
+      const std::string_view verb = r.substr(dot + 1);
+      if (verb != "select" && verb != "queue") return false;
+      out.kind = verb == "select" ? SeqCtl::Select : SeqCtl::Queue;
+      out.a = n - 1;
+      return true;
+    }
+    if (r.substr(0, 5) == "step.") {  // step.S.slotK
+      const auto dot = r.find('.', 5);
+      int s = 0, k = 0;
+      if (dot == std::string_view::npos || !number(r.substr(5, dot - 5), 1, kSeqSteps, s)) return false;
+      const std::string_view tail = r.substr(dot + 1);
+      if (tail.substr(0, 4) != "slot" || !number(tail.substr(4), 1, kSamplerSlots, k)) return false;
+      out.kind = SeqCtl::Step;
+      out.a = s - 1;
+      out.b = k - 1;
+      return true;
+    }
+    return false;
+  }
+  if (name.substr(0, 13) == "sampler.slot.") {
+    const std::string_view r = name.substr(13);
+    const auto dot = r.find('.');
+    int k = 0;
+    if (dot == std::string_view::npos || !number(r.substr(0, dot), 1, kSamplerSlots, k)) return false;
+    out.a = k - 1;
+    const std::string_view tail = r.substr(dot + 1);
+    if (tail == "slices") return out.kind = SeqCtl::Slices, true;
+    if (tail == "scratch") return out.kind = SeqCtl::Scratch, true;
+    if (tail == "scratch.delta") return out.kind = SeqCtl::ScratchDelta, true;
+    int j = 0;
+    if (tail.substr(0, 6) == "slice." && number(tail.substr(6), 1, 16, j)) {
+      out.kind = SeqCtl::Slice;
+      out.b = j - 1;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool build_seq_control(const IEngine& engine, std::string_view name, bool has_value, double value, std::vector<Command>& out,
+                       std::string& error) {
+  SeqCtl s;
+  if (!parse_seq_control(name, s)) return false;
+  if (has_value && !std::isfinite(value)) {
+    error = "value must be a finite number";
+    return false;
+  }
+  const auto need = [&](double lo, double hi, const char* range) {
+    if (has_value && value >= lo && value <= hi) return true;
+    error = std::string("value needed: ") + range;
+    return false;
+  };
+  Command c;
+  switch (s.kind) {
+    case SeqCtl::Run:
+    case SeqCtl::Record:
+      c.op = s.kind == SeqCtl::Run ? Op::SeqRun : Op::SeqRecord;
+      c.i = has_value ? (value != 0 ? 1 : 0) : -1;
+      break;
+    case SeqCtl::Bpm:
+      if (!need(0, 400, "0..400 (0 = follow the decks, else 120)")) return false;
+      c.op = Op::SeqBpm;
+      c.f = static_cast<float>(value);
+      break;
+    case SeqCtl::Swing:
+      if (!need(0, 0.75, "0..0.75")) return false;
+      c.op = Op::SeqSwing;
+      c.f = static_cast<float>(value);
+      break;
+    case SeqCtl::Select:
+    case SeqCtl::Queue:
+      c.op = Op::SeqSelect;
+      c.i = s.a;
+      c.d = s.kind == SeqCtl::Queue ? 1 : 0;
+      break;
+    case SeqCtl::Clear: {
+      c.op = Op::SeqClear;
+      c.d = -1;
+      if (!has_value) c.i = engine.step_seq().current;
+      else if (value == 0) c.i = -1;
+      else if (value >= 1 && value <= kSeqPatterns) c.i = static_cast<int>(std::lround(value)) - 1;
+      else {
+        error = "value: none = this pattern, 0 = all patterns, 1..8 = that pattern";
+        return false;
+      }
+      break;
+    }
+    case SeqCtl::Step: {
+      const StepSeqView v = engine.step_seq();
+      c.op = Op::SeqStep;
+      c.deck = static_cast<std::uint8_t>(s.b);
+      c.i = v.current * kSeqSteps + s.a;
+      bool on = false;
+      c.f = -1;
+      if (has_value) {
+        if (value < 0 || value > 1) {
+          error = "value: 0 off, 0..1 on at that velocity, none = toggle";
+          return false;
+        }
+        on = value > 0;
+        if (on) c.f = static_cast<float>(value);
+      } else {
+        on = (v.pattern[v.current].cell[s.a][s.b] & 0x80) == 0;
+        if (on) c.f = 0.8f;
+      }
+      c.d = on ? 1 : 0;
+      break;
+    }
+    case SeqCtl::Slices:
+      if (!need(0, 16, "0 (off), 8 or 16") || (value != 0 && value != 8 && value != 16)) {
+        if (error.empty()) error = "value needed: 0 (off), 8 or 16";
+        return false;
+      }
+      c.op = Op::SamplerSlice;
+      c.deck = static_cast<std::uint8_t>(s.a);
+      c.i = static_cast<int>(value);
+      break;
+    case SeqCtl::Slice:
+      if (has_value && (value < 0 || value > 1)) {
+        error = "value: velocity 0..1 (0 or none = full)";
+        return false;
+      }
+      c.op = Op::SamplerSliceTrigger;
+      c.deck = static_cast<std::uint8_t>(s.a);
+      c.i = s.b;
+      c.f = has_value ? static_cast<float>(value) : 0.0f;
+      break;
+    case SeqCtl::Scratch:
+      c.op = Op::SamplerScratch;
+      c.deck = static_cast<std::uint8_t>(s.a);
+      c.i = has_value ? (value != 0 ? 1 : 0) : (engine.sampler(s.a).scratching ? 0 : 1);
+      break;
+    case SeqCtl::ScratchDelta:
+      if (!need(-3600, 3600, "seconds of the sample, signed")) return false;
+      c.op = Op::SamplerScratch;
+      c.deck = static_cast<std::uint8_t>(s.a);
+      c.i = 2;
+      c.d = value;
+      break;
+  }
+  out.push_back(c);
+  return true;
+}
+
+bool read_seq_control(const IEngine& engine, std::string_view name, double& value) {
+  SeqCtl s;
+  if (!parse_seq_control(name, s)) return false;
+  const StepSeqView v = engine.step_seq();
+  switch (s.kind) {
+    case SeqCtl::Run: value = v.running; return true;
+    case SeqCtl::Record: value = v.recording; return true;
+    case SeqCtl::Bpm: value = v.bpm; return true;
+    case SeqCtl::Swing: value = v.swing; return true;
+    case SeqCtl::Select: value = v.current == s.a ? 1 : 0; return true;
+    case SeqCtl::Queue: value = v.queued == s.a ? 1 : 0; return true;
+    case SeqCtl::Step: {
+      const std::uint8_t cell = v.pattern[v.current].cell[s.a][s.b];
+      value = (cell & 0x80) ? (cell & 0x7F) / static_cast<double>(kSeqVelMax) : 0;
+      return true;
+    }
+    case SeqCtl::Slices: value = engine.sampler(s.a).slices; return true;
+    case SeqCtl::Scratch: value = engine.sampler(s.a).scratching ? 1 : 0; return true;
+    default: return false;
+  }
+}
+
+void list_seq_controls(std::vector<ControlInfo>& out) {
+  out.push_back({"seq.run", "toggle", "0 stop, 1 run, none = toggle", "Start or stop the step sequencer"});
+  out.push_back({"seq.record", "toggle", "0 off, 1 on, none = toggle", "While running, sampler triggers are written into the pattern"});
+  out.push_back({"seq.bpm", "value", "0..400 (0 = follow the decks, else 120)", "Sequencer tempo when no deck leads"});
+  out.push_back({"seq.swing", "value", "0..0.75", "Delay every second step by this fraction of a step"});
+  for (int n = 1; n <= kSeqPatterns; ++n) {
+    out.push_back({"seq.pattern." + std::to_string(n) + ".select", "trigger", "none", "Play this pattern now"});
+    out.push_back({"seq.pattern." + std::to_string(n) + ".queue", "trigger", "none", "Play this pattern from the next bar"});
+  }
+  out.push_back({"seq.clear", "trigger", "none = this pattern, 0 = all, 1..8 = that pattern", "Empty a pattern"});
+  out.push_back({"seq.step.<1..16>.slot<1..16>", "toggle", "0 off, 0..1 on at that velocity, none = toggle", "One cell of the pattern being played (256 controls)"});
+  for (int k = 1; k <= kSamplerSlots; ++k) {
+    const std::string b = "sampler.slot." + std::to_string(k) + ".";
+    out.push_back({b + "slices", "value", "0 (off), 8 or 16", "Cut the sample into equal slices"});
+    out.push_back({b + "slice.<1..16>", "trigger", "velocity 0..1, none = full", "Play one slice once"});
+    out.push_back({b + "scratch", "toggle", "1 grab, 0 release, none = toggle", "Hold the sample's position so it can be scratched"});
+    out.push_back({b + "scratch.delta", "value", "seconds of the sample, signed", "Move the held sample"});
+  }
+}
 }  // namespace
 
 bool parse_automix_control(std::string_view name, std::string& action) {
@@ -516,6 +726,7 @@ std::vector<ControlInfo> list_controls() {
     out.push_back({dk + ".stems.enable", "toggle", "0 original mix, 1 stems, none = toggle", "Play the stems or the original mix"});
     out.push_back({dk + ".stems.detach", "trigger", "none", "Drop the stems of the loaded track"});
   }
+  list_seq_controls(out);
   for (const Def& d : kPreview) out.push_back({std::string("preview.") + d.name, kind_name(d.kind), d.range, d.help});
   for (int slot = 1; slot <= kSamplerSlots; ++slot)
     for (const Def& d : kSampler) out.push_back({"sampler." + std::to_string(slot) + "." + d.name, kind_name(d.kind), d.range, d.help});
@@ -525,6 +736,10 @@ std::vector<ControlInfo> list_controls() {
 bool build_control(const IEngine& engine, std::string_view name, bool has_value, double value, std::vector<Command>& out,
                    std::string& error) {
   if (is_stem_control(name)) return build_stem_control(name, has_value, value, out, error);
+  {
+    SeqCtl sc;
+    if (parse_seq_control(name, sc)) return build_seq_control(engine, name, has_value, value, out, error);
+  }
   if (is_chain_control(name)) {
     error = "effect chain edits are applied at once and cannot be scheduled";
     return false;
@@ -712,6 +927,7 @@ void apply_key_sync_settings(IEngine& engine, const KeySyncSettings& st, int dec
 
 bool read_control(const IEngine& engine, std::string_view name, double& value) {
   if (is_stem_control(name)) return read_stem_control(engine, name, value);
+  if (read_seq_control(engine, name, value)) return true;
   if (is_chain_control(name)) {
     const auto at = name.find(".chain.");
     int target = 0;

@@ -3094,6 +3094,351 @@ paths:
         "400": {$ref: "#/components/responses/BadRequest"}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/sequencer:
+    get:
+      tags: [Sampler]
+      operationId: getSequencer
+      summary: Step sequencer state
+      description: "Required scope: `read`. Running, recording, the pattern being played (1..8) and the one queued for the next bar (0 = none), the step playing (1..16, 0 = stopped), tempo and swing, and all eight patterns as text (see docs/SEQUENCER.md). `follows_deck` is true while the tempo comes from a deck's beat grid."
+      x-scope: read
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/sequencer/patterns/{pattern}:
+    get:
+      tags: [Sampler]
+      operationId: getSequencerPattern
+      summary: One pattern as text
+      description: "Required scope: `read`. The pattern (1..8) in the text form of docs/SEQUENCER.md."
+      x-scope: read
+      parameters:
+        - {name: pattern, in: path, required: true, schema: {type: integer, format: int64}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Sampler]
+      operationId: putSequencerPattern
+      summary: Replace a pattern
+      description: "Required scope: `control`. Body `{"text": "dhseq1;..."}` replaces the whole pattern (400 when the text is not valid)."
+      x-scope: control
+      parameters:
+        - {name: pattern, in: path, required: true, schema: {type: integer, format: int64}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [text], properties: {text: {type: string}}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/sequencer/step:
+    post:
+      tags: [Sampler]
+      operationId: setSequencerStep
+      summary: Set one step
+      description: "Required scope: `control`. Body: `step` (1..16) and `slot` (1..16) are required, `pattern` (1..8, default the one being played), `on` (default true), `velocity` (0..1, default: keep the cell's)."
+      x-scope: control
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [step, slot], properties: {pattern: {type: integer}, step: {type: integer}, slot: {type: integer}, on: {type: boolean}, velocity: {type: number}}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/sequencer/{action}:
+    post:
+      tags: [Sampler]
+      operationId: sequencerAction
+      summary: Run, record, tempo, swing, select, queue or clear
+      description: "Required scope: `control`. `action` is one of `run` and `record` (body `{"on": true|false}`, none = toggle), `bpm` and `swing` (body `{"value": n}`; bpm 0 = follow the decks, swing 0..0.75), `select` (play pattern now) and `queue` (from the next bar), both with `{"pattern": 1..8}`, and `clear` (body `{"pattern": n}` or `{"all": true}`, none = the pattern being played; `slot` limits it to one slot). The same as the `seq.*` controls."
+      x-scope: control
+      parameters:
+        - {name: action, in: path, required: true, schema: {type: string, enum: [run, record, bpm, swing, select, queue, clear]}}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/sampler/slices:
+    get:
+      tags: [Sampler]
+      operationId: getSamplerSlices
+      summary: Slice state of the sampler slots
+      description: "Required scope: `read`. For every slot: loaded, slices (0, 8 or 16), the last slice played (1-based, 0 = none) and whether it is held for scratching."
+      x-scope: read
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/sampler/{slot}/slices:
+    post:
+      tags: [Sampler]
+      operationId: setSamplerSlices
+      summary: Cut a slot into slices
+      description: "Required scope: `control`. Body `{"count": 0|8|16}` (0 = off). The same as `sampler.slot.<n>.slices`."
+      x-scope: control
+      parameters:
+        - {name: slot, in: path, required: true, schema: {type: integer, format: int64}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [count], properties: {count: {type: integer, enum: [0, 8, 16]}}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/sampler/{slot}/slices/{index}/trigger:
+    post:
+      tags: [Sampler]
+      operationId: triggerSamplerSlice
+      summary: Play one slice
+      description: "Required scope: `control`. Plays slice `index` (1..16) of a sliced slot once. Optional body `{"velocity": 0..1}` (default full)."
+      x-scope: control
+      parameters:
+        - {name: slot, in: path, required: true, schema: {type: integer, format: int64}}
+        - {name: index, in: path, required: true, schema: {type: integer, format: int64}}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, properties: {velocity: {type: number}}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/mix-links:
+    get:
+      tags: [Library]
+      operationId: listMixLinks
+      summary: Linked mix points
+      description: "Required scope: `library:read`. Give `track` (links out of and into it), `from`, `to`, or `from` and `to` together (links between two tracks). \"When track `from_track` reaches `from_ms`, track `to_track` starts from `to_ms`.\""
+      x-scope: library:read
+      parameters:
+        - {name: track, in: query, schema: {type: integer, format: int64}}
+        - {name: from, in: query, schema: {type: integer, format: int64}}
+        - {name: to, in: query, schema: {type: integer, format: int64}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: The request is not valid.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    post:
+      tags: [Library]
+      operationId: addMixLink
+      summary: Add a linked mix point
+      description: "Required scope: `library:write`. Body `from_track`, `from_ms`, `to_track`, `to_ms` (required), optional `transition_beats`, `transition_type` and `label`. Automix and the suggestions use it before the computed mix points. Undoable through the edit journal."
+      x-scope: library:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, properties: {from_track: {type: integer, format: int64}, from_ms: {type: number}, to_track: {type: integer, format: int64}, to_ms: {type: number}, transition_beats: {type: [number, "null"]}, transition_type: {type: [string, "null"], enum: [crossfade, cut, fade, echo_out, null]}, label: {type: string}}}
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: The request is not valid.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/mix-links/{id}:
+    get:
+      tags: [Library]
+      operationId: getMixLink
+      summary: One linked mix point
+      description: "Required scope: `library:read`. The link with this id."
+      x-scope: library:read
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Library]
+      operationId: updateMixLink
+      summary: Change a linked mix point
+      description: "Required scope: `library:write`. Only the fields in the body change; `transition_beats` and `transition_type` can be set to null."
+      x-scope: library:write
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, properties: {from_track: {type: integer, format: int64}, from_ms: {type: number}, to_track: {type: integer, format: int64}, to_ms: {type: number}, transition_beats: {type: [number, "null"]}, transition_type: {type: [string, "null"], enum: [crossfade, cut, fade, echo_out, null]}, label: {type: string}}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: The request is not valid.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Library]
+      operationId: deleteMixLink
+      summary: Delete a linked mix point
+      description: "Required scope: `library:write`. Removes the link."
+      x-scope: library:write
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks/{id}/mix-links:
+    get:
+      tags: [Library]
+      operationId: getTrackMixLinks
+      summary: Linked mix points of a track
+      description: "Required scope: `library:read`. `from` = links that leave this track, `to` = links that arrive in it."
+      x-scope: library:read
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/mix-links/from-decks:
+    post:
+      tags: [Library]
+      operationId: linkDecks
+      summary: Link two playheads
+      description: "Required scope: `library:write`. Body `{"from_deck": 1..4, "to_deck": 1..4}`: when the track on `from_deck` reaches its playhead, the track on `to_deck` starts from its own. 409 when a deck holds no library track."
+      x-scope: library:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [from_deck, to_deck], properties: {from_deck: {type: integer}, to_deck: {type: integer}}}
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400":
+          description: The request is not valid.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks/{id}/vocals:
+    get:
+      tags: [Library]
+      operationId: getTrackVocals
+      summary: Vocal regions of a track
+      description: "Required scope: `library:read`. Where the singing is, found from the track's vocals stem after a stem separation: `analysed`, `version` (and `current_version`, older analyses are redone when the stems attach again) and `regions` as `start_ms` / `end_ms`."
+      x-scope: library:read
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: integer, format: int64}}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
 components:
   securitySchemes:
     bearerAuth:
