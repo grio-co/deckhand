@@ -191,7 +191,7 @@ int main() {
     CaptureSession s;
     CHECK(s.start(c, err));
     const auto v = stereo_sine(44100, 4.0, 0.4, 523);
-    const std::size_t half = v.size() / 4;  // 1 s
+    const std::size_t half = v.size() / 8;  // 1 s, in frames
     CHECK(s.push(v.data(), half));
     s.flush();  // header says 1 s
     CHECK(s.push(&v[half * 2], 3 * half));  // 3 more seconds, header not refreshed

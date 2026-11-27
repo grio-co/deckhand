@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -182,6 +183,16 @@ void load_spec() {
 }
 
 // ---- the table of operations under test ---------------------------------------------------------------------------------
+// a path inside a JSON string literal (Windows paths carry backslashes)
+std::string jesc(const std::string& v) {
+  std::string o;
+  for (const char c : v) {
+    if (c == '\\' || c == '"') o += '\\';
+    o += c;
+  }
+  return o;
+}
+bool g_plugin_unit_ran = false;  // the hosted plug-in unit part ran (Audio Units, macOS only)
 std::set<std::string> g_called;  // "METHOD /path" patterns exercised
 
 struct Tokens {
@@ -392,6 +403,7 @@ void test_chains(StubHost& host, const fs::path& dir) {
     for (const auto& p : plugins::scan_installed())
       if (p.type == "aufx" && p.subtype == "dely" && p.manufacturer == "appl") delay = p.id;
     if (!delay.empty() && plugin_service().status().supported) {
+      g_plugin_unit_ran = true;
       std::string err;
       CHECK(plugin_service().vet(delay, err));
       h = ok("GET", "/v1/fx/plugins", "/v1/fx/plugins", "", 200);
@@ -589,7 +601,7 @@ void test_relocation(StubHost& host, const Fixture& fx) {
   fails("POST", "/v1/library/relocate/apply", "/v1/library/relocate/apply", "{\"matches\":[{\"track_id\":\"1\",\"new_path\":\"/x\"}]}", 400);
   h = call("POST", "/v1/library/relocate/apply", token_for("library:write"), "{\"matches\":[]}");
   CHECK(h.status == 200 && h.json()["applied"].as_int() == 0);
-  h = call("POST", "/v1/library/relocate/apply", token_for("library:write"), "{\"matches\":[{\"track_id\":987654,\"new_path\":\"" + newb + "\"}]}");
+  h = call("POST", "/v1/library/relocate/apply", token_for("library:write"), "{\"matches\":[{\"track_id\":987654,\"new_path\":\"" + jesc(newb) + "\"}]}");
   CHECK(h.status == 200 && h.json()["applied"].as_int() == 0 && h.json()["skipped"].as_int() == 1);  // no such track: nothing changes
   CHECK(call("GET", "/v1/library/tracks/" + std::to_string(fx.a), token_for("library:read")).json()["path"].as_string() == (fx.new_dir / "a.mp3").string());
 }
@@ -702,7 +714,7 @@ void test_capture(StubHost& host, const fs::path& dir) {
   const std::string rec_path = h.json()["path"].as_string();
   CHECK(fs::exists(fs::u8path(rec_path)));
   fails("POST", "/v1/capture/start", "/v1/capture/start", "{}", 409);  // already recording
-  fails("POST", "/v1/capture/load", "/v1/capture/load", "{\"path\":\"" + rec_path + "\"}", 409);
+  fails("POST", "/v1/capture/load", "/v1/capture/load", "{\"path\":\"" + jesc(rec_path) + "\"}", 409);
   std::uint64_t fed = 0;
   const std::uint64_t total = side.frames();
   const auto feed = [&](std::uint64_t upto) {
@@ -784,7 +796,7 @@ void test_capture(StubHost& host, const fs::path& dir) {
   // an existing recording can be loaded
   fails("POST", "/v1/capture/load", "/v1/capture/load", "{\"path\":\"relative.wav\"}", 400);
   fails("POST", "/v1/capture/load", "/v1/capture/load", "{\"path\":\"" + (dir / "none.wav").generic_string() + "\"}", 400);
-  h = ok("POST", "/v1/capture/load", "/v1/capture/load", "{\"path\":\"" + rec_path + "\"}", 200);
+  h = ok("POST", "/v1/capture/load", "/v1/capture/load", "{\"path\":\"" + jesc(rec_path) + "\"}", 200);
   CHECK(h.json()["state"].as_string() == "stopped" && !h.json()["analysed"].as_bool());
   // an edited copy of a library track (the recording stands in for a track); the original is never written
   std::int64_t tid = 0;
@@ -798,7 +810,7 @@ void test_capture(StubHost& host, const fs::path& dir) {
          "{\"out\":\"" + edit.generic_string() + "\",\"start\":1,\"end\":3,\"cleanup\":{\"fade_in_ms\":50,\"fade_out_ms\":50}}", 200);
   CHECK(h.json()["ok"].as_bool() && h.json()["frames"].as_int() > 80000 && h.json()["frames"].as_int() < 96000 && fs::exists(edit));
   const auto source_size = fs::file_size(fs::u8path(rec_path));
-  fails("POST", "/v1/library/tracks/{id}/export-edit", "/v1/library/tracks/" + std::to_string(tid) + "/export-edit", "{\"out\":\"" + rec_path + "\"}", 409);  // never over the original
+  fails("POST", "/v1/library/tracks/{id}/export-edit", "/v1/library/tracks/" + std::to_string(tid) + "/export-edit", "{\"out\":\"" + jesc(rec_path) + "\"}", 409);  // never over the original
   CHECK(fs::file_size(fs::u8path(rec_path)) == source_size);
   fails("POST", "/v1/library/tracks/{id}/export-edit", "/v1/library/tracks/" + std::to_string(tid) + "/export-edit", "{\"out\":\"" + edit.generic_string() + "\"}", 409);  // not over another file
   fails("POST", "/v1/library/tracks/{id}/export-edit", "/v1/library/tracks/" + std::to_string(tid) + "/export-edit", "{\"out\":\"x.wav\"}", 400);
@@ -943,7 +955,7 @@ int main() {
                             "POST /v1/capture/stop", "POST /v1/capture/load", "POST /v1/capture/analyse", "GET /v1/capture/splits", "PUT /v1/capture/splits", "POST /v1/capture/splits",
                             "PUT /v1/capture/splits/{index}", "DELETE /v1/capture/splits/{index}", "PUT /v1/capture/tags", "POST /v1/capture/export",
                             "POST /v1/library/tracks/{id}/export-edit"})
-        CHECK(g_called.count(k));
+        if (g_plugin_unit_ran || std::strcmp(k, "GET /v1/fx/chains/{target}/units/{id}/plugin") != 0) CHECK(g_called.count(k));  // the 200 answer needs a hosted plug-in
       std::printf("api routes ok\n");
     }
   }

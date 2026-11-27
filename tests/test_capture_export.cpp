@@ -193,7 +193,7 @@ int main() {
     CHECK(contains(first, "id3 ") && contains(first, "TIT2") && contains(first, "TRCK") && contains(first, "1/3"));
     CHECK(contains(slurp(res[1].path), "TIT2"));
     CHECK(res[1].path.find("Second Part 2") == std::string::npos ? true : true);
-    CHECK(res[1].path.find('/') != std::string::npos);  // inside the folder only; the title's slash became a space
+    CHECK(fs::path(res[1].path).parent_path() == out);  // inside the folder only; the title's slash became a space
     CHECK(fs::path(res[1].path).filename().string().find("Zw") != std::string::npos);
     // A second run refuses to overwrite.
     CHECK(!export_pieces(src, tiled, tags, out.string(), es)[0].ok);
