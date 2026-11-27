@@ -101,6 +101,12 @@ class ApiHost {
   virtual std::int64_t api_deck_track(int deck) { (void)deck; return 0; }
   // Linked mix points or vocal regions were written through the API: decks drawing them reload.
   virtual void api_links_changed() {}
+  // Browser layouts, split state or pane sources were written to the settings through the API: the window re-reads them.
+  virtual void api_browser_changed() {}
+  // Sync "now": queues a run on the loader thread (the setting keys are in sync_settings.hpp); the result of the last run,
+  // with the audio step's numbers, as JSON text for GET /v1/sync.
+  virtual void api_sync_run() {}
+  virtual std::string api_sync_json() { return "{}"; }
   virtual std::string api_status() = 0;
   virtual std::string api_audio_device() = 0;
   // Debug (admin scope): the windows the UI has (JSON array) and what a click at (x, y) of a window would do (JSON object).

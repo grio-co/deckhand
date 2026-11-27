@@ -194,6 +194,13 @@ enum class EffectKind : std::uint8_t {
   Slicer,     // rhythmic slicer: param = density (hits per 8 steps), param2 = rotation, param3 = gate length
   BuildUp,    // one macro knob (param): rising high-pass + echo feedback + noise riser; released on the next beat
   Filter,     // one-knob DJ filter: param 0.5 = off, below = low-pass, above = high-pass; param2 = resonance
+  // appended (protocol 8, no wire change: kinds travel as bytes)
+  TapeEcho,   // beat echo whose repeats darken and soften (feedback filtering, saturation, wow): param = feedback, param2 = tone, param3 = wobble
+  BeatReverb, // plate reverb whose decay lasts the beat length (beats / seconds = time to fall 60 dB)
+  TapeStop,   // release effect: the signal winds down to a stop over the beat length; param = curve (0 linear, 1 sharp)
+  // appended (protocol 9)
+  Plugin,     // a hosted third-party effect plug-in (chain units only; id in FxChainEdit::text; parameters via FxChainVerb::Set
+              // with field = kFxFieldPluginParam + parameter index, value 0..1). Not counted by effect_count().
   Count
 };
 
@@ -211,7 +218,7 @@ struct EffectInfo {
   const char* param3_name = "";
   const char* slug = "";         // stable lower-case identifier used in chain presets
 };
-int effect_count();                        // number of real effects (excludes None)
+int effect_count();                        // number of built-in effects (excludes None and Plugin)
 const EffectInfo& effect_info_at(int i);   // 0 .. effect_count()-1
 const EffectInfo* effect_info(EffectKind k);
 
@@ -222,10 +229,11 @@ const EffectInfo* effect_info(EffectKind k);
 //   0..3                 channel (deck) pre-fader chain          (kFxMaster = 4: master bus)
 //   kFxTargetMic         microphone channel, before it joins the master bus
 //   kFxTargetSampler     the sampler bus, before it joins the master bus
-//   fx_target_stem(d, s) stem s (0..7) of deck d (addressing only until the stem engine feeds it)
+//   fx_target_stem(d, s) stem s (0..7) of deck d (processed: the stem is split out of the deck path while its chain has work)
 // The three fixed slots (Op::FxSelect / FxEnable / FxWet / FxTime / FxParam, DeckView::fx, MixerView::fx) are a
 // view onto the default chain of a deck or of the master bus: slot i is the unit tagged legacy_slot == i.
 constexpr int kFxChainMax = 8;
+constexpr int kFxFieldPluginParam = 16;  // FxChainVerb::Set: field >= this sets plug-in parameter (field - this), value 0..1
 constexpr int kFxTargetMic = 5;
 constexpr int kFxTargetSampler = 6;
 constexpr int kFxTargetStemBase = 16;
@@ -236,6 +244,7 @@ constexpr bool fx_target_valid(int t) {
   return (t >= 0 && t <= kFxTargetSampler) || (t >= kFxTargetStemBase && t < kFxTargetCount);
 }
 
+class IEngine;
 struct FxChainState;  // prepared off the audio thread, swapped in at a block boundary (engine-internal)
 
 // Fields of one unit that FxChainVerb::Set can change.
@@ -291,11 +300,64 @@ struct FxChainResult {
   FxChainInfo info;             // the chain after the edit
 };
 
+// Plug-in side channel (protocol 9). Plug-in state blobs and parameter lists are too big for the chain edit text, so they
+// have their own request. `target` / `id` name a chain unit of kind EffectKind::Plugin.
+enum class PluginOpKind : std::uint8_t {
+  Info = 0,   // -> data = JSON {"id","name","maker","loaded","error","render_errors","latency","params":[...]} (see docs/PLUGINS.md)
+  GetState,   // -> data = opaque state blob of the plug-in (not the unit's on / wet)
+  SetState,   // data = blob from GetState of the same plug-in
+  Count
+};
+struct PluginOp {
+  PluginOpKind kind = PluginOpKind::Info;
+  int target = 0;
+  int id = 0;
+  std::string data;  // SetState
+};
+struct PluginOpResult {
+  bool ok = false;
+  std::string error;
+  std::string data;
+};
+// PluginOpKind::Info decoded.
+struct PluginParamView {
+  int index = 0;
+  std::string name, unit, group, text;  // text: the plug-in's own display of the current value
+  double min = 0, max = 1, def = 0, norm = 0, plain = 0;
+  int steps = 0;  // 0 continuous, N >= 2 discrete values
+  bool read_only = false, log = false;
+  std::vector<std::string> values;  // names of the discrete values (may be empty)
+};
+struct PluginInfoView {
+  std::string id, name, maker, error;
+  bool loaded = false;
+  std::uint64_t render_errors = 0;
+  double latency = 0;
+  std::vector<PluginParamView> params;
+};
+bool parse_plugin_info(const std::string& json, PluginInfoView& out);
+constexpr std::size_t kPluginBlobMax = 960u << 10;  // bigger states are refused (one control-socket frame is 1 MiB)
+
 // Chain presets: a small JSON blob, e.g.
 //   {"v":1,"bypass":false,"wet":1,"fx":[{"type":"echo","on":true,"wet":0.5,"param":0.5,"p2":0.5,"p3":0.5,"beats":0.5,"seconds":0}]}
 // Function level only; the app decides where it is stored. Unit ids and legacy tags are not part of a preset.
-std::string fx_chain_to_json(const FxChainInfo& chain);
-bool fx_chain_from_json(const std::string& text, FxChainInfo& out, std::string& error);
+// Plug-in units: {"type":"plugin","plugin":"<plug-in id>", ...}. `extra` carries the plug-in ids (and, for full presets, the
+// base64 state blobs) by unit index; without it a plug-in unit is written / read without them.
+struct FxPresetExtra {
+  std::string plugin_id[kFxChainMax];
+  std::string state_b64[kFxChainMax];  // "state" key; only honoured by fx_chain_from_json_full (size limits are bigger)
+};
+std::string fx_chain_to_json(const FxChainInfo& chain, const FxPresetExtra* extra = nullptr);
+bool fx_chain_from_json(const std::string& text, FxChainInfo& out, std::string& error, FxPresetExtra* extra = nullptr);
+bool fx_chain_from_json_full(const std::string& text, FxChainInfo& out, std::string& error, FxPresetExtra* extra);  // files, not the wire
+std::string base64_encode(const std::string& bytes);
+bool base64_decode(const std::string& text, std::string& out);
+
+// A whole chain with its plug-in states, through any engine (in process or the helper): the chain preset plus a "state"
+// per plug-in unit, fetched / restored over the plug-in side channel. Load replaces the chain; units whose state does not
+// restore stay loaded with the plug-in's defaults and are named in `error` (the call still succeeds).
+std::string fx_chain_save_full(IEngine& engine, int target);
+bool fx_chain_load_full(IEngine& engine, int target, const std::string& text, std::string* error = nullptr);
 const char* effect_slug(EffectKind k);                // "ping_pong"
 EffectKind effect_from_slug(const std::string& slug); // EffectKind::None when unknown
 
@@ -630,6 +692,13 @@ class IEngine {
     result.error = "effect chains are not supported by this engine";
     return false;
   }
+  // Plug-in side channel (protocol 9): parameter lists, state blobs. Default: unsupported.
+  virtual bool plugin_op(const PluginOp& op, PluginOpResult& result) {
+    (void)op;
+    result = PluginOpResult{};
+    result.error = "plug-ins are not supported by this engine";
+    return false;
+  }
   // The chain at `target` (count 0 / exists false when it never held a unit).
   virtual FxChainInfo fx_chain(int target) const {
     (void)target;
@@ -752,6 +821,7 @@ class Engine final : public IEngine {
   bool poll(EngineEvent& out) override;
   void collect_garbage() override;
   bool fx_chain_edit(const FxChainEdit& edit, FxChainResult& result) override;
+  bool plugin_op(const PluginOp& op, PluginOpResult& result) override;
   FxChainInfo fx_chain(int target) const override;
   bool stems_attach(int deck, std::int64_t track_id, const std::string& path, std::string& error) override;
   // Tests: hands already loaded stems to the deck (blocks until the audio thread could take them is not needed).

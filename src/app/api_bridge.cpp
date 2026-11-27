@@ -22,7 +22,12 @@
 #include <vector>
 
 #include "deckhand/api/server.hpp"
+#include "browser_layouts.hpp"
+#include "browser_panes.hpp"
+#include "deckhand/app/chain_presets.hpp"
 #include "deckhand/app/controls.hpp"
+#include "deckhand/app/plugin_service.hpp"
+#include "deckhand/app/sync_settings.hpp"
 #include "deckhand/app/cue_suggest.hpp"
 #include "deckhand/app/next_tracks.hpp"
 #include "deckhand/library/palette.hpp"
@@ -838,20 +843,48 @@ struct ApiBridge::Impl {
       o.set("beats", static_cast<double>(u.beats));
       o.set("seconds", u.seconds);
       if (u.legacy_slot >= 0) o.set("slot", u.legacy_slot + 1);
+      if (u.kind == EffectKind::Plugin) o.set("plugin", plugin_unit_json(target, u.id, false));
       units.push_back(std::move(o));
     }
     j.set("units", std::move(units));
     return j;
   }
 
+  // The plug-in side of a unit: id, name, whether it loaded, and (with `full`) the parameter list with current values.
+  Json plugin_unit_json(int target, int id, bool full) {
+    PluginOp op;
+    op.kind = PluginOpKind::Info;
+    op.target = target;
+    op.id = id;
+    PluginOpResult res;
+    Json out = Json::object();
+    if (!host.api_engine().plugin_op(op, res)) {
+      out.set("loaded", false);
+      out.set("error", res.error);
+      return out;
+    }
+    Json info = Json::parse(res.data);
+    if (!info.is_object()) {
+      out.set("loaded", false);
+      return out;
+    }
+    if (!full) {
+      for (const char* k : {"id", "name", "maker", "loaded", "error", "render_errors", "latency"})
+        if (info.contains(k)) out.set(k, info[k]);
+      out.set("param_count", static_cast<int>(info["params"].is_array() ? info["params"].size() : 0));
+      return out;
+    }
+    return info;
+  }
+
   static bool effect_from_json(const Json& v, EffectKind& out) {
     if (v.is_string()) {
       out = effect_from_slug(v.as_string());
-      return out != EffectKind::None;
+      return out != EffectKind::None && out != EffectKind::Plugin;  // plug-ins go in with "plugin": <id>
     }
     if (v.is_integer()) {
       const std::int64_t n = v.as_int();
-      if (n < 1 || n >= static_cast<std::int64_t>(EffectKind::Count)) return false;
+      if (n < 1 || n >= static_cast<std::int64_t>(EffectKind::Plugin)) return false;
       out = static_cast<EffectKind>(n);
       return true;
     }
@@ -1674,6 +1707,461 @@ struct ApiBridge::Impl {
     });
   }
 
+  static Json plugins_json() {
+    const PluginScanStatus st = plugin_service().status();
+    Json j = Json::object();
+    j.set("supported", st.supported);
+    j.set("scanning", st.running);
+    Json prog = Json::object();
+    prog.set("done", st.done);
+    prog.set("total", st.total);
+    prog.set("current", st.current);
+    j.set("progress", std::move(prog));
+    j.set("blocked_last_scan", st.blocked_now);
+    j.set("last_message", st.last_message);
+    Json a = Json::array();
+    for (const PluginRow& p : plugin_service().list()) {
+      Json o = Json::object();
+      o.set("id", p.id);
+      o.set("name", p.name);
+      o.set("maker", p.maker);
+      o.set("format", p.format);
+      o.set("vetted", p.vetted);
+      o.set("blocked", p.blocked);
+      if (p.blocked) o.set("reason", p.reason);
+      a.push_back(std::move(o));
+    }
+    j.set("plugins", std::move(a));
+    return j;
+  }
+
+
+  // ---- browser: layouts, split, panes, folders, relocation ---------------------------------------------------------------
+  static const char* pane_kind_name(int k) {  // TreeItem::Kind values (app_impl.hpp)
+    static const char* const n[] = {"collection", "folder", "playlist", "history_header", "history", "smart", "disk_header", "disk"};
+    return k >= 0 && k < 8 ? n[k] : "collection";
+  }
+  static int pane_kind_from(const std::string& s) {
+    for (int k = 0; k < 8; ++k)
+      if (s == pane_kind_name(k)) return k;
+    return -1;
+  }
+  static const char* split_name(SplitMode m) { return m == SplitMode::Side ? "side" : m == SplitMode::Stacked ? "stacked" : "off"; }
+  static Json layout_json(const BrowserLayout& l) {
+    Json j = Json::object();
+    j.set("name", l.name);
+    j.set("builtin", l.builtin);
+    Json cols = Json::array();
+    for (const std::string& c : l.columns) cols.push_back(c);
+    j.set("columns", std::move(cols));
+    Json w = Json::object();
+    for (const auto& kv : l.widths) w.set(kv.first, static_cast<double>(kv.second));
+    j.set("widths", std::move(w));
+    j.set("sort", sort_key_name(l.sort));
+    j.set("descending", l.descending);
+    return j;
+  }
+  Json browser_json() {
+    std::lock_guard<std::mutex> lock(lib_mutex);
+    const PaneSettings ps = load_pane_settings(lib);
+    BrowserLayouts layouts(lib);
+    Json j = Json::object();
+    j.set("split", split_name(ps.mode));
+    j.set("live_pane", ps.live_slot);
+    Json panes = Json::array();
+    for (int i = 0; i < 2; ++i) {
+      Json p = Json::object();
+      p.set("kind", pane_kind_name(ps.pane[i].kind));
+      p.set("id", ps.pane[i].id);
+      p.set("path", ps.pane[i].path);
+      p.set("sort", sort_key_name(ps.pane[i].sort));
+      p.set("descending", ps.pane[i].descending);
+      p.set("search", ps.pane[i].search);
+      panes.push_back(std::move(p));
+    }
+    j.set("panes", std::move(panes));
+    j.set("active_layout", layouts.active());
+    Json ls = Json::array();
+    for (const BrowserLayout& l : layouts.all()) ls.push_back(layout_json(l));
+    j.set("layouts", std::move(ls));
+    Json cols = Json::array();
+    for (const std::string& c : browser_column_ids()) cols.push_back(c);
+    j.set("available_columns", std::move(cols));
+    return j;
+  }
+  static Json relocate_report_json(const RelocateReport& rep) {
+    Json j = Json::object();
+    j.set("missing", rep.missing);
+    j.set("scanned", rep.scanned);
+    Json found = Json::array();
+    for (const RelocateMatch& m : rep.found) {
+      Json o = Json::object();
+      o.set("track_id", m.track_id);
+      o.set("old_path", m.old_path);
+      o.set("new_path", m.new_path);
+      o.set("how", m.how);
+      o.set("weak", m.weak);
+      found.push_back(std::move(o));
+    }
+    j.set("found", std::move(found));
+    Json amb = Json::array();
+    for (const RelocateAmbiguous& a : rep.ambiguous) {
+      Json o = Json::object();
+      o.set("track_id", a.track_id);
+      o.set("old_path", a.old_path);
+      Json c = Json::array();
+      for (const std::string& p : a.candidates) c.push_back(p);
+      o.set("candidates", std::move(c));
+      amb.push_back(std::move(o));
+    }
+    j.set("ambiguous", std::move(amb));
+    Json nf = Json::array();
+    for (const std::int64_t id : rep.not_found) nf.push_back(id);
+    j.set("not_found", std::move(nf));
+    return j;
+  }
+  Json track_list_json(const std::vector<std::int64_t>& ids, const Request& r, const std::map<std::int64_t, std::string>* sources = nullptr) {
+    const auto q = [&](const char* k) {
+      const auto it = r.query.find(k);
+      return it == r.query.end() ? std::string() : it->second;
+    };
+    const std::int64_t limit = std::clamp<std::int64_t>(q("limit").empty() ? 200 : std::atoll(q("limit").c_str()), 1, 2000);
+    const std::int64_t offset = std::max<std::int64_t>(0, std::atoll(q("offset").c_str()));
+    Json items = Json::array();
+    for (std::int64_t i = offset; i < static_cast<std::int64_t>(ids.size()) && i < offset + limit; ++i) {
+      const auto row = lib.track(ids[static_cast<std::size_t>(i)]);
+      if (!row) continue;
+      Json t = track_json(*row);
+      if (sources) {
+        const auto it = sources->find(row->id);
+        if (it != sources->end()) t.set("source", it->second);
+      }
+      items.push_back(std::move(t));
+    }
+    Json j = Json::object();
+    j.set("total", static_cast<std::int64_t>(ids.size()));
+    j.set("offset", offset);
+    j.set("items", std::move(items));
+    return j;
+  }
+  void add_browser_routes() {
+    auto& s = *server;
+    const auto q = [](const Request& r, const char* k) {
+      const auto it = r.query.find(k);
+      return it == r.query.end() ? std::string() : it->second;
+    };
+    s.add_route("GET", "/v1/browser", "read", [this](const Request&) { return Response::ok(browser_json()); });
+    s.add_route("PUT", "/v1/browser/split", "control", [this](const Request& r) {
+      const std::string mode = r.body["mode"].as_string();
+      if (!r.body["mode"].is_string() || (mode != "off" && mode != "side" && mode != "stacked")) return Response::error(400, "mode must be off, side or stacked");
+      if (r.body.contains("live_pane") && (!r.body["live_pane"].is_integer() || r.body["live_pane"].as_int() < 0 || r.body["live_pane"].as_int() > 1))
+        return Response::error(400, "live_pane must be 0 or 1");
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        PaneSettings ps = load_pane_settings(lib);
+        const bool was_off = ps.mode == SplitMode::Off;
+        ps.mode = mode == "side" ? SplitMode::Side : mode == "stacked" ? SplitMode::Stacked : SplitMode::Off;
+        if (r.body.contains("live_pane")) ps.live_slot = static_cast<int>(r.body["live_pane"].as_int());
+        if (ps.mode == SplitMode::Off) ps.live_slot = 0;
+        if (was_off && ps.mode != SplitMode::Off) ps.pane[1 - ps.live_slot] = ps.pane[ps.live_slot];  // the new table starts on the same source
+        save_pane_settings(lib, ps);
+      }
+      host.api_browser_changed();
+      return Response::ok(browser_json());
+    });
+    s.add_route("PUT", "/v1/browser/panes/{slot}", "control", [this](const Request& r) {
+      std::int64_t slot = 0;
+      if (!int_param(r, "slot", slot) || slot < 0 || slot > 1) return Response::error(404, "slot is 0 or 1");
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        PaneSettings ps = load_pane_settings(lib);
+        PaneSnapshot p = ps.pane[slot];
+        if (r.body.contains("kind")) {
+          const int k = pane_kind_from(r.body["kind"].as_string());
+          if (k < 0 || k == 3 || k == 6) return Response::error(400, "kind is collection, folder, playlist, history, smart or disk");
+          p.kind = k;
+        }
+        if (r.body.contains("id")) {
+          if (!r.body["id"].is_integer()) return Response::error(400, "id must be an integer");
+          p.id = r.body["id"].as_int();
+        }
+        if (r.body.contains("path")) {
+          if (!r.body["path"].is_string() || r.body["path"].as_string().find('|') != std::string::npos) return Response::error(400, "path must be a directory without '|'");
+          p.path = r.body["path"].as_string();
+        }
+        if (r.body.contains("search")) p.search = r.body["search"].as_string();
+        if (r.body.contains("sort")) {
+          const std::string n = r.body["sort"].as_string();
+          p.sort = sort_key_from_name(n);
+          if (p.sort == SortKey::Default && n != "default") return Response::error(400, "unknown sort key");
+        }
+        if (r.body.contains("descending")) p.descending = r.body["descending"].as_bool() && p.sort != SortKey::Default;
+        ps.pane[slot] = p;
+        save_pane_settings(lib, ps);
+      }
+      host.api_browser_changed();
+      return Response::ok(browser_json());
+    });
+    s.add_route("POST", "/v1/browser/layouts", "control", [this](const Request& r) {
+      BrowserLayout l;
+      l.name = r.body["name"].as_string();
+      if (!r.body["name"].is_string() || !r.body["columns"].is_array() || r.body["columns"].size() == 0)
+        return Response::error(400, "name and a non-empty columns list are required");
+      for (std::size_t i = 0; i < r.body["columns"].size(); ++i) {
+        const std::string c = r.body["columns"].at(i).as_string();
+        const auto& ids = browser_column_ids();
+        if (std::find(ids.begin(), ids.end(), c) == ids.end()) return Response::error(400, "unknown column " + c);
+        l.columns.push_back(c);
+      }
+      if (r.body.contains("widths") && r.body["widths"].is_object())
+        for (std::size_t i = 0; i < r.body["widths"].size(); ++i) l.widths[r.body["widths"].key_at(i)] = static_cast<float>(r.body["widths"].at(i).as_double());
+      if (r.body.contains("sort")) l.sort = sort_key_from_name(r.body["sort"].as_string());
+      l.descending = r.body["descending"].as_bool() && l.sort != SortKey::Default;
+      bool saved;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        BrowserLayouts layouts(lib);
+        saved = layouts.save(l);
+      }
+      if (!saved) return Response::error(409, "that name belongs to a built-in layout, or is empty");
+      host.api_browser_changed();
+      Response ok = Response::ok(browser_json());
+      ok.status = 201;
+      return ok;
+    });
+    s.add_route("POST", "/v1/browser/layouts/delete", "control", [this](const Request& r) {
+      bool gone;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        BrowserLayouts layouts(lib);
+        gone = r.body["name"].is_string() && layouts.remove(r.body["name"].as_string());
+      }
+      if (!gone) return Response::error(404, "no such saved layout (built-in layouts cannot be deleted)");
+      host.api_browser_changed();
+      return Response::ok(browser_json());
+    });
+    s.add_route("PUT", "/v1/browser/layout", "control", [this](const Request& r) {  // applies a layout: columns, widths, sort
+      const std::string name = r.body["name"].as_string();
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        BrowserLayouts layouts(lib);
+        const BrowserLayout* l = layouts.find(name);
+        if (!r.body["name"].is_string() || !l) return Response::error(404, "no such layout");
+        std::string cols, widths;
+        for (const std::string& c : l->columns) cols += (cols.empty() ? "" : ",") + c;
+        for (const auto& kv : l->widths) {
+          char b[32];
+          std::snprintf(b, sizeof b, "%.2f", static_cast<double>(kv.second));
+          widths += (widths.empty() ? "" : ",") + kv.first + "=" + b;
+        }
+        lib.set_setting("browser.columns", cols);
+        lib.set_setting("browser.widths", widths);
+        layouts.set_active(l->name);
+        PaneSettings ps = load_pane_settings(lib);
+        ps.pane[ps.live_slot].sort = l->sort;
+        ps.pane[ps.live_slot].descending = l->descending;
+        save_pane_settings(lib, ps);
+      }
+      host.api_browser_changed();
+      return Response::ok(browser_json());
+    });
+    // ---- folders: playlist folders and the library by directory ----
+    s.add_route("GET", "/v1/library/folders/{id}/tracks", "library:read", [this, q](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(404, "no such folder");
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      std::map<std::int64_t, std::string> sources;
+      const auto ids = lib.folder_track_ids(id, q(r, "search"), sort_key(q(r, "sort")), q(r, "desc") == "1", &sources);
+      return Response::ok(track_list_json(ids, r, &sources));
+    });
+    s.add_route("GET", "/v1/library/disk-folders", "library:read", [this, q](const Request& r) {
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      Json a = Json::array();
+      for (const DiskFolder& f : lib.disk_folders(q(r, "dir"))) {
+        Json o = Json::object();
+        o.set("path", f.path);
+        o.set("name", f.name);
+        o.set("tracks", f.tracks);
+        o.set("total", f.total);
+        o.set("has_children", f.has_children);
+        a.push_back(std::move(o));
+      }
+      Json j = Json::object();
+      j.set("folders", std::move(a));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("GET", "/v1/library/disk-folders/tracks", "library:read", [this, q](const Request& r) {
+      if (q(r, "dir").empty()) return Response::error(400, "dir is required (a path from GET /v1/library/disk-folders)");
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      const auto ids = lib.disk_folder_track_ids(q(r, "dir"), q(r, "recursive") != "0", q(r, "search"), sort_key(q(r, "sort")), q(r, "desc") == "1");
+      return Response::ok(track_list_json(ids, r));
+    });
+    // ---- trash ----
+    s.add_route("DELETE", "/v1/library/trash", "admin", [this, q](const Request& r) {  // forgets deleted tracks for good
+      const std::string days = q(r, "older_than_days");
+      const int n = days.empty() ? 0 : static_cast<int>(std::clamp<long>(std::atol(days.c_str()), 0, 36500));
+      int removed;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        removed = lib.purge_deleted(n);
+      }
+      Json j = Json::object();
+      j.set("removed", removed);
+      return Response::ok(std::move(j));
+    });
+    // ---- moved files ----
+    s.add_route("POST", "/v1/library/relocate/scan", "library:read", [this](const Request& r) {
+      RelocateOptions o;
+      if (!r.body["folders"].is_array() || r.body["folders"].size() == 0 || r.body["folders"].size() > 16)
+        return Response::error(400, "folders is a list of 1 to 16 absolute directories");
+      for (std::size_t i = 0; i < r.body["folders"].size(); ++i) {
+        const std::string f = r.body["folders"].at(i).as_string();
+        std::error_code ec;
+        if (f.empty() || f[0] != '/' || !std::filesystem::is_directory(f, ec)) return Response::error(400, "every folder must be an existing absolute directory");
+        o.folders.push_back(f);
+      }
+      if (r.body.contains("duration_tolerance_ms")) o.duration_tolerance_ms = std::clamp(r.body["duration_tolerance_ms"].as_double(1500), 0.0, 60000.0);
+      o.allow_name_only = r.body["allow_name_only"].as_bool(false);
+      return Response::ok(relocate_report_json(lib.relocate_scan(o)));
+    });
+    s.add_route("POST", "/v1/library/relocate/apply", "library:write", [this](const Request& r) {
+      if (!r.body["matches"].is_array()) return Response::error(400, "matches is the found list of a scan (track_id, new_path)");
+      std::vector<RelocateMatch> ms;
+      for (std::size_t i = 0; i < r.body["matches"].size() && i < 100000; ++i) {
+        const Json& m = r.body["matches"].at(i);
+        RelocateMatch x;
+        if (!m["track_id"].is_integer() || !m["new_path"].is_string()) return Response::error(400, "each match needs track_id and new_path");
+        x.track_id = m["track_id"].as_int();
+        x.new_path = m["new_path"].as_string();
+        x.old_path = m["old_path"].as_string();
+        x.how = m["how"].is_string() ? m["how"].as_string() : std::string("manual");
+        ms.push_back(std::move(x));
+      }
+      RelocateResult res;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        res = lib.relocate_apply(ms);
+      }
+      host.api_library_changed();
+      Json j = Json::object();
+      j.set("applied", res.applied);
+      j.set("skipped", res.skipped);
+      j.set("batch_id", res.batch_id);
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/tracks/{id}/relink", "library:write", [this](const Request& r) {
+      std::int64_t id = 0;
+      const std::string path = r.body["path"].as_string();
+      if (!int_param(r, "id", id)) return Response::error(404, "no such track");
+      std::error_code ec;
+      if (path.empty() || path[0] != '/' || !std::filesystem::is_regular_file(path, ec)) return Response::error(400, "path must be an existing absolute file");
+      RelocateResult res;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (!lib.track(id)) return Response::error(404, "no such track");
+        res = lib.relink_track(id, path);
+      }
+      if (res.applied == 0) return Response::error(409, "another track already has that file");
+      host.api_library_changed();
+      Json j = Json::object();
+      j.set("applied", res.applied);
+      j.set("batch_id", res.batch_id);
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/library/tracks/{id}/relink/siblings", "library:read", [this](const Request& r) {  // dry run
+      std::int64_t id = 0;
+      const std::string path = r.body["path"].as_string();
+      if (!int_param(r, "id", id)) return Response::error(404, "no such track");
+      std::error_code ec;
+      if (path.empty() || path[0] != '/' || !std::filesystem::is_regular_file(path, ec)) return Response::error(400, "path must be an existing absolute file");
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      if (!lib.track(id)) return Response::error(404, "no such track");
+      return Response::ok(relocate_report_json(lib.relink_siblings(id, path)));
+    });
+  }
+
+
+  // ---- sync: settings and the result of the last run ----------------------------------------------------------------------
+  Json sync_json() {
+    Json j = Json::object();
+    {
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      Json c = Json::object();
+      c.set("folder_set", !lib.setting("sync.folder").empty());
+      c.set("device_name", lib.setting("sync.device_name"));
+      c.set("mix_links", lib.setting("sync.mix_links", "1") != "0");
+      c.set("analysis", lib.setting("sync.analysis", "0") == "1");
+      Json pl = Json::array();
+      for (const std::int64_t id : parse_id_list(lib.setting("sync.audio_playlists"))) pl.push_back(id);
+      c.set("audio_playlists", std::move(pl));
+      c.set("music_folder", lib.setting("sync.music_folder"));
+      c.set("audio_budget_mb", static_cast<std::int64_t>(std::atoll(lib.setting("sync.audio_budget_mb").c_str())));
+      c.set("audio_import_budget_mb", static_cast<std::int64_t>(std::atoll(lib.setting("sync.audio_import_budget_mb").c_str())));
+      c.set("allow_unencrypted_audio", lib.setting("sync.allow_unencrypted_audio", "0") == "1");
+      c.set("encryption_available", deckhand::sync::SyncEngine::encryption_available());
+      j.set("config", std::move(c));
+    }
+    j.set("last", Json::parse(host.api_sync_json()));
+    return j;
+  }
+  void add_sync_routes() {
+    auto& s = *server;
+    s.add_route("GET", "/v1/sync", "read", [this](const Request&) { return Response::ok(sync_json()); });
+    s.add_route("POST", "/v1/sync/run", "control", [this](const Request&) {
+      std::string folder;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        folder = lib.setting("sync.folder");
+      }
+      if (folder.empty()) return Response::error(409, "no sync folder is set (PUT /v1/settings/sync.folder)");
+      host.api_sync_run();
+      Response ok = Response::ok(sync_json());
+      ok.status = 202;
+      return ok;
+    });
+    s.add_route("PUT", "/v1/sync/config", "admin", [this](const Request& r) {
+      const Json& b = r.body;
+      if (!b.is_object()) return Response::error(400, "the body is an object of sync settings");
+      for (const char* k : {"mix_links", "analysis", "allow_unencrypted_audio"})
+        if (b.contains(k) && !b[k].is_bool()) return Response::error(400, std::string(k) + " must be true or false");
+      for (const char* k : {"audio_budget_mb", "audio_import_budget_mb"})
+        if (b.contains(k) && (!b[k].is_integer() || b[k].as_int() < 0 || b[k].as_int() > (1ll << 30))) return Response::error(400, std::string(k) + " must be a whole number of MiB, 0 = no limit");
+      if (b.contains("music_folder")) {
+        std::error_code ec;
+        const std::string f = b["music_folder"].as_string();
+        if (!b["music_folder"].is_string() || (!f.empty() && (f[0] != '/' || !std::filesystem::is_directory(f, ec))))
+          return Response::error(400, "music_folder must be an existing absolute directory, or \"\" for no import");
+      }
+      std::vector<std::int64_t> ids;
+      if (b.contains("audio_playlists")) {
+        if (!b["audio_playlists"].is_array()) return Response::error(400, "audio_playlists must be a list of playlist ids");
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        const std::vector<PlaylistNode> nodes = lib.playlists();
+        for (std::size_t i = 0; i < b["audio_playlists"].size(); ++i) {
+          const Json& v = b["audio_playlists"].at(i);
+          bool known = false;
+          for (const PlaylistNode& n : nodes) known = known || (v.is_integer() && n.id == v.as_int());
+          if (!known) return Response::error(400, "audio_playlists holds an id that is not a playlist or folder");
+          ids.push_back(v.as_int());
+        }
+      }
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        const auto flag = [&](const char* k, const char* key) {
+          if (b.contains(k)) lib.set_setting(key, b[k].as_bool() ? "1" : "0");
+        };
+        flag("mix_links", "sync.mix_links");
+        flag("analysis", "sync.analysis");
+        flag("allow_unencrypted_audio", "sync.allow_unencrypted_audio");
+        if (b.contains("audio_playlists")) lib.set_setting("sync.audio_playlists", format_id_list(ids));
+        if (b.contains("music_folder")) lib.set_setting("sync.music_folder", b["music_folder"].as_string());
+        if (b.contains("audio_budget_mb")) lib.set_setting("sync.audio_budget_mb", std::to_string(b["audio_budget_mb"].as_int()));
+        if (b.contains("audio_import_budget_mb")) lib.set_setting("sync.audio_import_budget_mb", std::to_string(b["audio_import_budget_mb"].as_int()));
+      }
+      return Response::ok(sync_json());
+    });
+  }
+
   void add_chain_routes() {
     auto& s = *server;
     s.add_route("GET", "/v1/fx/chains/{target}", "read", [this](const Request& r) {
@@ -1687,11 +2175,18 @@ struct ApiBridge::Impl {
       Response bad;
       if (!chain_target(r, t, bad)) return bad;
       EffectKind kind = EffectKind::None;
-      if (!effect_from_json(r.body["effect"], kind)) return Response::error(400, "effect must be a slug or number from GET /v1/effects");
+      const bool plugin = r.body["plugin"].is_string();
+      if (plugin) {
+        kind = EffectKind::Plugin;
+        if (r.body.contains("effect")) return Response::error(400, "give effect or plugin, not both");
+      } else if (!effect_from_json(r.body["effect"], kind)) {
+        return Response::error(400, "effect must be a slug or number from GET /v1/effects, or plugin an id from GET /v1/fx/plugins");
+      }
       FxChainEdit e;
       e.verb = FxChainVerb::Insert;
       e.target = t;
       e.kind = kind;
+      if (plugin) e.text = r.body["plugin"].as_string();
       e.pos = r.body["pos"].is_number() ? static_cast<int>(r.body["pos"].as_int()) : -1;
       e.value = opt_bool(r.body, "on", false) ? 1 : 0;
       FxChainResult res;
@@ -1726,15 +2221,29 @@ struct ApiBridge::Impl {
         e.kind = kind;
         if (!chain_edit(e, res, bad)) return bad;
       }
-      const auto set = [&](FxField f, double v) {
+      const auto set_field = [&](int field, double v) {
         FxChainEdit e;
         e.verb = FxChainVerb::Set;
         e.target = t;
         e.id = static_cast<int>(id);
-        e.field = static_cast<int>(f);
+        e.field = field;
         e.value = v;
         return chain_edit(e, res, bad);
       };
+      const auto set = [&](FxField f, double v) { return set_field(static_cast<int>(f), v); };
+      if (r.body.contains("params")) {  // plug-in parameters: {"<index>": 0..1}
+        const Json& ps = r.body["params"];
+        if (!ps.is_object()) return Response::error(400, "params is an object of parameter index -> 0..1");
+        for (std::size_t k = 0; k < ps.size(); ++k) {
+          char* end = nullptr;
+          const std::string& key = ps.key_at(k);
+          const long idx = std::strtol(key.c_str(), &end, 10);
+          if (key.empty() || *end || idx < 0 || idx > 4095 || !ps.at(k).is_number() || ps.at(k).as_double() < 0 || ps.at(k).as_double() > 1)
+            return Response::error(400, "params is an object of parameter index -> 0..1");
+        }
+        for (std::size_t k = 0; k < ps.size(); ++k)
+          if (!set_field(kFxFieldPluginParam + std::atoi(ps.key_at(k).c_str()), ps.at(k).as_double())) return bad;
+      }
       if (r.body.contains("on") && !set(FxField::On, r.body["on"].as_bool() ? 1 : 0)) return bad;
       for (const F& f : fields)
         if (r.body.contains(f.key) && !set(f.f, r.body[f.key].as_double())) return bad;
@@ -1825,6 +2334,66 @@ struct ApiBridge::Impl {
       FxChainResult res;
       if (!chain_edit(e, res, bad)) return bad;
       return Response::ok(chain_json(t));
+    });
+    // ---- plug-ins and named presets ----
+    s.add_route("GET", "/v1/fx/chains/{target}/units/{id}/plugin", "read", [this](const Request& r) {
+      int t = 0;
+      Response bad;
+      std::int64_t id = 0;
+      if (!chain_target(r, t, bad)) return bad;
+      if (!int_param(r, "id", id) || !unit_exists(t, static_cast<int>(id))) return Response::error(404, "no such unit in this chain");
+      const Json info = plugin_unit_json(t, static_cast<int>(id), true);
+      if (!info.is_object() || !info.contains("params")) return Response::error(409, "that unit is not a loaded plug-in");
+      return Response::ok(info);
+    });
+    s.add_route("GET", "/v1/fx/plugins", "read", [](const Request&) { return Response::ok(plugins_json()); });
+    s.add_route("POST", "/v1/fx/plugins/rescan", "control:fx", [](const Request&) {
+      if (!plugin_service().status().supported) return Response::error(409, "this build cannot host plug-ins");
+      plugin_service().rescan(true);
+      Response ok = Response::ok(plugins_json());
+      ok.status = 202;
+      return ok;
+    });
+    s.add_route("GET", "/v1/fx/presets", "read", [](const Request&) {
+      Json a = Json::array();
+      for (const std::string& n : chain_presets_list()) a.push_back(n);
+      Json j = Json::object();
+      j.set("presets", std::move(a));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/fx/presets/delete", "control:fx", [](const Request& r) {
+      std::string err;
+      if (!r.body["name"].is_string() || !chain_preset_delete(r.body["name"].as_string(), err)) return Response::error(404, err.empty() ? "name must be a preset name" : err);
+      Response ok;
+      ok.status = 204;
+      return ok;
+    });
+    s.add_route("POST", "/v1/fx/chains/{target}/presets", "control:fx:{target}", [this](const Request& r) {
+      int t = 0;
+      Response bad;
+      if (!chain_target(r, t, bad)) return bad;
+      if (!r.body["name"].is_string()) return Response::error(400, "name must be the preset's name");
+      std::string err;
+      const std::string clean = chain_preset_clean_name(r.body["name"].as_string());
+      if (!chain_preset_save(clean, fx_chain_save_full(host.api_engine(), t), err)) return Response::error(400, err);
+      Json j = Json::object();
+      j.set("name", clean);
+      Response ok = Response::ok(std::move(j));
+      ok.status = 201;
+      return ok;
+    });
+    s.add_route("POST", "/v1/fx/chains/{target}/presets/load", "control:fx:{target}", [this](const Request& r) {
+      int t = 0;
+      Response bad;
+      if (!chain_target(r, t, bad)) return bad;
+      if (!r.body["name"].is_string()) return Response::error(400, "name must be the preset's name");
+      std::string body, err;
+      if (!chain_preset_read(r.body["name"].as_string(), body, err)) return Response::error(404, err);
+      std::string note;
+      if (!fx_chain_load_full(host.api_engine(), t, body, &note)) return Response::error(409, note.empty() ? "the engine refused the preset" : note);
+      Json j = chain_json(t);
+      j.set("notes", note);
+      return Response::ok(std::move(j));
     });
   }
 
@@ -2338,6 +2907,23 @@ struct ApiBridge::Impl {
         j.set("beat_synced", e.beat_synced);
         j.set("colour_only", e.colour);
         j.set("release", e.release);
+        j.set("tail", e.tail);
+        j.set("default_wet", static_cast<double>(e.default_wet));
+        j.set("default_param", static_cast<double>(e.default_param));
+        j.set("default_beats", static_cast<double>(e.default_beats));
+        Json ps = Json::array();  // the sliders of the effect: field name in a unit, label, default (all 0..1)
+        const auto add = [&](const char* field, const char* label, double def) {
+          if (!label[0]) return;
+          Json p = Json::object();
+          p.set("field", field);
+          p.set("name", label);
+          p.set("default", def);
+          ps.push_back(std::move(p));
+        };
+        add("param", e.param_name, e.default_param);
+        add("param2", e.param2_name, e.kind == EffectKind::Filter ? 0.3 : 0.5);
+        add("param3", e.param3_name, 0.5);
+        j.set("parameters", std::move(ps));
         a.push_back(std::move(j));
       }
       return Response::ok(std::move(a));
@@ -3530,6 +4116,8 @@ struct ApiBridge::Impl {
       });
     }
     add_chain_routes();
+    add_browser_routes();
+    add_sync_routes();
     add_queue_routes();
     add_keymap_stem_routes();
     if (!server->start(&error)) {

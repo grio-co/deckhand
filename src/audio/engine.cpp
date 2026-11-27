@@ -19,6 +19,8 @@
 #include "deckhand/log/log.hpp"
 #include "dsp.hpp"
 #include "fx.hpp"
+#include "fx_plugin.hpp"
+#include "deckhand/audio/plugin_host.hpp"
 #include "miniaudio.h"
 #include "mic.hpp"
 #include "recorder.hpp"
@@ -2598,6 +2600,36 @@ struct Engine::Impl {
     out.ptr = u;
     return u;
   }
+  // A plug-in unit: vetted (blocklist, out-of-process probe) and opened here, off the audio thread. With `strict` a failure
+  // returns nullptr and `err` says why (an interactive Insert / Replace); otherwise the unit is kept unloaded, passing audio
+  // through, and `err` is only a note (a preset that names a plug-in that is gone).
+  FxUnit* new_plugin_unit(const std::string& plugin_id, int target, int id, int legacy, std::vector<FxUnit*>& created, ModelUnit& out,
+                          bool strict, std::string& err) {
+    plugins::PluginInfo info;
+    std::string why;
+    const bool vetted = plugin_host_vet(plugin_id, info, why);
+    if (!vetted && strict) {
+      err = why;
+      return nullptr;
+    }
+    FxUnit* u = new_unit(EffectKind::Plugin, target, id, legacy, created, out);
+    if (vetted) {
+      if (!fx_plugin_attach(*u, info, sr, why)) {
+        if (strict) {
+          created.pop_back();
+          delete u;
+          err = why;
+          return nullptr;
+        }
+      }
+    } else {
+      u->plug = new PluginSlot;
+      u->plug->info.id = plugin_id;
+      u->plug->error = why;
+    }
+    if (!why.empty() && !vetted) err += (err.empty() ? "" : "; ") + why;
+    return u;
+  }
   static int model_new_id(ChainModel& m) {
     for (int tries = 0; tries < 65536; ++tries) {
       const int id = m.next_id;
@@ -2627,7 +2659,16 @@ struct Engine::Impl {
     const int t = e.target;
     if (e.verb == FxChainVerb::Get || e.verb == FxChainVerb::Save) {
       r.info = chain_info(t);
-      if (e.verb == FxChainVerb::Save) r.text = fx_chain_to_json(r.info);
+      if (e.verb == FxChainVerb::Save) {
+        FxPresetExtra extra;
+        {
+          std::lock_guard<std::mutex> lk(chain_mx);
+          const ChainModel& m = models[t];
+          for (int i = 0; i < m.count && i < kFxChainMax; ++i)
+            if (m.unit[i].ptr && m.unit[i].ptr->kind == EffectKind::Plugin && m.unit[i].ptr->plug) extra.plugin_id[i] = m.unit[i].ptr->plug->info.id;
+        }
+        r.text = fx_chain_to_json(r.info, &extra);
+      }
       r.ok = true;
       return true;
     }
@@ -2657,7 +2698,14 @@ struct Engine::Impl {
         if (!id) return fail("no free unit id");
         const int pos = e.pos < 0 || e.pos > m.count ? m.count : e.pos;
         ModelUnit mu;
-        FxUnit* u = new_unit(e.kind, t, id, legacy, created, mu);
+        FxUnit* u;
+        if (e.kind == EffectKind::Plugin) {
+          std::string perr;
+          u = new_plugin_unit(e.text, t, id, legacy, created, mu, true, perr);
+          if (!u) return fail(perr);
+        } else {
+          u = new_unit(e.kind, t, id, legacy, created, mu);
+        }
         if (e.value > 0.5) {
           fx_unit_set(*u, FxField::On, 1);
           fx_unit_info(*u, mu.info);
@@ -2700,7 +2748,14 @@ struct Engine::Impl {
         const bool was_on = m.unit[i].info.on != 0;
         const int tag = m.unit[i].info.legacy_slot;
         ModelUnit mu;
-        FxUnit* u = new_unit(e.kind, t, e.id, legacy >= 0 ? legacy : tag, created, mu);
+        FxUnit* u;
+        if (e.kind == EffectKind::Plugin) {
+          std::string perr;
+          u = new_plugin_unit(e.text, t, e.id, legacy >= 0 ? legacy : tag, created, mu, true, perr);
+          if (!u) return fail(perr);
+        } else {
+          u = new_unit(e.kind, t, e.id, legacy >= 0 ? legacy : tag, created, mu);
+        }
         if (was_on && legacy < 0) {
           fx_unit_set(*u, FxField::On, 1);
           fx_unit_info(*u, mu.info);
@@ -2716,14 +2771,22 @@ struct Engine::Impl {
         break;
       case FxChainVerb::Load: {
         FxChainInfo spec;
+        FxPresetExtra extra;
         std::string perr;
-        if (!fx_chain_from_json(e.text, spec, perr)) return fail("bad preset: " + perr);
+        if (!fx_chain_from_json(e.text, spec, perr, &extra)) return fail("bad preset: " + perr);
         m.count = 0;
         for (int i = 0; i < spec.count; ++i) {
           const FxUnitInfo& su = spec.unit[i];
           const int id = model_new_id(m);
           ModelUnit mu;
-          FxUnit* u = new_unit(su.kind, t, id, -1, created, mu);
+          FxUnit* u;
+          if (su.kind == EffectKind::Plugin) {
+            std::string note;
+            u = new_plugin_unit(extra.plugin_id[i], t, id, -1, created, mu, false, note);
+            if (!note.empty()) r.error += (r.error.empty() ? "" : "; ") + note;
+          } else {
+            u = new_unit(su.kind, t, id, -1, created, mu);
+          }
           fx_unit_set(*u, FxField::On, su.on ? 1 : 0);
           fx_unit_set(*u, FxField::Wet, su.wet);
           fx_unit_set(*u, FxField::Param, su.param);
@@ -2747,6 +2810,15 @@ struct Engine::Impl {
       case FxChainVerb::Set: {
         const int i = model_find(m, e.id);
         if (i < 0) return fail("no such effect in the chain");
+        if (e.field >= kFxFieldPluginParam) {  // a plug-in parameter: lock free on the plug-in, no command needed
+          FxUnit* pu = live.unit[i].ptr;
+          if (!pu || pu->kind != EffectKind::Plugin) return fail("not a plug-in");
+          if (!fx_plugin_set_param(*pu, e.field - kFxFieldPluginParam, e.value)) return fail("no such plug-in parameter");
+          r.id = e.id;
+          r.info = model_info(live);
+          r.ok = true;
+          return true;
+        }
         if (e.field < 0 || e.field >= static_cast<int>(FxField::Count)) return fail("unknown effect parameter");
         if (!std::isfinite(e.value)) return fail("not a number");
         Command c;
@@ -2812,12 +2884,29 @@ struct Engine::Impl {
     return true;
   }
 
+  bool plugin_op(const PluginOp& op, PluginOpResult& r) {
+    r = PluginOpResult{};
+    if (!fx_target_valid(op.target)) return r.error = "no such effect chain", false;
+    if (static_cast<int>(op.kind) >= static_cast<int>(PluginOpKind::Count)) return r.error = "unknown plug-in operation", false;
+    std::lock_guard<std::mutex> lk(chain_mx);
+    const ChainModel& m = models[op.target];
+    const int i = model_find(m, op.id);
+    FxUnit* u = i >= 0 ? m.unit[i].ptr : nullptr;
+    if (!u || u->kind != EffectKind::Plugin) return r.error = "that unit is not a plug-in", false;
+    switch (op.kind) {
+      case PluginOpKind::Info: r.data = fx_plugin_info_json(*u); r.ok = true; return true;
+      case PluginOpKind::GetState: r.ok = fx_plugin_get_state(*u, r.data, r.error); return r.ok;
+      case PluginOpKind::SetState: r.ok = fx_plugin_set_state(*u, op.data, r.error); return r.ok;
+      default: return r.error = "unknown plug-in operation", false;
+    }
+  }
+
   // Op::FxSelect on a fixed slot: insert, replace or remove the unit tagged with that slot.
   void legacy_select(const Command& c) {
     if (!legacy_target(c.deck) || c.i < 0 || c.i >= kFxSlots) return;
     int k = static_cast<int>(c.d);
     EffectKind kind = k > 0 && k < static_cast<int>(EffectKind::Count) ? static_cast<EffectKind>(k) : EffectKind::None;
-    if (kind != EffectKind::None && effect_info(kind)->colour) kind = EffectKind::None;  // colour effects belong to Op::ColorFx
+    if (kind != EffectKind::None && (effect_info(kind)->colour || kind == EffectKind::Plugin)) kind = EffectKind::None;  // colour effects belong to Op::ColorFx
     FxChainEdit e;
     e.target = c.deck;
     FxChainResult r;
@@ -3466,6 +3555,7 @@ MixerView Engine::mixer() const { return impl_->mixer_view.read(); }
 bool Engine::poll(EngineEvent& out) { return impl_->events.pop(out); }
 
 bool Engine::fx_chain_edit(const FxChainEdit& edit, FxChainResult& result) { return impl_->chain_edit(edit, result); }
+bool Engine::plugin_op(const PluginOp& op, PluginOpResult& result) { return impl_->plugin_op(op, result); }
 
 FxChainInfo Engine::fx_chain(int target) const {
   if (!fx_target_valid(target)) return FxChainInfo{};

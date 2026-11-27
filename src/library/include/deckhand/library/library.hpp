@@ -347,6 +347,48 @@ std::string smart_rules_json(const std::vector<SmartRule>& rules);
 // False (rules cleared) when the text is not what smart_rules_json writes.
 bool smart_rules_from_json(const std::string& json, std::vector<SmartRule>& rules);
 
+// ---- relocating moved files (relocate.inc) ----
+struct RelocateOptions {
+  std::vector<std::string> folders;  // where to look (searched recursively)
+  double duration_tolerance_ms = 1500;
+  // Length of an audio file in ms (0 / nullopt = unknown). The library cannot decode; callers that can pass this so a
+  // match by name can be confirmed by duration.
+  std::function<std::int64_t(const std::string&)> probe_duration;
+  bool allow_name_only = false;  // accept a lone name match nothing else confirms (reported as weak)
+  std::function<bool()> cancelled;
+};
+struct RelocateMatch {
+  std::int64_t track_id = 0;
+  std::string old_path, new_path;
+  std::string how;   // "hash" | "name+size" | "name+duration" | "name+size+duration" | "name" | "sibling" | "manual"
+  bool weak = false;  // only the file name agrees
+};
+struct RelocateAmbiguous {
+  std::int64_t track_id = 0;
+  std::string old_path;
+  std::vector<std::string> candidates;
+};
+struct RelocateReport {
+  int missing = 0;  // tracks whose file is gone
+  int scanned = 0;  // files looked at in the search folders
+  std::vector<RelocateMatch> found;
+  std::vector<RelocateAmbiguous> ambiguous;  // several candidates tie: never guessed
+  std::vector<std::int64_t> not_found;
+};
+struct RelocateResult {
+  int applied = 0, skipped = 0;  // skipped: the file vanished, the track is no longer missing, or the new path is taken
+  std::int64_t batch_id = 0;      // one journal batch: undo_batch(batch_id) puts the old paths back
+};
+
+// ---- browsing by directory (relocate.inc) ----
+struct DiskFolder {
+  std::string path;  // directory, forward slashes, no trailing slash
+  std::string name;  // last component
+  int tracks = 0;    // tracks directly in it
+  int total = 0;     // tracks in it and below
+  bool has_children = false;
+};
+
 class Library {
  public:
   explicit Library(const std::string& db_path);
@@ -537,6 +579,27 @@ class Library {
   // Ranked suggestions for what to play after `seed_id`. Deterministic: ties go to the lower track id.
   std::vector<NextTrack> suggest(std::int64_t seed_id, const NextTrackOptions& options = {});
   NextTrackWeights suggest_weights();  // the defaults with the settings "suggest.w.*" applied
+
+  // ---- relocating moved files ----
+  // Dry run: looks for the files of tracks that are missing. Changes nothing.
+  RelocateReport relocate_scan(const RelocateOptions& options);
+  // Applies the given matches (typically report.found) in one journal batch, keeping size and content hash.
+  RelocateResult relocate_apply(const std::vector<RelocateMatch>& matches);
+  // Manual relink: the track's file is now at new_path. Journalled ("path"); undoable.
+  RelocateResult relink_track(std::int64_t track_id, const std::string& new_path);
+  // Before relinking: other missing tracks that sat in the same old folder (or below it) whose file exists at the same
+  // place relative to the new folder. Feed report.found to relocate_apply().
+  RelocateReport relink_siblings(std::int64_t track_id, const std::string& new_path);
+
+  // ---- folder views ----
+  // A playlist folder shows the tracks of every playlist beneath it, each once. Default order: playlist by playlist (tree
+  // order), then position; other sorts order the whole set. `sources` (optional) gets track -> name of the first playlist.
+  std::vector<std::int64_t> folder_track_ids(std::int64_t folder_id, const std::string& search, SortKey sort = SortKey::Default,
+                                             bool descending = false, std::map<std::int64_t, std::string>* sources = nullptr);
+  // The library by the directories of its files. Children of `dir` ("" = top: the roots of the paths).
+  std::vector<DiskFolder> disk_folders(const std::string& dir = {});
+  std::vector<std::int64_t> disk_folder_track_ids(const std::string& dir, bool recursive, const std::string& search,
+                                                  SortKey sort = SortKey::Default, bool descending = false);
 
   std::string setting(const std::string& key, const std::string& fallback = {});
   void set_setting(const std::string& key, const std::string& value);

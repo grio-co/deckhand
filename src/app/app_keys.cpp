@@ -337,6 +337,8 @@ void App::do_ui_action(const std::string& name, bool has_value, double value) {
     action("edit_track");
   } else if (n == "compatible") {
     action("compatible");
+  } else if (n == "chain" || n.compare(0, 6, "chain.") == 0) {
+    action(n.c_str());
   } else if (n == "settings") {
     action("settings");
   } else if (n == "controller") {
@@ -361,8 +363,9 @@ void App::do_ui_action(const std::string& name, bool has_value, double value) {
     action("sampler");
   } else if (n == "learn") {
     action("learn");
-  } else if (n == "columns") {
-    action("columns");
+  } else if (n == "columns" || n == "trash" || n == "layouts" || n == "locate" || n == "split" || n == "focus_pane" || n == "layout_next" ||
+             n == "layout_prev") {
+    action(n.c_str());
   } else if (n == "close_panel") {
     key(DH_KEY_ESCAPE, 0);  // closes the panel, or clears the search
   } else if (n == "window.browser") {

@@ -31,6 +31,7 @@
 #include <mutex>
 #include <thread>
 
+#include "deckhand/audio/plugin_host.hpp"
 #include "deckhand/audio/engine.hpp"
 #include "deckhand/audio/ipc.hpp"
 #include "deckhand/audio/ui_liveness.hpp"
@@ -240,6 +241,7 @@ bool Host::init(std::string& error) {
   sh_->hdr.engine_state.store(kRunning);
   service_ = std::thread([this] { service_main(); });
   server_ = std::thread([this] { server_main(); });
+  plugin_host_set_dir(opt_.data_dir + "/plugins");  // scan cache, blocklist and probe results, shared with the app
   DH_LOG(Info, "engine process %u up (data %s)%s", current_pid(), opt_.data_dir.c_str(), opt_.null_audio ? ", null audio" : "");
   return true;
 }
@@ -777,6 +779,25 @@ void Host::dispatch(std::uint8_t type, Rd& rd, Wr& out) {
       out.str(res.error);
       out.str(res.text);
       put_chain_info(out, res.info);
+      return;
+    }
+    case kReqPluginOp: {  // plug-in side channel: parameter list, state blob; the UI is untrusted input
+      PluginOp op;
+      const std::uint8_t kind = rd.u8();
+      op.target = rd.u8();
+      op.id = rd.i32();
+      op.data = rd.blob(kPluginBlobMax);
+      PluginOpResult res;
+      bool ok = rd.ok() && kind < static_cast<std::uint8_t>(PluginOpKind::Count);
+      if (ok) {
+        op.kind = static_cast<PluginOpKind>(kind);
+        ok = engine_.plugin_op(op, res);
+      } else {
+        res.error = "bad request";
+      }
+      out.u8(ok ? 1 : 0);
+      out.str(res.error);
+      out.blob(res.data);
       return;
     }
     case kReqStemsAttach: {  // stems of a loaded track, read from the stem cache by this process; the UI is untrusted input

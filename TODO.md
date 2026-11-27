@@ -82,10 +82,10 @@ Library and discovery
       currently feed back into the habit summary)
 - [~] Track suggestions from the library by tempo, key, genre, energy and play history (unseen on screen)
 - [~] Two-player audition for set preparation: preparation mode on decks 3/4, headphones only (unheard)
-- [~] Browser: column view, filters and smart playlists exist; add layout presets, a second browser
-      pane, recursive folder view, automatic relocation of missing files
+- [~] Browser: column view, filters, smart playlists, layout presets, a second pane, recursive folder
+      view, relocation of missing files (all unseen on screen; no playlist trash)
 - [~] Shared (collaborative) playlists through the sync folder (API; no menu entry yet)
-- [x] Metadata safety: edit history, undo, restorable trash (API and CLI; no trash or history screen yet)
+- [x] Metadata safety: edit history, undo, restorable trash (API, CLI, panels; panels unseen)
 - [x] Library import/export through the common DJ library XML and M3U8 (untested against other applications' files)
 - [ ] Streaming services and promo pools: each needs a partner agreement and account; pick services
       with the owner before any work
@@ -98,9 +98,9 @@ Performance
 - [~] Key sync and 16 hot cue slots (unheard, unseen; USB export writes the first eight cues and reports the rest)
 - [~] Stems: offline separation with a disk cache (in progress); then per-deck stem playback,
       mute/solo/FX per stem, stem pads on controllers
-- [~] Linked mix points between tracks, used by automix and suggestions (unseen, unheard; not synced between devices)
+- [~] Linked mix points between tracks, used by automix and suggestions (unseen, unheard; synced between devices)
 - [~] Sampler: 16 slots, 8-pattern step sequencer, sample scratch, loop slicing (unheard; steps play whole samples, not slices)
-- [ ] More effects: beat-synced set, build-up/drop "merge" effect, isolator and mixer-style effects
+- [~] More effects: Tape Echo, Beat Reverb, Tape Stop added (unheard); still open: build-up/drop "merge" effect, isolator and mixer-style effects
 - [ ] Timecode vinyl control (DVS): needs an audio interface with phono inputs to test
 - [x] MIDI learn, custom mappings (`.dhmap`), master output from the computer
 - [~] Custom keyboard shortcuts: keymap, defaults, panel (never run on screen; Linux change uncompiled; Windows on fixed keys)
@@ -113,8 +113,9 @@ Visuals, lighting, recording
 
 Sync
 - [x] Library sync through any replicated folder, passphrase-encrypted
-- [ ] Sync the audio files themselves (optional, per playlist) and analysis data, so a second
-      device needs no re-analysis
+- [~] Sync the audio files themselves (optional, per playlist) and analysis data (macOS test data
+      only; grid, key, tempo and gain travel with the track, not the analysis bundle; no clean-up
+      of stored audio no playlist uses; a re-analysis elsewhere can still replace a locked grid)
 - [ ] Loading from cloud storage directly on club players is a closed vendor service: not possible
       clean-room; the answer here is fast, verified USB/SD export
 
@@ -134,8 +135,9 @@ Gaps in the incumbent that DeckHand should close (owner's list, 2026-11-26)
       untested with the separate engine process; fader/EQ moves are quarter-beat steps)
 - [x] Duplicate finder with merge (panel, API, CLI)
 - [ ] Opt-in metadata and key fill from an open music database
-- [~] Effect chains per deck/master/mic/sampler (engine, controls, API; no chain editor on screen
-      yet; stem buses stored but not processed); then Audio Unit / VST3 hosting in the engine process
+- [~] Effect chains per deck/master/mic/sampler/stem bus with a chain editor and Audio Unit
+      plug-ins on macOS (unseen, unheard; only Apple's built-in units loaded so far; no plug-in
+      windows or host tempo); VST3 hosting not started
 - [~] Any controller: open `.dhmap` mappings and learn exist; ship mappings for common controllers
       from other makers (each untested until someone has the hardware)
 - [x] No paid tiers: recording, two-player preparation, filters and sync are in the one free build
@@ -146,6 +148,9 @@ Beyond the list
       OBS integration; portable mode; no account, no subscription
 
 ## Known limits of the current build
+- The new REST routes for chains, plug-ins, browser and sync are compiled and checked against
+  the OpenAPI document but no test calls them.
+- A plug-in's first load holds chain edits for up to 8 s while it is test-loaded.
 - If the engine helper misses its start-up limit (60 s), the app falls back to in-process audio
   and the late helper exits by itself; the wait shows only in the status line and the log.
 - Controller panel: channel fader and crossfader gain laws, EQ kill depth and trim range need the

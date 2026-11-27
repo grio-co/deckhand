@@ -45,6 +45,10 @@ const char* App::panel_role(Panel p) {
     case Panel::AddTo: return "add_to";
     case Panel::CueEdit: return "cue";
     case Panel::Columns: return "columns";
+    case Panel::Trash: return "trash";
+    case Panel::Chain: return "chain";
+    case Panel::Layouts: return "layouts";
+    case Panel::Locate: return "locate";
     case Panel::Smart: return "smart";
     case Panel::Shortcuts: return "shortcuts";
     case Panel::Tools: return "tools";

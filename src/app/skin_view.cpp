@@ -151,6 +151,7 @@ Target map_binding(std::string_view n) {
       t.special = Special::SetValue;
       return t;
     }
+    if (k == "chain") return action("chain", d);
     if (k == "pads.bank") return action("pad_bank", d);
     if (k == "pads.bank.label") return info("pad_bank", d);
     if (k == "key_sync" || k == "key_match") return control(dn + "." + k, d);
@@ -248,7 +249,7 @@ Target map_binding(std::string_view n) {
   if (g == "app" && s.size() == 3 && s[1].name == "controller" && s[2].name == "open") return action("controller_open");  // the controller's name: click opens its panel
   if (g == "app" && s.size() == 2) {
     const std::string& k = s[1].name;
-    for (const char* a : {"import", "rec", "export", "language", "skin", "layout", "settings", "sampler", "learn"})
+    for (const char* a : {"import", "rec", "export", "language", "skin", "layout", "settings", "sampler", "learn", "chain"})
       if (k == a) return action(a);
     for (const char* i : {"any_grid_edit", "controller", "audio", "status", "has_import", "multi_language", "multi_skin", "has_four", "rec_time", "tracks_loading", "multi_window"})
       if (k == i) return info(i);
@@ -267,6 +268,13 @@ Target map_binding(std::string_view n) {
     if (k == "playlist.delete") return action("playlist_delete");
     if (k == "edit") return action("edit_track");
     if (k == "columns") return action("columns");
+    if (k == "trash") return action("trash");
+    if (k == "layouts") return action("layouts");
+    if (k == "locate") return action("locate");
+    if (k == "split") return action("split");
+    if (k == "focus_pane") return action("focus_pane");
+    if (k == "layout_next") return action("layout_next");
+    if (k == "layout_prev") return action("layout_prev");
     if (k == "compatible") return action("compatible");
     if (k == "playlist.add_smart") return action("playlist_add_smart");
     return {};

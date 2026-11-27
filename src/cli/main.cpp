@@ -76,6 +76,7 @@ int usage() {
                "  export-m3u8 FILE|DIR [--playlist ID] [--relative 1]   one playlist to a file, or (no --playlist) all into a folder\n"
                "  import-m3u8 FILE [--name NAME] [--parent ID] [--dry-run 1]\n"
                "  duplicates [--mode exact|likely|all] [--same-bpm 1] [--same-key 1] [--no-hash 1]   list duplicate groups (hashes files that share a size first)\n"
+               "  relocate FOLDER... [--apply 1] [--name-only 1]   find moved files of missing tracks (dry run unless --apply 1)\n"
                "  merge-duplicates KEEP_ID REMOVE_ID[,ID...] [--copy-cues missing|all|none] [--dry-run 1]   removed tracks go to the trash; files stay\n"
                "  strip-analysis --kinds grid,key,loudness,waveform,first_sound,phrases,vocals,stems  (--ids 1,2 | --playlist ID | --search TEXT | --all 1) [--force 1] [--dry-run 1]\n"
                "  backup                       copy the library into backups/   [--data DIR]\n"
@@ -359,6 +360,22 @@ int main(int argc, char** argv) {
                       m.row.play_count, m.cue_count, m.row.path.c_str());
       }
       std::printf("%zu groups\n", groups.size());
+    } else if (cmd == "relocate" && argc >= 3) {
+      RelocateOptions o;
+      for (int i = 2; i < argc && std::strncmp(argv[i], "--", 2) != 0; ++i) o.folders.push_back(argv[i]);
+      o.allow_name_only = !std::strcmp(arg_value(argc, argv, "--name-only", "0"), "1");
+      const RelocateReport r = lib.relocate_scan(o);
+      std::printf("%d missing, %d files looked at\n", r.missing, r.scanned);
+      for (const auto& m : r.found)
+        std::printf("  %lld\t%s\t%s\t-> %s%s\n", static_cast<long long>(m.track_id), m.how.c_str(), m.old_path.c_str(), m.new_path.c_str(), m.weak ? "\t(name only)" : "");
+      for (const auto& a : r.ambiguous) std::printf("  %lld\tambiguous, %zu candidates: %s\n", static_cast<long long>(a.track_id), a.candidates.size(), a.old_path.c_str());
+      std::printf("%zu found, %zu ambiguous, %zu not found\n", r.found.size(), r.ambiguous.size(), r.not_found.size());
+      if (!std::strcmp(arg_value(argc, argv, "--apply", "0"), "1")) {
+        const RelocateResult a = lib.relocate_apply(r.found);
+        std::printf("moved %d, skipped %d; edit batch %lld (undo it to put the old paths back)\n", a.applied, a.skipped, static_cast<long long>(a.batch_id));
+      } else {
+        std::printf("dry run: add --apply 1 to move them\n");
+      }
     } else if (cmd == "merge-duplicates" && argc >= 4) {
       std::vector<std::int64_t> remove;
       std::string list = argv[3];

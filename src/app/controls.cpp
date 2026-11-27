@@ -1,5 +1,8 @@
 #include "deckhand/app/controls.hpp"
 
+#include "deckhand/app/chain_presets.hpp"
+#include "deckhand/app/plugin_service.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -705,6 +708,11 @@ std::vector<ControlInfo> list_controls() {
       out.push_back({b + "bypass", "toggle", "0 off, 1 on", "Bypass the whole chain"});
       out.push_back({b + "wet", "value", "0..1", "Chain wet / dry"});
       out.push_back({b + "clear", "trigger", "none", "Remove every unit"});
+      out.push_back({b + "insert_plugin", "trigger", "body text = plug-in id (GET /v1/fx/plugins)", "Add a plug-in unit at the end of the chain (also insert_plugin.<pos>; insert_plugin_on starts it on)"});
+      out.push_back({b + "unit.pp<index>.<id>", "value", "0..1", "A plug-in unit's parameter by its position in the unit's parameter list"});
+      out.push_back({b + "preset_save", "trigger", "body text = preset name", "Save the chain (and its plug-in states) as a named preset"});
+      out.push_back({b + "preset_load", "trigger", "body text = preset name", "Replace the chain with a named preset"});
+      out.push_back({b + "preset_delete", "trigger", "body text = preset name", "Delete a named preset"});
       out.push_back({b + "save", "trigger", "none", "Returns the chain preset as JSON"});
       out.push_back({b + "load", "trigger", "body text = preset JSON", "Replace the chain with a preset"});
     }
@@ -726,6 +734,7 @@ std::vector<ControlInfo> list_controls() {
     out.push_back({dk + ".stems.enable", "toggle", "0 original mix, 1 stems, none = toggle", "Play the stems or the original mix"});
     out.push_back({dk + ".stems.detach", "trigger", "none", "Drop the stems of the loaded track"});
   }
+  out.push_back({"plugins.rescan", "trigger", "none", "Scan for installed effect plug-ins and probe the new ones (progress in the status line)"});
   list_seq_controls(out);
   for (const Def& d : kPreview) out.push_back({std::string("preview.") + d.name, kind_name(d.kind), d.range, d.help});
   for (int slot = 1; slot <= kSamplerSlots; ++slot)
@@ -876,6 +885,14 @@ bool build_control(const IEngine& engine, std::string_view name, bool has_value,
 }
 
 bool apply_control(IEngine& engine, std::string_view name, bool has_value, double value, std::string& error) {
+  if (name == "plugins.rescan") {
+    if (!plugin_service().status().supported) {
+      error = "this build cannot host plug-ins";
+      return false;
+    }
+    plugin_service().rescan(true);
+    return true;
+  }
   {
     int deck = 0, slot = 0;
     std::string action;
@@ -1115,7 +1132,39 @@ bool apply_chain_control(IEngine& engine, std::string_view name, bool has_value,
     }
     return true;
   };
-  const double kind_hi = static_cast<double>(EffectKind::Count) - 1;
+  const double kind_hi = static_cast<double>(EffectKind::Plugin) - 1;  // plug-ins have their own control
+  if (verb == "insert_plugin" || verb == "insert_plugin_on") {
+    if (text.empty()) {
+      error = "insert_plugin needs the plug-in id as the request's \"text\" (ids are in GET /v1/fx/plugins)";
+      return false;
+    }
+    e.verb = FxChainVerb::Insert;
+    e.kind = EffectKind::Plugin;
+    e.text = text;
+    e.pos = has_n ? n : -1;
+    e.value = verb == "insert_plugin_on" ? 1 : 0;
+    if (!run()) return false;
+    out_text = std::to_string(r.id);
+    return true;
+  }
+  if (verb == "preset_save" || verb == "preset_load" || verb == "preset_delete") {
+    const std::string clean = chain_preset_clean_name(text);
+    if (clean.empty()) {
+      error = "give the preset's name as the request's \"text\"";
+      return false;
+    }
+    if (verb == "preset_delete") return chain_preset_delete(clean, error);
+    if (verb == "preset_save") return chain_preset_save(clean, fx_chain_save_full(engine, target), error);
+    std::string body;
+    if (!chain_preset_read(clean, body, error)) return false;
+    std::string note;
+    if (!fx_chain_load_full(engine, target, body, &note)) {
+      error = note.empty() ? "the engine refused the preset" : note;
+      return false;
+    }
+    out_text = note;  // plug-ins that could not be restored, if any
+    return true;
+  }
   if (verb == "insert" || verb == "insert_on") {
     if (!need_value(1, kind_hi, "effect number 1.. from GET /v1/effects")) return false;
     e.verb = FxChainVerb::Insert;
@@ -1163,6 +1212,17 @@ bool apply_chain_control(IEngine& engine, std::string_view name, bool has_value,
           if (i < ci.count && ci.unit[i].id == n) e.value = ci.unit[i].on ? 0 : 1;
         }
       }
+      return run();
+    }
+    if (f.size() > 2 && f.substr(0, 2) == "pp") {  // a plug-in parameter by index
+      int idx = 0;
+      if (!parse_int(f.substr(2), idx) || idx < 0 || idx > 4095) {
+        error = "plug-in parameters look like unit.pp3.<id> (the index in the unit's parameter list)";
+        return false;
+      }
+      if (!need_value(0, 1, "0..1")) return false;
+      e.field = kFxFieldPluginParam + idx;
+      e.value = value;
       return run();
     }
     if (f == "wet") e.field = static_cast<int>(FxField::Wet);

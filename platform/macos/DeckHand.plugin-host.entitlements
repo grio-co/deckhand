@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Capturing audio (the microphone channel) under the hardened runtime. -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+  <!-- Only for the processes that host third-party effect plug-ins (the engine helper and the plug-in probe): an Audio Unit
+       is a bundle signed by its maker, and the hardened runtime's library validation refuses to load code signed by another
+       team. Without this entitlement only Apple's own units would load. The main app does not carry it. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

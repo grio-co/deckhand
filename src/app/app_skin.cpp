@@ -278,6 +278,11 @@ bool App::read_flag(const ui::Target& t) {
     if (n == "learn") return panel_ == Panel::Learn;
     if (n == "layout") return variant_ == "four";
     if (n == "columns") return panel_ == Panel::Columns;
+    if (n == "trash") return panel_ == Panel::Trash;
+    if (n == "chain") return panel_ == Panel::Chain;
+    if (n == "layouts") return panel_ == Panel::Layouts;
+    if (n == "locate") return panel_ == Panel::Locate;
+    if (n == "split") return split_ != SplitMode::Off;
     if (n == "compatible") return compat_on_;
     if (n == "preview_play") return engine_->preview().playing != 0;
     if (n == "grid_edit") return deck_ok && grid_edit_[d];
@@ -409,6 +414,36 @@ void App::do_action(const ui::Target& t) {
   } else if (n == "columns") {
     if (panel_ == Panel::Columns) close_panel();
     else open_panel(Panel::Columns);
+  } else if (n == "trash" || n == "layouts" || n == "locate") {
+    const Panel p = n == "trash" ? Panel::Trash : n == "layouts" ? Panel::Layouts : Panel::Locate;
+    if (panel_ == p) {
+      close_panel();
+    } else {
+      open_panel(p);
+      if (p == Panel::Locate) {
+        loc_siblings_ = false;
+        loc_scanned_ = false;
+        loc_report_ = {};
+        loc_note_.clear();
+      }
+      trash_dirty_ = true;
+    }
+  } else if (n == "chain" || n.compare(0, 6, "chain.") == 0) {
+    int target = t.deck >= 0 ? t.deck : kFxMaster;
+    if (n.size() > 6) {
+      int parsed = 0;
+      if (parse_fx_target(n.substr(6), parsed)) target = parsed;
+    } else if (panel_ == Panel::Chain && t.deck < 0) {
+      target = chain_target_;
+    }
+    if (panel_ == Panel::Chain && chain_target_ == target) close_panel();
+    else open_chain(target);
+  } else if (n == "split") {
+    toggle_split();
+  } else if (n == "focus_pane") {
+    focus_other_pane();
+  } else if (n == "layout_next" || n == "layout_prev") {
+    step_layout(n == "layout_next" ? 1 : -1);
   } else if (n == "compatible") {
     compat_on_ = !compat_on_;
     rows_dirty_ = true;
@@ -545,7 +580,7 @@ void App::draw_custom(const skin::ResolvedWidget& w, const ui::Target& t, const 
     case skin::Kind::Browser: {
       const auto cols = w.props.find("columns");
       const auto rh = w.props.find("row_h");
-      draw_tracks(r, theme_, cols != w.props.end() ? cols->second : "title,artist,bpm,key,time",
+      draw_browser_panes(r, theme_, cols != w.props.end() ? cols->second : "title,artist,bpm,key,time",
                   rh != w.props.end() ? std::clamp(static_cast<float>(std::atof(rh->second.c_str())), 14.0f, 48.0f) : 22.0f);
       break;
     }
@@ -971,7 +1006,7 @@ void App::draw_tree(const Rect& r, const ui::Theme& th) {
         rdrag_ = {};
       }
     }
-    const bool container = item.kind == TreeItem::Folder || item.kind == TreeItem::HistoryHeader;
+    const bool container = item.kind == TreeItem::Folder || item.kind == TreeItem::HistoryHeader || item.kind == TreeItem::DiskHeader;
     const float indent = 10 + 14.0f * static_cast<float>(item.depth) + (item.kind == TreeItem::Collection ? 0 : 6);
     const float ty = row.y + (row_h - 15) / 2;
     if (rename_id_ != 0 && item.id == rename_id_ && (item.kind == TreeItem::Playlist || item.kind == TreeItem::Folder)) {

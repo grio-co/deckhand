@@ -2,6 +2,7 @@
 // sampler, MIDI learn, track details, relink, USB export destinations and the add-to-playlist menu.
 // They take the raw pointer (ov_) because the main UI is blocked while one is open.
 #include "app_impl.hpp"
+#include "deckhand/app/sync_settings.hpp"
 
 #include <cctype>
 #include <cstdlib>
@@ -167,7 +168,9 @@ void App::open_panel(Panel p) {
       input_devices_ = engine_->input_devices();
       for (const auto& kv : std::vector<std::pair<const char*, const char*>>{{"api.enabled", "1"}, {"api.port", "7373"}, {"stream.files", "0"},
                                                                           {"stream.overlay", "0"}, {"obs.enabled", "0"}, {"preview.master", "0"}, {"stems.auto_attach", "1"}, {"keysync.mode", "0"}, {"keysync.fine", "0"}, {"browser.key_musical", "0"}, {"ui.show_phrases", "1"}, {"obs.host", "127.0.0.1"},
-                                                                          {"obs.port", "4455"}, {"obs.text_source", ""}, {"sync.folder", ""}})
+                                                                          {"obs.port", "4455"}, {"obs.text_source", ""}, {"sync.folder", ""}, {"sync.mix_links", "1"}, {"sync.analysis", "0"},
+                                                                          {"sync.audio_playlists", ""}, {"sync.music_folder", ""}, {"sync.audio_budget_mb", "0"}, {"sync.audio_import_budget_mb", "0"},
+                                                                          {"sync.allow_unencrypted_audio", "0"}})
         sv_[kv.first] = lib_->setting(kv.first, kv.second);
       sv_["sync.device_name"] = lib_->setting("sync.device_name", host_name());
       f_sync_folder_.text = sv_["sync.folder"];
@@ -175,6 +178,9 @@ void App::open_panel(Panel p) {
       sv_["sync.password"] = lib_->setting("sync.password");
       f_sync_pass_.text = sv_["sync.password"];
       f_sync_pass_.secret = true;
+      f_sync_music_.text = sv_["sync.music_folder"];
+      f_sync_budget_.text = sv_["sync.audio_budget_mb"];
+      f_sync_import_.text = sv_["sync.audio_import_budget_mb"];
       post_kind(Job::SyncInfo);  // devices and last sync, read on the loader thread
       f_port_.text = sv_["api.port"];
       f_obs_host_.text = sv_["obs.host"];
@@ -275,6 +281,21 @@ void App::commit_settings() {
   numeric("obs.port", f_obs_port_);
   text("obs.host", f_obs_host_, false);
   text("obs.text_source", f_obs_source_, true);
+  const auto mib = [&](const char* key, Field& f) {  // a whole number of MiB, 0 = no limit
+    std::string digits;
+    for (const char c : trim(f.text))
+      if (c >= '0' && c <= '9' && digits.size() < 9) digits += c;
+    if (digits.empty()) digits = "0";
+    digits = std::to_string(std::atoll(digits.c_str()));
+    f.text = digits;
+    if (digits != sv_[key]) {
+      save_setting(key, digits);
+      sv_[key] = digits;
+    }
+  };
+  text("sync.music_folder", f_sync_music_, true);
+  mib("sync.audio_budget_mb", f_sync_budget_);
+  mib("sync.audio_import_budget_mb", f_sync_import_);
   const std::string old_folder = sv_["sync.folder"];
   text("sync.folder", f_sync_folder_, true);
   text("sync.device_name", f_sync_name_, false);
@@ -290,8 +311,12 @@ Rect App::panel_size(float w, float h, std::string& title) {
     case Panel::Sampler: m = {0, 0, std::min(640.0f, w - 24), std::min(640.0f, h - 24)}; title = T("sampler.title"); break;
     case Panel::Learn: m = {0, 0, std::min(680.0f, w - 24), std::min(540.0f, h - 24)}; title = T("learn.title"); break;
     case Panel::Tags: m = {0, 0, std::min(520.0f, w - 24), std::min(580.0f, h - 24)}; title = T("tags.title"); break;
-    case Panel::Relink: m = {0, 0, std::min(560.0f, w - 24), std::min(250.0f, h - 24)}; title = T("relink.title"); break;
+    case Panel::Relink: m = {0, 0, std::min(560.0f, w - 24), std::min(340.0f, h - 24)}; title = T("relink.title"); break;
     case Panel::Columns: m = {0, 0, std::min(400.0f, w - 24), std::min(496.0f, h - 24)}; title = T("browser.columns_title"); break;
+    case Panel::Chain: m = {0, 0, std::min(780.0f, w - 24), std::min(600.0f, h - 24)}; title = T("chain.title"); break;
+    case Panel::Trash: m = {0, 0, std::min(700.0f, w - 24), std::min(520.0f, h - 24)}; title = T("trash.title"); break;
+    case Panel::Layouts: m = {0, 0, std::min(420.0f, w - 24), std::min(440.0f, h - 24)}; title = T("layouts.title"); break;
+    case Panel::Locate: m = {0, 0, std::min(700.0f, w - 24), std::min(500.0f, h - 24)}; title = T("locate.title"); break;
     case Panel::Smart: m = {0, 0, std::min(720.0f, w - 24), std::min(470.0f, h - 24)}; title = T("smart.title"); break;
     case Panel::Tools: m = {0, 0, std::min(640.0f, w - 24), std::min(480.0f, h - 24)}; title = T("tools.title"); break;
     case Panel::Suggest: m = {0, 0, std::min(760.0f, w - 24), std::min(540.0f, h - 24)}; title = T("suggest.title"); break;
@@ -337,6 +362,10 @@ void App::draw_panel_body(const Rect& m, const std::string& title) {
   else if (panel_ == Panel::Tags) draw_tags(m);
   else if (panel_ == Panel::CueEdit) draw_cue_edit(m);
   else if (panel_ == Panel::Columns) draw_columns_panel(m);
+  else if (panel_ == Panel::Trash) draw_trash_panel(m);
+  else if (panel_ == Panel::Chain) draw_chain_panel(m);
+  else if (panel_ == Panel::Layouts) draw_layouts_panel(m);
+  else if (panel_ == Panel::Locate) draw_locate_panel(m);
   else if (panel_ == Panel::Smart) draw_smart_editor(m);
   else if (panel_ == Panel::Relink) draw_relink(m);
   else if (panel_ == Panel::Shortcuts) draw_shortcuts(m);
@@ -843,6 +872,88 @@ void App::draw_sync_section(float x, float& y, float rw) {
     dl_.text(x, y, skin_->fit(T("settings.sync_devices", {{"count", s.other_devices}}), 11, 0, rw), 11, th.dim, Align::Left, rw);
     y += 22;
   }
+  if (s.last_ms > 0 && s.sent >= 0) {
+    dl_.text(x, y, skin_->fit(T("settings.sync_numbers", {{"links", s.links_pending}, {"analysis", s.analysis_applied}}), 11, 0, rw), 11, th.dim, Align::Left, rw);
+    y += 20;
+  }
+  const auto flag = [&](const char* key, const char* label, bool def) {
+    const bool on = sv_[key].empty() ? def : sv_[key] != "0";
+    if (ui_toggle({x, y, rw, 24}, T(label), on)) {
+      const std::string v = on ? "0" : "1";
+      save_setting(key, v);
+      sv_[key] = v;
+    }
+    y += 26;
+  };
+  flag("sync.mix_links", "settings.sync_mix_links", true);
+  flag("sync.analysis", "settings.sync_analysis", false);
+  dl_.text(x + 40, y - 2, skin_->fit(T("settings.sync_analysis_hint"), 11, 0, rw - 40), 11, th.dim, Align::Left, rw - 40);
+  y += 22;
+
+  // ---- audio files: which playlists this device publishes, where other devices' audio lands
+  ui_heading(x, y, T("settings.sync_audio"));
+  y += 18;
+  dl_.text(x, y, skin_->fit(T("settings.sync_audio_help"), 11, 0, rw), 11, th.dim, Align::Left, rw);
+  y += 20;
+  {
+    std::vector<std::int64_t> chosen = parse_id_list(sv_["sync.audio_playlists"]);
+    const std::vector<PlaylistNode> nodes = lib_->playlists();
+    int shown = 0;
+    for (const PlaylistNode& n : nodes) {
+      if (++shown > 24) {
+        dl_.text(x + 8, y, T("settings.sync_audio_more", {{"count", static_cast<int>(nodes.size()) - 24}}), 11, th.dim);
+        y += 18;
+        break;
+      }
+      const bool on = std::find(chosen.begin(), chosen.end(), n.id) != chosen.end();
+      const std::string label = n.name + (n.is_folder ? "  (" + T("settings.sync_audio_folder") + ")" : "  (" + std::to_string(n.track_count) + ")");
+      if (ui_toggle({x + 8, y, rw - 8, 22}, label, on)) {
+        if (on) chosen.erase(std::remove(chosen.begin(), chosen.end(), n.id), chosen.end());
+        else chosen.push_back(n.id);
+        sv_["sync.audio_playlists"] = format_id_list(chosen);
+        save_setting("sync.audio_playlists", sv_["sync.audio_playlists"]);
+      }
+      y += 24;
+    }
+    if (nodes.empty()) {
+      dl_.text(x + 8, y, T("settings.sync_audio_none"), 11, th.dim);
+      y += 20;
+    }
+  }
+  dl_.text(x, y + 5, T("settings.sync_music_folder"), 12, th.dim, Align::Left, lw - 6);
+  ui_field({x + lw, y, rw - lw - (can_choose ? bw + 6 : 0), 24}, f_sync_music_, T("settings.sync_music_hint"));
+  if (can_choose && ui_button({x + rw - bw, y, bw, 24}, T("settings.choose"), false)) {
+    std::string path;
+    if (choose_folder(T("settings.sync_music_choose"), path)) f_sync_music_.text = path;
+  }
+  y += line;
+  dl_.text(x, y + 5, T("settings.sync_budget"), 12, th.dim, Align::Left, lw - 6);
+  ui_field({x + lw, y, 90, 24}, f_sync_budget_, "0");
+  dl_.text(x + lw + 96, y + 5, T("settings.sync_budget_unit"), 11, th.dim);
+  y += line;
+  dl_.text(x, y + 5, T("settings.sync_import_budget"), 12, th.dim, Align::Left, lw - 6);
+  ui_field({x + lw, y, 90, 24}, f_sync_import_, "0");
+  dl_.text(x + lw + 96, y + 5, T("settings.sync_budget_unit"), 11, th.dim);
+  y += line;
+  flag("sync.allow_unencrypted_audio", "settings.sync_unencrypted", false);
+  if (sv_["sync.allow_unencrypted_audio"] == "1") {
+    dl_.text(x + 40, y - 2, skin_->fit(T("settings.sync_unencrypted_warning"), 11, 0, rw - 40), 11, th.warn, Align::Left, rw - 40);
+    y += 22;
+  }
+  if (!deckhand::sync::SyncEngine::encryption_available()) {
+    dl_.text(x, y, skin_->fit(T("settings.sync_no_crypto"), 11, 0, rw), 11, th.dim, Align::Left, rw);
+    y += 20;
+  }
+  if (s.audio_ran) {
+    if (!s.audio_ok) {
+      dl_.text(x, y, skin_->fit(T("settings.sync_audio_error", {{"message", s.audio_error}}), 11, 0, rw), 11, th.warn, Align::Left, rw);
+    } else {
+      dl_.text(x, y, skin_->fit(T("settings.sync_audio_last", {{"exported", s.audio_exported}, {"imported", s.audio_imported}, {"relinked", s.audio_relinked},
+                                                              {"waiting", s.audio_waiting_budget + s.audio_waiting_files}, {"failed", s.audio_failed},
+                                                              {"store", static_cast<int>(s.audio_store_bytes >> 20)}}), 11, 0, rw), 11, th.text, Align::Left, rw);
+    }
+    y += 20;
+  }
   y += 8;
 }
 
@@ -1205,6 +1316,35 @@ void App::draw_relink(const Rect& m) {
     return;
   }
   if (ui_button({x + 138, y, 110, 28}, T("learn.cancel"), false)) open_panel(Panel::Tags);
+  // This one track moved: the file's new place (a file, or the folder it is in now); then offer the old folder's other tracks.
+  y += 44;
+  dl_.text(x, y + 5, T("relink.file"), 12, th.dim, Align::Left, lw - 6);
+  ui_field({fx, y, fw, 26}, f_relink_file_, "/Volumes/.../song.mp3");
+  y += 34;
+  const std::string target = trim(f_relink_file_.text);
+  if (ui_button({x, y, 220, 28}, T("relink.this_track"), !target.empty(), th.good) && !target.empty()) {
+    std::error_code ec;
+    std::string file = target;
+    if (std::filesystem::is_directory(std::filesystem::path(target), ec))
+      file = (std::filesystem::path(target) / std::filesystem::path(tag_path_).filename()).string();
+    if (!std::filesystem::is_regular_file(std::filesystem::path(file), ec)) {
+      status_note_ = T("relink.nofile");
+      return;
+    }
+    const RelocateReport sibs = lib_->relink_siblings(edit_track_, file);  // before the path changes
+    const RelocateResult res = lib_->relink_track(edit_track_, file);
+    rows_dirty_ = true;
+    status_note_ = res.applied ? T("relink.moved_one") : T("relink.not_moved");
+    if (res.applied && !sibs.found.empty()) {
+      open_panel(Panel::Locate);
+      loc_report_ = sibs;
+      loc_siblings_ = true;
+      loc_scanned_ = true;
+      loc_note_.clear();
+      return;
+    }
+    close_panel();
+  }
 }
 
 }  // namespace deckhand

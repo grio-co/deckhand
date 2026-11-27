@@ -91,6 +91,13 @@ Besides the engine's control table the keymap can call these application actions
 | `F2` | Open or close the sampler | `ui.sampler` |
 | `F3` | Open or close MIDI learn | `ui.learn` |
 | `F4` | Open or close the browser columns | `ui.columns` |
+| `Mod+Shift+H` | Trash and edit history | `ui.trash` |
+| `Mod+Alt+Shift+C` | Effect chain editor | `ui.chain` |
+| `Mod+Shift+O` | Browser layouts (saved column sets) | `ui.layouts` |
+| `Mod+Shift+.` | Next browser layout | `ui.layout_next` |
+| `Mod+Shift+,` | Previous browser layout | `ui.layout_prev` |
+| `Mod+Shift+U` | Find moved or renamed files | `ui.locate` |
+| `Mod+Shift+M` | Split the browser: side by side, stacked, off | `ui.split` |
 | `F6` | Switch between the two- and four-deck layouts | `ui.layout` |
 | `F7` | Switch to the next skin | `ui.skin_next` |
 | `F8` | Write the shortcut cheat sheet (HTML) into the data folder | `ui.cheat_sheet` |
@@ -129,6 +136,7 @@ Besides the engine's control table the keymap can call these application actions
 | `Mod+Shift+P` | Open the add-to-playlist menu for the selected tracks | `ui.add_to` |
 | `Mod+I` | Edit the selected track's tags | `ui.edit_track` |
 | `Mod+Z` | Undo the last tag edit (title, artist, rating ...) | `ui.undo_edit` |
+| `Mod+Shift+I` | Keyboard focus to the other track table | `ui.focus_pane` |
 | `F5` | Show only tracks that mix with the loaded one | `ui.compatible` |
 
 ### Deck 1

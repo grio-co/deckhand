@@ -17,10 +17,14 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <thread>
 
+#include "browser_layouts.hpp"
+#include "browser_panes.hpp"
+#include "trash_history.hpp"
 #include "deckhand/app/api_bridge.hpp"
 #include "deckhand/app/automix.hpp"
 #include "deckhand/app/play_queue.hpp"
@@ -144,11 +148,12 @@ struct Job {
 };
 
 struct TreeItem {
-  enum Kind { Collection, Folder, Playlist, HistoryHeader, HistorySession, Smart } kind = Collection;
+  enum Kind { Collection, Folder, Playlist, HistoryHeader, HistorySession, Smart, DiskHeader, DiskFolder } kind = Collection;
   std::int64_t id = 0;
   int depth = 0;
   std::string name;
   int count = 0;
+  std::string path;  // DiskFolder: the directory
 };
 
 inline std::int64_t wall_ms() {
@@ -188,6 +193,14 @@ struct SyncSummary {
   int sent = -1, received = -1;  // changes of the last sync run in this session (-1 = unknown)
   int other_devices = 0;       // devices seen in the folder besides this one
   int skipped = 0;             // files of other devices the last run could not use (passphrase mismatch)
+  int links_pending = 0;       // linked mix points known here whose track is not in this library yet
+  int analysis_applied = 0;    // analysis items written into the library from other devices
+  // The audio step of the last run (valid when audio_ran).
+  bool audio_ran = false, audio_ok = true;
+  std::string audio_error;
+  int audio_exported = 0, audio_already = 0, audio_imported = 0, audio_relinked = 0, audio_skipped = 0, audio_waiting_budget = 0,
+      audio_waiting_files = 0, audio_failed = 0;
+  std::uint64_t audio_exported_bytes = 0, audio_imported_bytes = 0, audio_store_bytes = 0;
 };
 
 // One window of the UI. In single-window mode these exist too (they hold the arrangement of the modules that are
@@ -349,6 +362,19 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   }
   std::string api_device_backup_dir() override { return data_dir_ + "/device-backups"; }
   void api_library_changed() override { rows_dirty_ = true; }
+  void api_sync_run() override {
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      sync_.running = true;
+    }
+    post_kind(Job::Sync);
+  }
+  std::string api_sync_json() override;
+  void api_browser_changed() override {
+    browser_reload_ = true;
+    settings_synced_ = true;
+    rows_dirty_ = true;
+  }
   void api_cues_changed(const std::vector<std::int64_t>& track_ids) override {
     for (const std::int64_t id : track_ids) {
       for (int d = 0; d < kMaxDecks; ++d) {
@@ -578,7 +604,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   Rect inner_rect() const;
 
   // ---- overlays (app_panels.cpp) ----------------------------------------------------
-  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart, Shortcuts, Tools, Suggest, PrepMode, Controller };
+  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart, Shortcuts, Tools, Suggest, PrepMode, Controller, Trash, Layouts, Locate, Chain };
   bool overlay_open() const { return panel_ != Panel::None; }
   void open_panel(Panel p);
   void close_panel();
@@ -623,6 +649,27 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void draw_add_menu(const Rect& m);
   void draw_cue_edit(const Rect& m);
   void draw_columns_panel(const Rect& m);
+  // ---- panes, layouts, trash and history, relocation (app_library_panels.cpp)
+  void swap_pane();                          // browse_mutex_ held: exchanges the live browser state with the other pane's
+  PaneSnapshot snapshot_live() const;
+  void restore_live(const PaneSnapshot& p);
+  void save_panes();
+  void load_panes();
+  void toggle_split();
+  void focus_other_pane();
+  void draw_browser_panes(const Rect& r, const ui::Theme& th, const std::string& columns, float row_h);
+  BrowserLayouts& layouts();
+  void apply_layout(const BrowserLayout& l);
+  void step_layout(int dir);
+  void draw_layouts_panel(const Rect& m);
+  void draw_trash_panel(const Rect& m);
+  // ---- effect chain editor (app_chain.cpp)
+  void open_chain(int target);
+  void draw_chain_panel(const Rect& m);
+  bool chain_slider(const Rect& track, double v, int id, double& out);
+  void draw_locate_panel(const Rect& m);
+  void start_relocate_scan();
+  void refresh_pane_rows();  // browse_mutex_ held: rebuilds the tree and the rows of the live pane
   void draw_smart_editor(const Rect& m);
   void open_smart_editor(std::int64_t id);  // 0 = a new smart playlist
   void save_smart_editor();
@@ -785,6 +832,62 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   bool follow_sel_ = false;
   std::string search_;
   bool search_focus_ = false;
+  std::string disk_path_;                       // the directory shown when view_ is DiskFolder
+  std::set<std::string> disk_open_;             // expanded directories of the "Folders" source
+  bool disk_on_ = false;                        // the "Folders" source is expanded
+  std::map<std::int64_t, std::string> sources_;  // folder view: track -> the playlist it came from
+  // The second track table. The live members above always belong to the focused pane; the other pane waits in pane2_.
+  struct PaneState {
+    TreeItem::Kind view = TreeItem::Collection;
+    std::int64_t playlist_id = 0;
+    std::string disk_path, search;
+    SortKey sort = SortKey::Default;
+    bool desc = false;
+    int sel = 0, anchor = 0;
+    float scroll = 0;
+    bool follow = false;
+    std::set<int> multi;
+    TrackList rows;
+    std::map<std::int64_t, std::string> sources;
+  } pane2_;
+  SplitMode split_ = SplitMode::Off;
+  int live_slot_ = 0;  // which of the two screen slots the live pane occupies
+  bool panes_loaded_ = false;
+  bool reload_panes_ = false;  // load_panes applies the settings even with the split off (sort of the single table)
+  std::optional<BrowserLayouts> layouts_;
+  Field f_layout_name_, f_relink_file_;
+  // effect chain editor
+  std::uint64_t plugin_scan_seen_ = 0;
+  int chain_target_ = kFxMaster;
+  int chain_unit_ = 0, chain_page_ = 0;
+  bool chain_adding_ = false;
+  float chain_add_scroll_ = 0;
+  Field f_chain_preset_;
+  PluginInfoView chain_pinfo_;
+  int chain_pinfo_unit_ = -1, chain_pinfo_target_ = -1;
+  double chain_pinfo_at_ = 0;
+  bool chain_pinfo_dirty_ = false;
+  std::vector<std::string> chain_presets_cache_;
+  // trash / history panel
+  int trash_tab_ = 0;  // 0 trash, 1 history of the selected track, 2 recent edits
+  float trash_scroll_ = 0;
+  bool trash_confirm_empty_ = false;
+  std::string trash_note_;
+  // relocation panel
+  Field f_locate_;
+  RelocateReport loc_report_;
+  bool loc_scanned_ = false, loc_siblings_ = false;
+  std::int64_t loc_last_batch_ = 0;
+  std::string loc_note_;
+  struct HistRow {
+    HistoryStep step;
+    std::string title;
+  };
+  std::vector<DeletedTrack> trash_cache_;
+  std::vector<HistRow> hist_cache_;
+  bool trash_dirty_ = true;
+  std::future<RelocateReport> loc_future_;
+  std::atomic<bool> loc_cancel_{false};
 
   // ---- track preparation state
   std::atomic<bool> grid_edit_[kMaxDecks] = {};
@@ -806,6 +909,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::vector<std::string> bcols_;                   // shown columns, in order
   std::map<std::string, float> bwidth_;              // user widths: px, or weight for the flexible columns
   bool bcols_loaded_ = false, key_musical_ = false, show_phrases_ = true, wave_phrases_ = true, compat_on_ = false;
+  std::atomic<bool> browser_reload_{false};  // the API changed layouts / split / panes in the settings
   std::atomic<bool> settings_synced_{false};  // set by the sync worker: reload the browser settings
   std::int64_t compat_ref_id_ = 0;
   unsigned frame_count_ = 0;
@@ -941,6 +1045,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   } keys_ui_;
   Field f_title_, f_artist_, f_key_, f_rating_, f_relink_, f_relink_old_, f_sync_folder_, f_sync_name_, f_sync_pass_;
   Field* last_focus_ = nullptr;
+  Field f_sync_music_, f_sync_budget_, f_sync_import_;
   std::map<std::string, std::string> sv_;  // settings shown in the settings panel
   int tag_rating_ = 0;
   std::string tag_path_;

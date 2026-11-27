@@ -1308,6 +1308,19 @@ void Library::set_date_added(std::int64_t track_id, std::int64_t unix_seconds) {
 
 int Library::undo_one(const TrackEditRecord& e) {
   if (e.field == "grid" || e.field == "cues" || e.field == "mix_links") return undo_whole(e);
+  if (e.field == "path") {  // a relocation: only while the track still points where that edit put it
+    const auto row = track(e.track_id);
+    if (!row) return 2;
+    if (!e.old_value || !e.new_value || row->path != *e.new_value) return 1;
+    EditScope scope("undo");
+    Stmt u(db_, "UPDATE OR IGNORE tracks SET root_id = ?1, rel_path = ?2, format = ?3 WHERE id = ?4");
+    u.bind(1, kSystemRoot).bind(2, rel_of(*e.old_value)).bind(3, extension_of(*e.old_value)).bind(4, e.track_id);
+    u.run();
+    if (sqlite3_changes(db_.handle()) == 0) return 1;
+    journal_record(e.track_id, "path", e.new_value, e.old_value);
+    missing_at_ = 0;
+    return 0;
+  }
   if (!is_edit_field(e.field)) return 1;
   const FieldValues now = edit_snapshot(e.track_id);
   if (now.empty()) return 2;
@@ -1919,5 +1932,6 @@ void Library::set_setting(const std::string& key, const std::string& value) {
 
 #include "library_tools.inc"
 #include "mix_links.inc"
+#include "relocate.inc"
 
 }  // namespace deckhand

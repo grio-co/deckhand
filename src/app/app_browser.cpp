@@ -25,6 +25,7 @@ const ColDef kCols[] = {
     {"plays", 52, false, true, SortKey::PlayCount},  {"played", 90, false, false, SortKey::LastPlayed},
     {"color", 44, false, false, SortKey::Color},     {"format", 54, false, false, SortKey::Format},
     {"bitrate", 62, false, true, SortKey::Bitrate},
+    {"source", 1.0f, true, false, SortKey::Default},  // folder view: the playlist a track came from
 };
 constexpr int kColCount = static_cast<int>(sizeof kCols / sizeof kCols[0]);
 
@@ -167,6 +168,7 @@ void App::draw_tracks(const Rect& table, const ui::Theme& th, const std::string&
   for (const std::string& id : bcols_) {
     const ColDef* d = col_def(id);
     if (!d) continue;
+    if (id == "source" && view_ != TreeItem::Folder) continue;  // only a folder view knows where a track came from
     const auto it = bwidth_.find(id);
     cols.push_back({d, it != bwidth_.end() ? it->second : d->w});
   }
@@ -274,7 +276,10 @@ void App::draw_tracks(const Rect& table, const ui::Theme& th, const std::string&
       else if (id == "artist") dl_.text(x0[c], ty, skin_->fit(t.artist, 12, 0, cw - 10), 12, soft, Align::Left, cw - 10);
       else if (id == "album") dl_.text(x0[c], ty, skin_->fit(t.album, 12, 0, cw - 10), 12, soft, Align::Left, cw - 10);
       else if (id == "genre") dl_.text(x0[c], ty, skin_->fit(t.genre, 12, 0, cw - 8), 12, soft, Align::Left, cw - 8);
-      else if (id == "comment") dl_.text(x0[c], ty, skin_->fit(t.comment, 12, 0, cw - 10), 12, soft, Align::Left, cw - 10);
+      else if (id == "source") {
+        const auto src = sources_.find(t.id);
+        if (src != sources_.end()) dl_.text(x0[c], ty, skin_->fit(src->second, 12, 0, cw - 10), 12, soft, Align::Left, cw - 10);
+      } else if (id == "comment") dl_.text(x0[c], ty, skin_->fit(t.comment, 12, 0, cw - 10), 12, soft, Align::Left, cw - 10);
       else if (id == "bpm" && t.bpm > 0) dl_.text(x1[c] - 8, ty, fmt("%.1f", t.bpm), 12, main, Align::Right);
       else if (id == "key") dl_.text(x0[c] + 4, ty, display_key(t.key, key_musical_), 12, soft, Align::Left, cw - 6);
       else if (id == "time" && t.duration_ms > 0) dl_.text(x1[c] - 6, ty, clock_text(t.duration_ms / 1000.0), 12, soft, Align::Right);

@@ -128,6 +128,9 @@ class RemoteEngine final : public IEngine {
   void collect_garbage() override {}  // the engine process frees its own garbage
   // Effect chains live in the engine process; edits are control-socket requests, reads are cached for ~100 ms.
   bool fx_chain_edit(const FxChainEdit& edit, FxChainResult& result) override;
+  bool plugin_op(const PluginOp& op, PluginOpResult& result) override;
+  // Takes the restart snapshot of every edited chain now (the monitor thread does it a moment after edits settle).
+  void snapshot_chains_now() { snapshot_chains(true); }
   FxChainInfo fx_chain(int target) const override;
   // The engine process reads the stem cache file itself (it has the same file access as the UI).
   bool stems_attach(int deck, std::int64_t track_id, const std::string& path, std::string& error) override;
@@ -149,6 +152,14 @@ class RemoteEngine final : public IEngine {
     bool valid = false;
   };
   void invalidate_chain(int target);
+  // Effect chains survive an engine restart: after edits settle, the monitor thread keeps a full preset (plug-in states
+  // included) of every edited chain; when it starts a fresh engine process it loads them back.
+  void snapshot_chains(bool force);
+  void restore_chains();
+  mutable std::mutex snap_mutex_;
+  std::string snap_[kFxTargetCount];
+  bool snap_dirty_[kFxTargetCount] = {};
+  std::chrono::steady_clock::time_point snap_edit_[kFxTargetCount];
   mutable std::mutex chain_mutex_;
   mutable ChainCache chain_cache_[kFxTargetCount];
 

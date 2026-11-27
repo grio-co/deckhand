@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -13,6 +14,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "analysis_codec.hpp"
+#include "audio_store.hpp"
 #include "crypto.hpp"
 #include "deckhand/log/log.hpp"
 #include "format.hpp"
@@ -394,6 +397,7 @@ struct SyncEngine::Impl {
   std::int64_t last_sync = 0;
   std::string last_error;
   int changes = 0;
+  int links_pending_n = 0, analysis_applied_n = 0;
   std::map<std::string, std::string> keys;  // salt -> derived key, for this passphrase
   Sealer sealer;                            // set while this device writes encrypted files
 
@@ -442,7 +446,8 @@ struct SyncEngine::Impl {
         " size INTEGER NOT NULL DEFAULT 0, mtime INTEGER NOT NULL DEFAULT 0, missing INTEGER NOT NULL DEFAULT 0);"
         "CREATE INDEX IF NOT EXISTS idx_sync_track_fp ON sync_track(fp);"
         "CREATE TABLE IF NOT EXISTS sync_files(dev TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL,"
-        " status INTEGER NOT NULL, PRIMARY KEY(dev, name));");
+        " status INTEGER NOT NULL, PRIMARY KEY(dev, name));"
+        "CREATE TABLE IF NOT EXISTS sync_ana(fp TEXT NOT NULL, comp TEXT NOT NULL, h TEXT NOT NULL, PRIMARY KEY(fp, comp));");
     tx.commit();
     dev = meta_get("device_id");
     if (dev.empty()) {
@@ -1125,6 +1130,8 @@ struct SyncEngine::Impl {
     capture_tracks(fp2id);
     const Maps maps = track_maps();
     capture_playlists(maps);
+    capture_links(maps);
+    capture_analysis(maps);
     capture_smart();
     capture_history(maps);
     capture_settings();
@@ -1555,6 +1562,8 @@ struct SyncEngine::Impl {
     if (dirty_p || !dirty_q.empty()) materialize_smart(dirty_q, dirty_p);
     if (dirty_p || !dirty_e_pl.empty() || !dirty_t.empty()) materialize_entries(dirty_e_pl, dirty_t, fresh_playlists, maps);
     if (dirty_hs) materialize_history(maps);
+    materialize_links();
+    materialize_analysis();
     for (const auto& key : dirty_g) {
       const Reg* r = st.find('G', key, "v");
       if (r && r->v.t == Val::Text) lib.set_setting(key, r->v.s);
@@ -1892,26 +1901,30 @@ struct SyncEngine::Impl {
     return s.step() ? static_cast<int>(s.i64(0)) : 0;
   }
 
+  void cycle(SyncResult& r) {
+    run_capture(r);
+    fault("capture.done");
+    const std::string mode = prepare_encryption();
+    recover_own(r);
+    if (!mode.empty()) {  // encryption turned on, off or re-keyed: replace every file this device has written
+      if (own_file_count() > 0) write_snapshot(r);
+      else write_pending(r);
+      commit_mode(mode);
+    } else {
+      write_pending(r);
+      if (cfg.compact_after_files > 0 && own_file_count() > cfg.compact_after_files) write_snapshot(r);
+    }
+    std::vector<Incoming> in;
+    std::unordered_set<std::string> present;
+    read_remote(in, present, r);
+    last_sync = now();
+    apply(in, present, r);
+    r.links_pending = links_pending_n;
+    r.analysis_applied = analysis_applied_n;
+  }
+
   SyncResult sync_once() {
-    return guarded([&](SyncResult& r) {
-      run_capture(r);
-      fault("capture.done");
-      const std::string mode = prepare_encryption();
-      recover_own(r);
-      if (!mode.empty()) {  // encryption turned on, off or re-keyed: replace every file this device has written
-        if (own_file_count() > 0) write_snapshot(r);
-        else write_pending(r);
-        commit_mode(mode);
-      } else {
-        write_pending(r);
-        if (cfg.compact_after_files > 0 && own_file_count() > cfg.compact_after_files) write_snapshot(r);
-      }
-      std::vector<Incoming> in;
-      std::unordered_set<std::string> present;
-      read_remote(in, present, r);
-      last_sync = now();
-      apply(in, present, r);
-    });
+    return guarded([&](SyncResult& r) { cycle(r); });
   }
 
   SyncResult capture_only() {
@@ -1970,6 +1983,595 @@ struct SyncEngine::Impl {
           fs::remove(it->path(), e2);
         }
       }
+  }
+
+  // ---- linked mix points ---------------------------------------------------------------------------------------------
+  // Entity kind L, id <device>:<counter>. Fields: _del, from / to (track fingerprints), from_ms, to_ms, beats, type,
+  // label, created. The two ends name tracks by fingerprint, so a link whose track is not in this library yet simply
+  // stays in the merged state ("pending") and is written into the library by the first pass after the track exists.
+  struct LinkRow {
+    std::int64_t from = 0, to = 0;
+    double from_ms = 0, to_ms = 0;
+    Val beats, type, label, created;
+  };
+
+  static double real_of(const Val& v) { return v.t == Val::Real ? v.d : v.t == Val::Int ? static_cast<double>(v.i) : 0.0; }
+
+  std::map<std::int64_t, LinkRow> load_link_rows() {
+    std::map<std::int64_t, LinkRow> rows;
+    Stmt s(db, "SELECT id, from_track, from_ms, to_track, to_ms, transition_beats, transition_type, label, created_at FROM mix_links");
+    while (s.step()) {
+      LinkRow r;
+      r.from = s.i64(1);
+      r.from_ms = s.f64(2);
+      r.to = s.i64(3);
+      r.to_ms = s.f64(4);
+      r.beats = read_val(s, 5, Val::Real);
+      r.type = read_val(s, 6, Val::Text);
+      r.label = read_val(s, 7, Val::Text);
+      r.created = read_val(s, 8, Val::Int);
+      rows[s.i64(0)] = std::move(r);
+    }
+    return rows;
+  }
+
+  void capture_links(const Maps& maps) {
+    if (!cfg.sync_mix_links) return;
+    IdMap lm = load_map('L');
+    const auto rows = load_link_rows();
+    for (const auto& [id, r] : rows) {
+      const auto fa = maps.id2fp.find(r.from), fb = maps.id2fp.find(r.to);
+      auto known = lm.l2e.find(id);
+      if (known == lm.l2e.end()) {
+        if (fa == maps.id2fp.end() || fb == maps.id2fp.end()) continue;  // an end has no identity yet: next time
+        map_put(lm, 'L', id, new_eid());
+        known = lm.l2e.find(id);
+      }
+      const std::string& eid = known->second;
+      if (st.entity('L', eid) && !st.alive('L', eid)) continue;  // deleted elsewhere; the apply step removes the row
+      if (fa != maps.id2fp.end()) put('L', eid, "from", Val::text(fa->second));
+      if (fb != maps.id2fp.end()) put('L', eid, "to", Val::text(fb->second));
+      put('L', eid, "from_ms", Val::real(r.from_ms));
+      put('L', eid, "to_ms", Val::real(r.to_ms));
+      put('L', eid, "beats", r.beats);
+      put('L', eid, "type", r.type);
+      put('L', eid, "label", r.label);
+      put('L', eid, "created", r.created);
+    }
+    std::vector<std::int64_t> gone;
+    for (const auto& [id, eid] : lm.l2e) {
+      if (rows.count(id)) continue;
+      gone.push_back(id);
+      if (st.alive('L', eid)) put('L', eid, "_del", Val::integer(1));
+    }
+    for (const auto id : gone) map_drop(lm, 'L', id);
+  }
+
+  void materialize_links() {
+    links_pending_n = 0;
+    const int k = State::idx('L');
+    if (!cfg.sync_mix_links || st.ent[k].empty()) return;
+    const Maps maps = track_maps();
+    IdMap lm = load_map('L');
+    auto rows = load_link_rows();
+    for (const auto& [eid, e] : st.ent[k]) {
+      const auto mapped = lm.e2l.find(eid);
+      if (!st.alive('L', eid)) {
+        if (mapped != lm.e2l.end()) {
+          Stmt d(db, "DELETE FROM mix_links WHERE id = ?1");
+          d.bind(1, mapped->second);
+          d.run();
+          rows.erase(mapped->second);
+          map_drop(lm, 'L', mapped->second);
+        }
+        continue;
+      }
+      const std::string fa = st.text('L', eid, "from"), fb = st.text('L', eid, "to");
+      if (fa.empty() || fb.empty()) continue;
+      const auto ia = maps.fp2id.find(fa), ib = maps.fp2id.find(fb);
+      if (ia == maps.fp2id.end() || ib == maps.fp2id.end() || !st.alive('T', fa) || !st.alive('T', fb)) {
+        ++links_pending_n;
+        continue;
+      }
+      if (ia->second == ib->second) continue;
+      const auto get = [&](const char* f) {
+        const auto it = e.f.find(f);
+        return it == e.f.end() ? Val::null() : it->second.v;
+      };
+      LinkRow want;
+      want.from = ia->second;
+      want.to = ib->second;
+      want.from_ms = real_of(get("from_ms"));
+      want.to_ms = real_of(get("to_ms"));
+      if (want.from_ms < 0 || want.to_ms < 0) continue;
+      want.beats = get("beats");
+      want.type = get("type");
+      want.label = get("label");
+      want.created = get("created");
+      const auto write = [&](std::int64_t id) {
+        Stmt u(db, "UPDATE mix_links SET from_track = ?1, to_track = ?2, from_ms = ?3, to_ms = ?4, transition_beats = ?5,"
+                   " transition_type = ?6, label = ?7 WHERE id = ?8");
+        u.bind(1, want.from).bind(2, want.to).bind(3, want.from_ms).bind(4, want.to_ms);
+        bind_opt(u, 5, want.beats.empty() ? Val::null() : want.beats);
+        bind_opt(u, 6, want.type.empty() ? Val::null() : want.type);
+        u.bind(7, std::string_view(want.label.t == Val::Text ? want.label.s : std::string()));
+        u.bind(8, id);
+        u.run();
+        rows[id] = want;
+      };
+      const auto same_row = [&](const LinkRow& r) {
+        return r.from == want.from && r.to == want.to && r.from_ms == want.from_ms && r.to_ms == want.to_ms &&
+               same(r.beats, want.beats) && same(r.type, want.type) && same(r.label, want.label);
+      };
+      if (mapped != lm.e2l.end()) {
+        const auto row = rows.find(mapped->second);
+        if (row != rows.end() && !same_row(row->second)) write(mapped->second);
+        continue;
+      }
+      // Not mapped yet. The same link may have been made on both devices: one row, owned by the lower id.
+      std::int64_t twin = 0;
+      for (const auto& [id, r] : rows)
+        if (r.from == want.from && r.to == want.to && std::abs(r.from_ms - want.from_ms) <= 1.0 &&
+            std::abs(r.to_ms - want.to_ms) <= 1.0) {
+          twin = id;
+          break;
+        }
+      if (twin) {
+        const auto owner = lm.l2e.find(twin);
+        if (owner != lm.l2e.end() && st.alive('L', owner->second)) {
+          if (eid < owner->second) {  // this one is the survivor; the other id is retired
+            const std::string loser = owner->second;
+            map_put(lm, 'L', twin, eid);
+            put('L', loser, "_del", Val::integer(1));
+            if (!same_row(rows[twin])) write(twin);
+          }
+          continue;
+        }
+        map_put(lm, 'L', twin, eid);
+        if (!same_row(rows[twin])) write(twin);
+        continue;
+      }
+      Stmt i(db, "INSERT INTO mix_links(from_track, from_ms, to_track, to_ms, transition_beats, transition_type, label, created_at)"
+                 " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)");
+      i.bind(1, want.from).bind(2, want.from_ms).bind(3, want.to).bind(4, want.to_ms);
+      bind_opt(i, 5, want.beats.empty() ? Val::null() : want.beats);
+      bind_opt(i, 6, want.type.empty() ? Val::null() : want.type);
+      i.bind(7, std::string_view(want.label.t == Val::Text ? want.label.s : std::string()));
+      i.bind(8, want.created.t == Val::Int ? want.created.i : static_cast<std::int64_t>(0));
+      i.run();
+      const std::int64_t id = db.last_insert_id();
+      rows[id] = want;
+      map_put(lm, 'L', id, eid);
+    }
+  }
+
+  // ---- analysis data ---------------------------------------------------------------------------------------------------
+  // Entity kind A, id = track fingerprint. Fields phr (phrases), voc (vocal regions) and cue (analysis cue points), each
+  // text starting "v<N>\n" with the algorithm version. sync_ana remembers, per track and part, the hash of the text this
+  // device last wrote or applied, so a device never re-sends what it just received and never sends an older version
+  // over a newer one.
+  using AnaMap = std::map<std::pair<std::string, std::string>, std::string>;
+  static std::string text_hash(const std::string& s) {
+    Hash128 h;
+    h.add(s.data(), s.size());
+    return h.hex();
+  }
+  AnaMap ana_load() {
+    AnaMap m;
+    Stmt s(db, "SELECT fp, comp, h FROM sync_ana");
+    while (s.step()) m[{s.text(0), s.text(1)}] = s.text(2);
+    return m;
+  }
+  void ana_set(AnaMap& m, const std::string& fp, const std::string& comp, const std::string& h) {
+    Stmt s(db, "INSERT OR REPLACE INTO sync_ana(fp, comp, h) VALUES (?1, ?2, ?3)");
+    s.bind(1, fp).bind(2, comp).bind(3, h);
+    s.run();
+    m[{fp, comp}] = h;
+  }
+  struct AnaLocal {
+    std::string text;
+    int ver = -1;
+  };
+  AnaLocal ana_local(std::int64_t id, const std::string& comp) {
+    if (comp == "phr") {
+      const auto p = lib.phrases(id);
+      return p ? AnaLocal{encode_phrases(*p), p->version} : AnaLocal{};
+    }
+    if (comp == "voc") {
+      const auto v = lib.vocals(id);
+      return v ? AnaLocal{encode_vocals(*v), v->version} : AnaLocal{};
+    }
+    const TrackCues tc = lib.track_cues(id);
+    CueTimes c{tc.load_cue_ms, tc.first_sound_ms, tc.last_sound_ms};
+    return c.any() ? AnaLocal{encode_cues(c), 1} : AnaLocal{};
+  }
+  static const std::vector<std::string>& ana_parts() {
+    static const std::vector<std::string> p = {"phr", "voc", "cue"};
+    return p;
+  }
+
+  void capture_analysis(const Maps& maps) {
+    if (!cfg.sync_analysis) return;
+    std::unordered_set<std::int64_t> has_phr, has_voc, has_cue;
+    for (const auto id : lib.tracks_with_phrases()) has_phr.insert(id);
+    for (const auto id : lib.tracks_with_vocals()) has_voc.insert(id);
+    {
+      Stmt s(db, "SELECT id FROM tracks WHERE load_cue_ms IS NOT NULL OR first_sound_ms IS NOT NULL OR last_sound_ms IS NOT NULL");
+      while (s.step()) has_cue.insert(s.i64(0));
+    }
+    AnaMap applied = ana_load();
+    for (const auto& [fp, id] : maps.fp2id) {
+      if (!st.alive('T', fp)) continue;
+      for (const auto& comp : ana_parts()) {
+        if (!(comp == "phr" ? has_phr : comp == "voc" ? has_voc : has_cue).count(id)) continue;
+        const AnaLocal l = ana_local(id, comp);
+        if (l.text.empty()) continue;
+        const std::string reg = st.text('A', fp, comp), h = text_hash(l.text);
+        if (l.text == reg) {
+          if (applied[{fp, comp}] != h) ana_set(applied, fp, comp, h);
+          continue;
+        }
+        const int rver = encoded_version(reg);
+        // Send when nothing is stored yet, when ours is a newer version, or (same version) when it changed here.
+        if (reg.empty() || l.ver > rver || (l.ver == rver && applied[{fp, comp}] != h)) {
+          put('A', fp, comp, Val::text(l.text));
+          ana_set(applied, fp, comp, h);
+        }
+      }
+    }
+  }
+
+  void materialize_analysis() {
+    analysis_applied_n = 0;
+    const int k = State::idx('A');
+    if (!cfg.sync_analysis || st.ent[k].empty()) return;
+    const Maps maps = track_maps();
+    AnaMap applied = ana_load();
+    for (const auto& [fp, e] : st.ent[k]) {
+      const auto id = maps.fp2id.find(fp);
+      if (id == maps.fp2id.end() || !st.alive('T', fp)) continue;
+      for (const auto& comp : ana_parts()) {
+        const std::string reg = st.text('A', fp, comp);
+        if (reg.empty()) continue;
+        const std::string h = text_hash(reg);
+        if (applied[{fp, comp}] == h) continue;
+        const AnaLocal l = ana_local(id->second, comp);
+        if (l.text == reg) {
+          ana_set(applied, fp, comp, h);
+          continue;
+        }
+        const int rver = encoded_version(reg);
+        if (rver < 0 || rver < l.ver) continue;  // ours is newer: the next capture sends it
+        if (comp == "phr") {
+          // Bars and sections belong to the grid they were measured on: a locked, different grid keeps its own.
+          const std::string grid = st.text('T', fp, "grid");
+          if (!l.text.empty() && !grid.empty() && encode_grid(lib.beatgrid(id->second)) != grid) {
+            Stmt lk(db, "SELECT grid_locked FROM tracks WHERE id = ?1");
+            lk.bind(1, id->second);
+            if (lk.step() && lk.i64(0)) continue;
+          }
+          StoredPhrases p;
+          if (!decode_phrases(reg, p)) continue;
+          lib.set_phrases(id->second, p);
+        } else if (comp == "voc") {
+          StoredVocals v;
+          if (!decode_vocals(reg, v)) continue;
+          lib.set_vocals(id->second, v);
+        } else {
+          CueTimes c;
+          if (!decode_cues(reg, c)) continue;
+          lib.set_analysis_cues(id->second, c.load_cue_ms, c.first_sound_ms);
+          lib.set_last_sound_ms(id->second, c.last_sound_ms);
+        }
+        ana_set(applied, fp, comp, h);
+        ++analysis_applied_n;
+      }
+    }
+  }
+
+  // ---- audio files -------------------------------------------------------------------------------------------------------
+  // The store lives next to v1/ (not inside it, where every directory is a device): DeckHandSync/audio/<xx>/<hash>.dhau.
+  // The link from a track to its object is the track register "audio" = "<hash>:<size>", written by the device that
+  // published it; other devices find the object by that name, so the register is encrypted with everything else.
+  fs::path audio_root() const { return fs::path(cfg.folder) / "DeckHandSync" / "audio"; }
+
+  static std::string safe_file_name(const std::string& name) {
+    std::string n;
+    for (const char c : name) {
+      const unsigned char u = static_cast<unsigned char>(c);
+      n.push_back(u < 32 || std::string("<>:\"/\\|?*").find(c) != std::string::npos ? '_' : c);
+    }
+    while (!n.empty() && (n.back() == '.' || n.back() == ' ')) n.pop_back();
+    while (!n.empty() && n.front() == '.') n.erase(n.begin());
+    return n.empty() ? std::string("track") : n;
+  }
+
+  static std::uint64_t fp_size(const std::string& fp) {
+    const auto a = fp.find('-'), b = fp.find('-', a == std::string::npos ? 0 : a + 1);
+    if (a == std::string::npos || b == std::string::npos) return 0;
+    return std::strtoull(fp.substr(a + 1, b - a - 1).c_str(), nullptr, 16);
+  }
+
+  std::uint64_t store_size_bytes() const {
+    std::uint64_t total = 0;
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(audio_root(), fs::directory_options::skip_permission_denied, ec), end; !ec && it != end;
+         it.increment(ec)) {
+      std::error_code e2;
+      if (!it->is_regular_file(e2) || it->path().extension() != ".dhau") continue;
+      const auto n = it->file_size(e2);
+      if (!e2) total += static_cast<std::uint64_t>(n);
+    }
+    return total;
+  }
+
+  void remove_own_audio_temps() {
+    std::error_code ec;
+    std::vector<fs::path> old;
+    for (fs::recursive_directory_iterator it(audio_root(), fs::directory_options::skip_permission_denied, ec), end; !ec && it != end;
+         it.increment(ec)) {
+      const std::string n = it->path().filename().string();
+      if (n.size() > 1 && n[0] == '.' && n.size() > dev.size() + 4 && n.compare(n.size() - dev.size() - 4, dev.size() + 4, dev + ".tmp") == 0)
+        old.push_back(it->path());
+    }
+    for (const auto& p : old) fs::remove(p, ec);
+  }
+
+  // Tracks of the chosen playlists (folders count with everything inside): id, fingerprint, path, missing.
+  struct AudioSrc {
+    std::int64_t id = 0;
+    std::string fp, path;
+    bool missing = false;
+  };
+  std::vector<AudioSrc> audio_sources() {
+    std::set<std::int64_t> pls(cfg.audio_playlists.begin(), cfg.audio_playlists.end());
+    std::vector<std::int64_t> queue(pls.begin(), pls.end());
+    for (std::size_t i = 0; i < queue.size(); ++i) {
+      Stmt s(db, "SELECT id FROM playlists WHERE parent_id = ?1");
+      s.bind(1, queue[i]);
+      while (s.step())
+        if (pls.insert(s.i64(0)).second) queue.push_back(s.i64(0));
+    }
+    std::set<std::int64_t> ids;
+    for (const auto pl : pls) {
+      Stmt s(db, "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1");
+      s.bind(1, pl);
+      while (s.step()) ids.insert(s.i64(0));
+    }
+    std::vector<AudioSrc> out;
+    Stmt s(db, "SELECT s.fp, s.path, s.missing FROM sync_track s JOIN tracks t ON t.id = s.track_id WHERE s.track_id = ?1");
+    for (const auto id : ids) {
+      s.bind(1, id);
+      if (s.step()) out.push_back({id, s.text(0), s.text(1), s.i64(2) != 0});
+      s.reset();
+    }
+    return out;
+  }
+
+  static bool parse_audio_reg(const std::string& v, std::string& hash, std::uint64_t& size) {
+    const auto c = v.find(':');
+    if (c != 32 || v.size() < 34) return false;
+    hash = v.substr(0, 32);
+    for (const char ch : hash)
+      if (!std::isxdigit(static_cast<unsigned char>(ch))) return false;
+    size = std::strtoull(v.c_str() + c + 1, nullptr, 10);
+    return true;
+  }
+
+  AudioReport sync_audio() {
+    AudioReport rep;
+    bool published = false;
+    try {
+      if (!init_error.empty()) throw std::runtime_error(init_error);
+      std::error_code ec;
+      if (cfg.folder.empty() || !fs::is_directory(fs::path(cfg.folder), ec)) throw std::runtime_error("sync folder is not available: " + cfg.folder);
+      const bool encrypt = !cfg.passphrase.empty() && !cfg.allow_unencrypted_audio;
+      if (encrypt && !crypto_available())
+        throw std::runtime_error("audio would be stored unencrypted: this build cannot encrypt it. Turn on \"allow unencrypted audio\" or remove the sync passphrase");
+      Sealer seal_audio;
+      if (encrypt) {
+        const std::string salt = from_hex(meta_get("enc_salt"));
+        const std::string* key = salt.empty() ? nullptr : key_for(salt);
+        if (!key) throw std::runtime_error("run a normal sync first: this device has not set up the folder's encryption yet");
+        seal_audio = {*key, salt};
+      }
+      if (!cfg.audio_playlists.empty() || !cfg.music_folder.empty()) {
+        fs::create_directories(audio_root(), ec);
+        if (ec) throw std::runtime_error("cannot create " + audio_root().string() + ": " + ec.message());
+      }
+      {
+        SyncResult tmp;
+        run_capture(tmp);  // fresh identities for what is on disk now
+      }
+      remove_own_audio_temps();
+      rep.store_bytes = store_size_bytes();
+
+      // -- publish
+      if (!cfg.audio_playlists.empty()) {
+        struct Pub {
+          std::string fp, value;
+        };
+        std::vector<Pub> regs;
+        std::set<std::string> done_fps;
+        for (const auto& src : audio_sources()) {
+          if (!done_fps.insert(src.fp).second) continue;
+          std::string hash;
+          std::uint64_t size = 0;
+          const std::string have = st.text('T', src.fp, "audio");
+          if (!have.empty() && parse_audio_reg(have, hash, size) && audio_object_size(audio_object_path(audio_root(), hash)) > 0) {
+            ++rep.already_stored;
+            continue;
+          }
+          std::error_code e1;
+          if (src.missing || !st.alive('T', src.fp) || !fs::is_regular_file(fs::path(src.path), e1)) {
+            ++rep.skipped;
+            continue;
+          }
+          hash = hash_whole_file(fs::path(src.path), size);
+          if (hash.empty()) {
+            ++rep.skipped;
+            continue;
+          }
+          const std::string value = hash + ":" + std::to_string(size);
+          if (audio_object_size(audio_object_path(audio_root(), hash)) > 0) {  // same audio already stored (another track or device)
+            ++rep.already_stored;
+            regs.push_back({src.fp, value});
+            continue;
+          }
+          const std::uint64_t cost = size + (encrypt ? (size / kAudioChunk + 1) * 28 + 32 : 16);
+          if (cfg.audio_budget_bytes && rep.store_bytes + cost > cfg.audio_budget_bytes) {
+            ++rep.waiting_budget;
+            continue;
+          }
+          std::string err;
+          const PutResult pr = audio_put(audio_root(), fs::path(src.path), hash, size, encrypt ? &seal_audio : nullptr, dev, err);
+          if (pr == PutResult::Ok) {
+            ++rep.exported;
+            rep.exported_bytes += size;
+            rep.store_bytes += audio_object_size(audio_object_path(audio_root(), hash));
+            regs.push_back({src.fp, value});
+          } else if (pr == PutResult::SourceChanged) {
+            ++rep.skipped;
+            rep.warnings.push_back(base_name(src.path) + ": the file changed while it was copied; it will be tried again");
+          } else {
+            ++rep.skipped;
+            rep.warnings.push_back(base_name(src.path) + ": " + err);
+          }
+        }
+        if (!regs.empty()) {
+          Transaction tx(db);
+          changes = 0;
+          for (const auto& r : regs) put('T', r.fp, "audio", Val::text(r.value));
+          flush_regs();
+          save_meta();
+          tx.commit();
+          published = changes > 0;
+        }
+      }
+
+      // -- fetch
+      if (!cfg.music_folder.empty()) import_audio(rep, encrypt);
+    } catch (const std::exception& e) {
+      rep.error = e.what();
+      rep.ok = false;
+      return rep;
+    }
+    rep.ok = true;
+    if (published) {  // send the new "audio" registers now rather than at the next regular sync
+      const SyncResult pub = guarded([&](SyncResult& r) { cycle(r); });
+      if (!pub.ok) rep.warnings.push_back("could not publish the audio list yet: " + pub.error);
+    }
+    return rep;
+  }
+
+  void import_audio(AudioReport& rep, bool require_encrypted) {
+    std::error_code ec;
+    const fs::path music(cfg.music_folder);
+    fs::create_directories(music, ec);
+    if (ec) throw std::runtime_error("cannot create " + cfg.music_folder + ": " + ec.message());
+    for (fs::directory_iterator it(music, ec), end; !ec && it != end; it.increment(ec)) {  // our own cut-off copies
+      const std::string n = it->path().filename().string();
+      std::error_code e2;
+      if (n.rfind(".dhimport-", 0) == 0) fs::remove(it->path(), e2);
+    }
+    struct Want {
+      std::int64_t id;
+      std::string fp, hash;
+      std::uint64_t size;
+    };
+    std::vector<Want> wants;
+    {
+      Stmt s(db, "SELECT s.track_id, s.fp FROM sync_track s JOIN tracks t ON t.id = s.track_id WHERE s.missing = 1 ORDER BY s.track_id");
+      std::set<std::string> seen;
+      while (s.step()) {
+        const std::string fp = s.text(1);
+        std::string hash;
+        std::uint64_t size = 0;
+        if (!st.alive('T', fp) || !parse_audio_reg(st.text('T', fp, "audio"), hash, size) || !seen.insert(fp).second) continue;
+        wants.push_back({s.i64(0), fp, hash, size});
+      }
+    }
+    if (wants.empty()) return;
+    // Files already in the music folder, by size, so a track whose file is there under another name is relinked.
+    std::unordered_map<std::uint64_t, std::vector<fs::path>> by_size;
+    for (fs::recursive_directory_iterator it(music, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end;
+         it.increment(ec)) {
+      std::error_code e2;
+      if (!it->is_regular_file(e2)) continue;
+      const auto n = it->file_size(e2);
+      if (!e2) by_size[static_cast<std::uint64_t>(n)].push_back(it->path());
+    }
+    const KeyFor keyfor = [this](const std::string& salt) { return key_for(salt); };
+    Transaction tx(db);
+    for (const auto& w : wants) {
+      // 1. Already here under some name.
+      bool linked = false;
+      const auto cand = by_size.find(fp_size(w.fp));
+      if (cand != by_size.end())
+        for (const auto& p : cand->second)
+          if (compute_fp(p.string()) == w.fp && link_track(w.id, w.fp, p.string())) {
+            ++rep.relinked;
+            linked = true;
+            break;
+          }
+      if (linked) continue;
+      // 2. Fetch from the store.
+      if (cfg.audio_import_budget_bytes && rep.imported_bytes + w.size > cfg.audio_import_budget_bytes) {
+        ++rep.waiting_budget;
+        continue;
+      }
+      const fs::path obj = audio_object_path(audio_root(), w.hash);
+      const fs::path part = music / (".dhimport-" + w.hash + ".part");
+      std::string err;
+      const GetResult g = audio_get(obj, w.hash, w.size, keyfor, require_encrypted, part, err);
+      if (g == GetResult::Missing || (g == GetResult::Corrupt && err == "object is cut off")) {
+        ++rep.waiting_files;
+        continue;
+      }
+      if (g != GetResult::Ok) {
+        ++rep.failed;
+        rep.warnings.push_back(st.text('T', w.fp, "file_name") + ": " +
+                               (g == GetResult::PlainRefused ? std::string("stored unencrypted while this folder is encrypted; not used")
+                                : g == GetResult::Locked ? std::string("cannot be opened with this passphrase")
+                                                         : err));
+        continue;
+      }
+      // 3. Name it without ever overwriting a different file.
+      const std::string base = safe_file_name(st.text('T', w.fp, "file_name"));
+      const fs::path bp(base);
+      fs::path dest = music / base;
+      for (int n = 0;; ++n) {
+        std::error_code e2;
+        if (!fs::exists(dest, e2)) break;
+        if (compute_fp(dest.string()) == w.fp) break;  // the same audio is already there under this exact name
+        dest = music / (bp.stem().string() + " (" + w.hash.substr(0, 8) + (n ? "-" + std::to_string(n) : std::string()) + ")" + bp.extension().string());
+      }
+      std::error_code e3;
+      const bool existed = fs::exists(dest, e3);
+      if (!existed) {
+        fs::rename(part, dest, e3);
+        if (e3) {
+          ++rep.failed;
+          rep.warnings.push_back(base + ": cannot move the copy into place: " + e3.message());
+          fs::remove(part, e3);
+          continue;
+        }
+      } else {
+        fs::remove(part, e3);
+      }
+      if (compute_fp(dest.string()) != w.fp || !link_track(w.id, w.fp, dest.string())) {
+        ++rep.failed;
+        rep.warnings.push_back(base + ": the copied file does not match its track");
+        continue;
+      }
+      if (existed) {
+        ++rep.relinked;
+      } else {
+        ++rep.imported;
+        rep.imported_bytes += w.size;
+      }
+    }
+    tx.commit();
   }
 
   int relink_missing(const std::vector<std::string>& dirs) {
@@ -2068,6 +2670,7 @@ SyncEngine::~SyncEngine() = default;
 SyncResult SyncEngine::sync_once() { return impl_->sync_once(); }
 SyncResult SyncEngine::capture() { return impl_->capture_only(); }
 SyncResult SyncEngine::compact() { return impl_->compact(); }
+AudioReport SyncEngine::sync_audio() { return impl_->sync_audio(); }
 bool SyncEngine::encryption_available() { return crypto_available(); }
 int SyncEngine::relink_missing(const std::vector<std::string>& dirs) { return impl_->relink_missing(dirs); }
 Status SyncEngine::status() { return impl_->status(); }

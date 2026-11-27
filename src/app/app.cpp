@@ -7,6 +7,9 @@
 #include "deckhand/analysis/analysis.hpp"
 #include "deckhand/core/key_math.hpp"
 #include "deckhand/broadcast/json.hpp"
+#include "deckhand/app/chain_presets.hpp"
+#include "deckhand/app/sync_settings.hpp"
+#include "deckhand/app/plugin_service.hpp"
 #include "deckhand/export/export.hpp"
 #include "deckhand/export/export_device.hpp"
 
@@ -44,6 +47,8 @@ App::App(const dh_platform& platform, const dh_config& config)
         return true;
       }) {
   std::filesystem::create_directories(data_dir_);
+  chain_presets_set_dir(data_dir_ + "/fx-presets");
+  plugin_service().set_dir(data_dir_ + "/plugins");  // before any engine exists: it vets plug-ins here
   log::set_level(static_cast<log::Level>(std::clamp(config.log_level, 0, 4)));
   log::set_file(data_dir_ + "/deckhand.log");
   DH_LOG(Info, "DeckHand starting; data in %s", data_dir_.c_str());
@@ -156,6 +161,7 @@ App::App(const dh_platform& platform, const dh_config& config)
 }
 
 App::~App() {
+  loc_cancel_ = true;  // a running search for moved files stops
   api_.reset();  // stop outside callers first
   if (lighting_) lighting_->close();  // one dark frame, outputs closed
   stems_.reset();
@@ -787,6 +793,36 @@ void App::run_job(Library& lib, const Job& j) {
   }
 }
 
+std::string App::api_sync_json() {
+  SyncSummary s;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    s = sync_;
+  }
+  const auto num = [](const char* k, long long v) { return std::string("\"") + k + "\":" + std::to_string(v); };
+  const auto esc = [](const std::string& t) {
+    std::string o = "\"";
+    for (const unsigned char c : t) {
+      if (c == '"' || c == '\\') o += '\\';
+      if (c >= 0x20) o += static_cast<char>(c);
+    }
+    return o + "\"";
+  };
+  std::string j = "{\"running\":" + std::string(s.running ? "true" : "false") + ",\"known\":" + (s.known ? "true" : "false") +
+                  ",\"last_ok\":" + (s.last_ok ? "true" : "false") + ",\"error\":" + esc(s.error) + "," + num("last_ms", s.last_ms) + "," +
+                  num("other_devices", s.other_devices) + "," + num("sent", s.sent) + "," + num("received", s.received) + "," +
+                  num("files_skipped", s.skipped) + "," + num("links_pending", s.links_pending) + "," + num("analysis_applied", s.analysis_applied) +
+                  ",\"audio\":";
+  if (!s.audio_ran) return j + "null}";
+  j += "{\"ok\":" + std::string(s.audio_ok ? "true" : "false") + ",\"error\":" + esc(s.audio_error) + "," + num("exported", s.audio_exported) + "," +
+       num("exported_bytes", static_cast<long long>(s.audio_exported_bytes)) + "," + num("already_stored", s.audio_already) + "," +
+       num("imported", s.audio_imported) + "," + num("imported_bytes", static_cast<long long>(s.audio_imported_bytes)) + "," +
+       num("relinked", s.audio_relinked) + "," + num("skipped", s.audio_skipped) + "," + num("waiting_budget", s.audio_waiting_budget) + "," +
+       num("waiting_files", s.audio_waiting_files) + "," + num("failed", s.audio_failed) + "," +
+       num("store_bytes", static_cast<long long>(s.audio_store_bytes)) + "}";
+  return j + "}";
+}
+
 // The name other devices see this one by: the host name without a ".local" suffix.
 std::string App::host_name() {
   char buf[256] = {};
@@ -814,15 +850,23 @@ void App::sync_job(Library& lib, bool run) {
   cfg.device_name = lib.setting("sync.device_name", host_name());
   if (cfg.device_name.empty()) cfg.device_name = host_name();
   cfg.passphrase = lib.setting("sync.password");  // "password" in the name: write-only over the API, never synced
+  load_sync_options(lib, cfg);
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     sync_.running = run;
   }
   deckhand::sync::SyncEngine engine(lib, cfg);
   deckhand::sync::SyncResult r;
+  deckhand::sync::AudioReport ar;
+  bool audio_ran = false;
   if (run) {
     r = engine.sync_once();
     for (const std::string& w : r.warnings) DH_LOG(Warn, "sync: %s", w.c_str());
+    if (r.ok && sync_audio_wanted(cfg)) {  // audio files go after the metadata: imports link to tracks that just arrived
+      ar = engine.sync_audio();
+      audio_ran = true;
+      for (const std::string& w : ar.warnings) DH_LOG(Warn, "sync audio: %s", w.c_str());
+    }
   }
   const deckhand::sync::Status st = engine.status();
   const std::vector<deckhand::sync::DeviceInfo> devices = engine.devices();
@@ -841,6 +885,24 @@ void App::sync_job(Library& lib, bool run) {
         sync_.sent = r.records_written;
         sync_.received = r.records_applied;
         sync_.skipped = r.files_skipped;
+        sync_.links_pending = r.links_pending;
+        sync_.analysis_applied = r.analysis_applied;
+        sync_.audio_ran = audio_ran;
+        if (audio_ran) {
+          sync_.audio_ok = ar.ok;
+          sync_.audio_error = ar.error;
+          sync_.audio_exported = ar.exported;
+          sync_.audio_already = ar.already_stored;
+          sync_.audio_imported = ar.imported;
+          sync_.audio_relinked = ar.relinked;
+          sync_.audio_skipped = ar.skipped;
+          sync_.audio_waiting_budget = ar.waiting_budget;
+          sync_.audio_waiting_files = ar.waiting_files;
+          sync_.audio_failed = ar.failed;
+          sync_.audio_exported_bytes = ar.exported_bytes;
+          sync_.audio_imported_bytes = ar.imported_bytes;
+          sync_.audio_store_bytes = ar.store_bytes;
+        }
       }
     } else if (!st.last_error.empty() && sync_.last_ms == 0) {
       sync_.last_ok = false;
@@ -850,7 +912,7 @@ void App::sync_job(Library& lib, bool run) {
   if (!run) return;
   if (!r.ok) {
     set_status(T("status.sync_failed", {{"message", r.error}}));
-  } else if (r.records_written > 0 || r.records_applied > 0) {
+  } else if (r.records_written > 0 || r.records_applied > 0 || ar.imported > 0 || ar.relinked > 0) {
     rows_dirty_ = true;
     if (r.records_applied > 0) settings_synced_ = true;
     set_status(T("status.synced", {{"sent", r.records_written}, {"files", r.records_applied}}));
@@ -1149,12 +1211,22 @@ void App::apply_tree_selection() {  // browse_mutex_ held
   if (tree_sel_ < 0 || tree_sel_ >= static_cast<int>(tree_.size())) return;
   const TreeItem& item = tree_[static_cast<std::size_t>(tree_sel_)];
   confirm_delete_ = 0;
-  if (item.kind == TreeItem::Folder || item.kind == TreeItem::HistoryHeader) return;  // containers show nothing
+  if (item.kind == TreeItem::HistoryHeader) return;  // a heading shows nothing
+  if (item.kind == TreeItem::DiskHeader) {
+    disk_on_ = !disk_on_;
+    rows_dirty_ = true;
+    return;
+  }
+  if (item.kind == TreeItem::DiskFolder) {
+    disk_path_ = item.path;
+    if (!disk_open_.erase(item.path)) disk_open_.insert(item.path);  // a second click closes it again
+  }
   view_ = item.kind;
   playlist_id_ = item.id;
   sel_ = 0;
   scroll_ = 0;
   rows_dirty_ = true;
+  save_panes();
 }
 
 void App::commit_rename() {  // browse_mutex_ held, UI thread
@@ -1318,6 +1390,15 @@ void App::open_file(const std::string& path, float x, float y) {
 
 void App::refresh_rows() {
   std::lock_guard<std::mutex> lock(browse_mutex_);
+  if (split_ != SplitMode::Off) {  // the other pane keeps its own source, sort and search: bring it up to date too
+    swap_pane();
+    refresh_pane_rows();
+    swap_pane();
+  }
+  refresh_pane_rows();
+}
+
+void App::refresh_pane_rows() {
   // Flatten the playlist tree depth-first, then append the play history.
   const std::vector<PlaylistNode> nodes = lib_->playlists();
   tree_.clear();
@@ -1333,6 +1414,23 @@ void App::refresh_rows() {
   add_children(add_children, 0, 0);
   for (const SmartPlaylist& sp : lib_->smart_playlists())  // saved rule sets: live, counted when the tree is built
     tree_.push_back({TreeItem::Smart, sp.id, 0, sp.name, static_cast<int>(lib_->query_ids(sp.rules, sp.match_all).size())});
+  {  // the library by the directories of its files (opens and closes like a folder)
+    tree_.push_back({TreeItem::DiskHeader, 0, 0, T("browser.disk"), 0});
+    if (disk_on_ || view_ == TreeItem::DiskFolder) {
+      const auto add_disk = [&](auto&& self, const std::string& dir, int depth) -> void {
+        if (depth > 12) return;
+        int shown = 0;
+        for (const DiskFolder& f : lib_->disk_folders(dir)) {
+          if (++shown > 300) break;
+          TreeItem it{TreeItem::DiskFolder, 0, depth, f.name, f.total};
+          it.path = f.path;
+          tree_.push_back(std::move(it));
+          if (f.has_children && disk_open_.count(f.path)) self(self, f.path, depth + 1);
+        }
+      };
+      add_disk(add_disk, std::string(), 1);
+    }
+  }
   const auto sessions = lib_->history_sessions();
   if (!sessions.empty()) {
     tree_.push_back({TreeItem::HistoryHeader, 0, 0, T("browser.history"), 0});
@@ -1341,9 +1439,9 @@ void App::refresh_rows() {
   }
   // Keep the tree selection on the item being viewed, even when the tree changed.
   tree_sel_ = 0;
-  bool found = view_ == TreeItem::Collection;
+  bool found = view_ == TreeItem::Collection || view_ == TreeItem::DiskFolder;  // a directory may sit under a closed parent
   for (std::size_t i = 0; i < tree_.size(); ++i) {
-    if (tree_[i].kind == view_ && tree_[i].id == playlist_id_) {
+    if (tree_[i].kind == view_ && tree_[i].id == playlist_id_ && (view_ != TreeItem::DiskFolder || tree_[i].path == disk_path_)) {
       tree_sel_ = static_cast<int>(i);
       found = true;
     }
@@ -1359,7 +1457,10 @@ void App::refresh_rows() {
     }
     rows_.set(lib_.get(), std::move(ids));
   } else {
-    std::vector<std::int64_t> ids = view_ == TreeItem::Smart ? lib_->smart_track_ids(playlist_id_, search_, sort_, sort_desc_)
+    sources_.clear();
+    std::vector<std::int64_t> ids = view_ == TreeItem::DiskFolder ? lib_->disk_folder_track_ids(disk_path_, true, search_, sort_, sort_desc_)
+                                    : view_ == TreeItem::Folder   ? lib_->folder_track_ids(playlist_id_, search_, sort_, sort_desc_, &sources_)
+                                    : view_ == TreeItem::Smart ? lib_->smart_track_ids(playlist_id_, search_, sort_, sort_desc_)
                                                            : lib_->track_ids(view_ == TreeItem::Playlist ? playlist_id_ : 0, search_, sort_, sort_desc_);
     double ref_bpm = 0;
     std::string ref_key;
@@ -1415,6 +1516,15 @@ void App::prepare_frame() {
   if (!status_note_.empty()) {
     set_status(status_note_);
     status_note_.clear();
+  }
+  {  // plug-in rescan: progress while it runs, the outcome when it ends
+    const PluginScanStatus ps = plugin_service().status();
+    if (ps.running) {
+      set_status(T("chain.scanning", {{"done", ps.done}, {"total", ps.total}, {"name", ps.current}}));
+    } else if (ps.generation != plugin_scan_seen_) {
+      if (plugin_scan_seen_ != 0 || ps.blocked_now > 0) set_status(T("chain.scan_done", {{"message", ps.last_message}}));
+      plugin_scan_seen_ = ps.generation;
+    }
   }
   if (rows_dirty_.exchange(false)) refresh_rows();
 

@@ -35,6 +35,9 @@ full control API.
 - Stems: offline four-stem separation with a built-in engine and a cache (you install a model
   yourself; none ships). Not yet playable on the decks.
 - Sampler with a step sequencer, loop slicing and sample scratch; linked mix points between tracks.
+- Effect chain editor with Audio Unit plug-ins (macOS; each plug-in is test-loaded in a separate
+  process first). Two browser panes, layout presets, finding moved files.
+- Optional sync of analysis data and of audio files per playlist, encrypted with the sync passphrase.
 - Key sync, 16 hot cues, track suggestions and a headphones-only preparation mode.
 - Controller settings per device: click the controller's name in the status row.
 - Lighting: beat- and phrase-driven DMX over Art-Net, sACN or serial (off by default; untested on fixtures).

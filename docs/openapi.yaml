@@ -847,6 +847,390 @@ paths:
         "404": {$ref: "#/components/responses/NotFound"}
         default: {$ref: "#/components/responses/Error"}
 
+  /v1/fx/chains/{target}/units/{id}/plugin:
+    get:
+      tags: [Effect chains]
+      operationId: getFxPluginUnit
+      summary: A plug-in unit's parameters
+      description: "Required scope: `read`. The unit's plug-in id, name, whether it loaded (and why not), render error count and every parameter with min, max, default, steps, value names, the current normalised value (`norm`) and the plug-in's own text for it."
+      x-scope: "read"
+      parameters:
+      - {$ref: "#/components/parameters/FxTarget"}
+      - {name: id, in: path, required: true, description: "Unit id from the chain", schema: {type: integer}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/fx/plugins:
+    get:
+      tags: [Effect chains]
+      operationId: listFxPlugins
+      summary: Installed effect plug-ins
+      description: "Required scope: `read`. `supported` is false in builds that cannot host plug-ins. Only plug-ins with `vetted: true` (they passed the out-of-process probe) can be added to a chain; `blocked` ones failed it. `progress` describes a running rescan."
+      x-scope: "read"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/fx/plugins/rescan:
+    post:
+      tags: [Effect chains]
+      operationId: rescanFxPlugins
+      summary: Scan for plug-ins and probe the new ones
+      description: "Required scope: `control:fx`. Runs in the background; poll `GET /v1/fx/plugins`. Replies 202 with the same body."
+      x-scope: "control:fx"
+      responses:
+        "202": {description: Started, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/fx/presets:
+    get:
+      tags: [Effect chains]
+      operationId: listFxPresets
+      summary: Names of the saved chain presets
+      description: "Required scope: `read`. Presets are saved with `POST /v1/fx/chains/{target}/presets` and hold the chain and the state of its plug-ins."
+      x-scope: "read"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/fx/presets/delete:
+    post:
+      tags: [Effect chains]
+      operationId: deleteFxPreset
+      summary: Delete a saved chain preset
+      description: "Required scope: `control:fx`. Replies 204."
+      x-scope: "control:fx"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {name: "Big echo"}
+      responses:
+        "204": {description: Deleted}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/fx/chains/{target}/presets:
+    post:
+      tags: [Effect chains]
+      operationId: saveFxPreset
+      summary: Save the chain as a named preset
+      description: "Required scope: `control:fx:{target}`. Overwrites a preset of the same name. Plug-in states are included."
+      x-scope: "control:fx:{target}"
+      parameters:
+      - {$ref: "#/components/parameters/FxTarget"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {name: "Big echo"}
+      responses:
+        "201": {description: Saved, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/fx/chains/{target}/presets/load:
+    post:
+      tags: [Effect chains]
+      operationId: loadFxPreset
+      summary: Replace the chain with a saved preset
+      description: "Required scope: `control:fx:{target}`. `notes` names plug-ins that were missing or blocked (their units stay as pass-throughs)."
+      x-scope: "control:fx:{target}"
+      parameters:
+      - {$ref: "#/components/parameters/FxTarget"}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {name: "Big echo"}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/browser:
+    get:
+      tags: [Library]
+      operationId: getBrowser
+      summary: Browser layouts, split state and the two panes
+      description: "Required scope: `read`. `split` is off, side or stacked; `panes` are the two tables (`live_pane` is the focused one) with kind (collection, folder, playlist, history, smart, disk), id, path, sort, descending and search; `layouts` are the built-in and saved column sets."
+      x-scope: "read"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/browser/split:
+    put:
+      tags: [Library]
+      operationId: setBrowserSplit
+      summary: Split the browser into two tables, or back
+      description: "Required scope: `control`. Replies with GET /v1/browser."
+      x-scope: "control"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {mode: side, live_pane: 0}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/browser/panes/{slot}:
+    put:
+      tags: [Library]
+      operationId: setBrowserPane
+      summary: Set what one table shows
+      description: "Required scope: `control`. Any of kind, id, path, search, sort, descending."
+      x-scope: "control"
+      parameters:
+      - {name: slot, in: path, required: true, description: "0 or 1", schema: {type: integer}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {kind: playlist, id: 3, sort: bpm, descending: false}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/browser/layouts:
+    post:
+      tags: [Library]
+      operationId: saveBrowserLayout
+      summary: Save a column layout
+      description: "Required scope: `control`. Names of built-in layouts cannot be used. Replies 201 with GET /v1/browser."
+      x-scope: "control"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {name: Tags, columns: [title, artist, genre, comment], sort: default}
+      responses:
+        "201": {description: Saved, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/browser/layouts/delete:
+    post:
+      tags: [Library]
+      operationId: deleteBrowserLayout
+      summary: Delete a saved column layout
+      description: "Required scope: `control`. Built-in layouts stay."
+      x-scope: "control"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {name: Tags}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/browser/layout:
+    put:
+      tags: [Library]
+      operationId: applyBrowserLayout
+      summary: Apply a column layout
+      description: "Required scope: `control`. Sets columns, widths and the sort of the focused table."
+      x-scope: "control"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {name: perform}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/folders/{id}/tracks:
+    get:
+      tags: [Library]
+      operationId: listFolderTracks
+      summary: Tracks of a playlist folder and everything beneath it
+      description: "Required scope: `library:read`. Each track once; `source` names the first playlist it came from. Same paging and sorting as the track list."
+      x-scope: "library:read"
+      parameters:
+      - {name: id, in: path, required: true, description: "Folder id", schema: {type: integer}}
+      - {name: search, in: query, required: false, description: "text filter", schema: {type: string}}
+      - {name: sort, in: query, required: false, description: "sort key", schema: {type: string}}
+      - {name: desc, in: query, required: false, description: "1 = descending", schema: {type: string}}
+      - {name: limit, in: query, required: false, description: "default 200, at most 2000", schema: {type: string}}
+      - {name: offset, in: query, required: false, description: "", schema: {type: string}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/disk-folders:
+    get:
+      tags: [Library]
+      operationId: listDiskFolders
+      summary: The library by the directories of its files
+      description: "Required scope: `library:read`. Children of `dir` (empty = the roots), each with the tracks directly in it and below."
+      x-scope: "library:read"
+      parameters:
+      - {name: dir, in: query, required: false, description: "directory from an earlier reply, empty for the top", schema: {type: string}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/disk-folders/tracks:
+    get:
+      tags: [Library]
+      operationId: listDiskFolderTracks
+      summary: Tracks in a directory
+      description: "Required scope: `library:read`. `recursive=0` lists only that directory."
+      x-scope: "library:read"
+      parameters:
+      - {name: dir, in: query, required: false, description: "directory (required)", schema: {type: string}}
+      - {name: recursive, in: query, required: false, description: "0 to exclude subdirectories", schema: {type: string}}
+      - {name: search, in: query, required: false, description: "", schema: {type: string}}
+      - {name: sort, in: query, required: false, description: "", schema: {type: string}}
+      - {name: desc, in: query, required: false, description: "", schema: {type: string}}
+      - {name: limit, in: query, required: false, description: "", schema: {type: string}}
+      - {name: offset, in: query, required: false, description: "", schema: {type: string}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/relocate/scan:
+    post:
+      tags: [Library]
+      operationId: scanRelocate
+      summary: Look for the files of missing tracks (dry run)
+      description: "Required scope: `library:read`. Searches the given directories; changes nothing. `found` can go to `/relocate/apply`; `ambiguous` entries are never guessed."
+      x-scope: "library:read"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {folders: ["/Volumes/Music"], allow_name_only: false}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/relocate/apply:
+    post:
+      tags: [Library]
+      operationId: applyRelocate
+      summary: Point missing tracks at the files a scan found
+      description: "Required scope: `library:write`. One journal batch: undo it with `POST /v1/library/edit-batches/{batch_id}/undo`."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {matches: [{track_id: 12, new_path: "/Volumes/Music/a.mp3"}]}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks/{id}/relink:
+    post:
+      tags: [Library]
+      operationId: relinkTrack
+      summary: The track's file is now at this path
+      description: "Required scope: `library:write`. 409 when another track already has that file."
+      x-scope: "library:write"
+      parameters:
+      - {name: id, in: path, required: true, description: "Track id", schema: {type: integer}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {path: "/Volumes/Music/a.mp3"}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/library/tracks/{id}/relink/siblings:
+    post:
+      tags: [Library]
+      operationId: relinkSiblings
+      summary: Other missing tracks that moved with this one (dry run)
+      description: "Required scope: `library:read`. Same report as a scan; feed `found` to `/relocate/apply`."
+      x-scope: "library:read"
+      parameters:
+      - {name: id, in: path, required: true, description: "Track id", schema: {type: integer}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {path: "/Volumes/Music/a.mp3"}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/sync:
+    get:
+      tags: [Settings]
+      operationId: getSync
+      summary: Sync settings and the result of the last run
+      description: "Required scope: `read`. `config` holds the sync switches, audio playlists, music folder and budgets; `last` the numbers of the last run (including `links_pending`, `analysis_applied` and the audio step)."
+      x-scope: "read"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/sync/run:
+    post:
+      tags: [Settings]
+      operationId: runSync
+      summary: Sync now
+      description: "Required scope: `control`. Queues a run; poll `GET /v1/sync`. 409 without a sync folder."
+      x-scope: "control"
+      responses:
+        "202": {description: Queued, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/sync/config:
+    put:
+      tags: [Settings]
+      operationId: putSyncConfig
+      summary: Change the sync switches
+      description: "Required scope: `admin`. Any of mix_links, analysis, audio_playlists (playlist ids), music_folder, audio_budget_mb, audio_import_budget_mb, allow_unencrypted_audio (audio then goes unencrypted when no crypto library exists). The folder, name and passphrase are set through `/v1/settings/sync.folder` and friends."
+      x-scope: "admin"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {analysis: true, audio_playlists: [3], music_folder: "/Users/me/Music/Synced"}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
   /v1/keymap:
     get:
       tags: [Settings]
@@ -1424,6 +1808,18 @@ paths:
                   items:
                     type: array
                     items: {$ref: "#/components/schemas/TrashedTrack"}
+        default: {$ref: "#/components/responses/Error"}
+    delete:
+      tags: [Library]
+      operationId: emptyTrash
+      summary: Empty the trash for good
+      description: "Required scope: `admin`. Forgets every removed track (or those removed more than `older_than_days` ago). Cannot be undone."
+      x-scope: "admin"
+      parameters:
+      - {name: older_than_days, in: query, required: false, description: "only older ones", schema: {type: string}}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
         default: {$ref: "#/components/responses/Error"}
 
   /v1/library/trash/{id}/restore:

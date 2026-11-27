@@ -935,7 +935,7 @@ void test_prep_ipc(const std::string& base) {
   m.memory_cues = {1000, 2000, 3000};
   eng.set_track_meta(0, 0, m);
   CHECK(wait_for([&] { return eng.deck(0).meta_rev == rev + 1; }, 5));
-  CHECK(std::fabs(eng.deck(0).position - 33333) < 1 && eng.deck(0).loaded);
+  CHECK(wait_for([&] { return std::fabs(eng.deck(0).position - 33333) < 1 && eng.deck(0).loaded; }, 5));  // the seek travels the command ring, the meta an RPC
   CHECK(std::fabs(eng.deck(0).bpm - 90) < 1e-6);
   // hostile requests are refused and change nothing
   TrackMeta bad;

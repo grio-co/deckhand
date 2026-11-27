@@ -397,6 +397,16 @@ std::vector<UiActionInfo> list_ui_actions() {
   add("ui.controller", "trigger", "none", "Open or close the panel of the connected controller (mapping and per-controller settings)");
   add("ui.controller.switch_decks", "toggle", "0 / 1 = the deck pair, none = switch", "Switch a controller with switchable deck sides to its other pair of decks (1/2 <-> 3/4)");
   add("ui.columns", "trigger", "none", "Open or close the browser columns");
+  add("ui.trash", "trigger", "none", "Open or close the trash and edit history");
+  add("ui.chain", "trigger", "none", "Open or close the effect chain editor (master chain; again on the open panel closes it)");
+  for (const char* t : {"deck1", "deck2", "deck3", "deck4", "master", "mic", "sampler"})
+    add(std::string("ui.chain.") + t, "trigger", "none", std::string("Open the effect chain editor on the chain of ") + t);
+  add("ui.layouts", "trigger", "none", "Open or close the browser layouts (saved column sets)");
+  add("ui.layout_next", "trigger", "none", "Switch to the next browser layout");
+  add("ui.layout_prev", "trigger", "none", "Switch to the previous browser layout");
+  add("ui.locate", "trigger", "none", "Open or close the search for moved files");
+  add("ui.split", "trigger", "none", "Split the browser into two track tables (side by side, stacked, off)");
+  add("ui.focus_pane", "trigger", "none", "Move the keyboard focus to the other track table"); 
   add("ui.close_panel", "trigger", "none", "Close the open panel, or clear the search");
   add("ui.window.browser", "trigger", "none", "Show or hide the browser window");
   add("ui.window.sampler", "trigger", "none", "Show or hide the sampler window");

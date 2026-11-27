@@ -46,7 +46,7 @@ swiftc -O -swift-version 5 \
   -I "$ROOT/platform/macos/DeckHandKit/Sources/CDeckHand/include" \
   "$ROOT"/platform/macos/DeckHandKit/Sources/DeckHandKit/*.swift "$ROOT"/platform/macos/Shell/main.swift \
   -o "$APP/Contents/MacOS/DeckHand" \
-  -L "$BUILD" -ldh_app -ldh_lighting -ldh_stems -ldh_sync -ldh_services -ldh_broadcast -ldh_api -ldh_skin -ldh_i18n -ldh_export -ldh_analysis -ldh_stems -ldh_midi -ldh_import \
+  -L "$BUILD" -ldh_app -ldh_lighting -ldh_plugins -ldh_stems -ldh_sync -ldh_services -ldh_broadcast -ldh_api -ldh_skin -ldh_i18n -ldh_export -ldh_analysis -ldh_stems -ldh_midi -ldh_import \
   -ldh_library -ldh_audio -ldh_gfx -ldh_log -ldh_platform -ldh_miniaudio \
   $(cat "$BUILD/tls_link.txt") $(cat "$BUILD/sqlite_link.txt") -lc++ \
   -framework AppKit -framework Metal -framework MetalKit -framework QuartzCore -framework CoreText \
@@ -65,13 +65,21 @@ sed -e "s/@BUNDLE_ID@/$BUNDLE_ID/" -e "s/@VERSION@/$VERSION/g" \
 # binary opens the capture device (the helper normally, the app in in-process mode). The device is only ever opened
 # after the user picks an input in the settings.
 ENTITLEMENTS="$ROOT/platform/macos/DeckHand.entitlements"
+# The engine helper and the plug-in probe load third-party Audio Units, so they alone also carry the entitlement that lets
+# the hardened runtime load code signed by another team (disable-library-validation); the app itself does not.
+HOST_ENTITLEMENTS="$ROOT/platform/macos/DeckHand.plugin-host.entitlements"
 cp "$BUILD/deckhand-engine" "$APP/Contents/MacOS/deckhand-engine"
+[ -x "$BUILD/deckhand-plugin-probe" ] && cp "$BUILD/deckhand-plugin-probe" "$APP/Contents/MacOS/deckhand-plugin-probe"
 if [ "$SKIP_SIGN" = 1 ]; then
   echo "UNSIGNED CI BUILD (DECKHAND_SKIP_SIGN=1): $APP is not signed and must not be shipped"
   exit 0
 fi
-codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --identifier "$BUNDLE_ID.engine" --sign "$IDENTITY" "$APP/Contents/MacOS/deckhand-engine"
+codesign --force --options runtime --timestamp --entitlements "$HOST_ENTITLEMENTS" --identifier "$BUNDLE_ID.engine" --sign "$IDENTITY" "$APP/Contents/MacOS/deckhand-engine"
+if [ -f "$APP/Contents/MacOS/deckhand-plugin-probe" ]; then
+  codesign --force --options runtime --timestamp --entitlements "$HOST_ENTITLEMENTS" --identifier "$BUNDLE_ID.plugin-probe" --sign "$IDENTITY" "$APP/Contents/MacOS/deckhand-plugin-probe"
+fi
 codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$APP"
 codesign --verify --strict "$APP"
 codesign --verify --strict "$APP/Contents/MacOS/deckhand-engine"
+[ -f "$APP/Contents/MacOS/deckhand-plugin-probe" ] && codesign --verify --strict "$APP/Contents/MacOS/deckhand-plugin-probe"
 echo "built and signed: $APP"

@@ -218,6 +218,9 @@ template deck n color {
         use fxrow n=${n} s=1 color=${color}
         use fxrow n=${n} s=2 color=${color}
         use fxrow n=${n} s=3 color=${color}
+        row h=22 gap=3 {
+          use tog bind="deck[${n}].chain" label="@fx.chain" on=accent
+        }
       }
     }
     row h=40 gap=3 {
@@ -377,6 +380,10 @@ template library vis {
         spacer
         use tog bind="browser.compatible" label="@browser.compatible" on=good
         use tog bind="browser.columns" label="@browser.columns" on=accent
+        use tog bind="browser.layouts" label="@browser.layouts" on=accent
+        use tog bind="browser.split" label="@browser.split" on=accent
+        use tog bind="browser.locate" label="@browser.locate" on=accent
+        use tog bind="browser.trash" label="@browser.trash" on=accent
         use tog bind="browser.edit" label="@browser.edit" on=accent
         use tog bind="browser.add_to" label="@browser.add_to" on=accent
         button action="window.toggle:browser" show="app.multi_window" text="@browser.pop_out" text_on="@browser.dock" font=small bg=panel2 radius=r w=64 {

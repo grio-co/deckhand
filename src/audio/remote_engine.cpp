@@ -265,6 +265,7 @@ void RemoteEngine::monitor_main() {
     }
     if (stopping_) break;
     const auto l = link();
+    if (l) snapshot_chains(false);
     if (l) {
       const bool gone = (l->ours && reap_child(l->pid)) || !process_alive(l->pid) ||
                         l->sh->hdr.session_id.load() != l->session;
@@ -293,11 +294,42 @@ void RemoteEngine::monitor_main() {
     bool spawned = false;
     last_start_ns = now_ns();
     if (establish(error, true, spawned)) {
+      if (spawned) restore_chains();
       notify(Status::Restarted, spawned ? "the audio engine was restarted; load your tracks again" : "re-attached to the audio engine");
     } else {
       DH_LOG(Warn, "engine restart failed: %s", error.c_str());
       ++quick_failures;
     }
+  }
+}
+
+void RemoteEngine::snapshot_chains(bool force) {
+  const auto now = std::chrono::steady_clock::now();
+  for (int t = 0; t < kFxTargetCount; ++t) {
+    if (!fx_target_valid(t)) continue;
+    {
+      std::lock_guard<std::mutex> lock(snap_mutex_);
+      if (!snap_dirty_[t] || (!force && now - snap_edit_[t] < std::chrono::milliseconds(300))) continue;
+      snap_dirty_[t] = false;
+    }
+    const FxChainInfo info = fx_chain(t);
+    std::string text = info.exists || info.count > 0 ? fx_chain_save_full(*this, t) : std::string();
+    std::lock_guard<std::mutex> lock(snap_mutex_);
+    if (!snap_dirty_[t]) snap_[t] = std::move(text);
+  }
+}
+
+void RemoteEngine::restore_chains() {
+  for (int t = 0; t < kFxTargetCount; ++t) {
+    std::string text;
+    {
+      std::lock_guard<std::mutex> lock(snap_mutex_);
+      text = snap_[t];
+    }
+    if (text.empty()) continue;
+    std::string err;
+    if (!fx_chain_load_full(*this, t, text, &err)) DH_LOG(Warn, "could not restore effect chain %d after the engine restart: %s", t, err.c_str());
+    else if (!err.empty()) DH_LOG(Warn, "effect chain %d restored with notes: %s", t, err.c_str());
   }
 }
 
@@ -422,7 +454,9 @@ bool RemoteEngine::fx_chain_edit(const FxChainEdit& edit, FxChainResult& result)
     result.error = "request too large";
     return false;
   }
-  if (!rpc(kReqFxChain, payload, reply, 4000)) {
+  // Loading a plug-in may probe it first (a throw-away process, seconds); a preset can name several.
+  const int timeout = (edit.kind == EffectKind::Plugin || edit.verb == FxChainVerb::Load) ? 30000 : 4000;
+  if (!rpc(kReqFxChain, payload, reply, timeout)) {
     result.error = "the engine did not answer";
     return false;
   }
@@ -438,9 +472,45 @@ bool RemoteEngine::fx_chain_edit(const FxChainEdit& edit, FxChainResult& result)
   }
   result.ok = ok;
   if (fx_target_valid(edit.target)) {
-    std::lock_guard<std::mutex> lock(chain_mutex_);
-    chain_cache_[edit.target] = ChainCache{result.info, std::chrono::steady_clock::now(), true};
+    {
+      std::lock_guard<std::mutex> lock(chain_mutex_);
+      chain_cache_[edit.target] = ChainCache{result.info, std::chrono::steady_clock::now(), true};
+    }
+    if (ok && edit.verb != FxChainVerb::Get && edit.verb != FxChainVerb::Save) {
+      std::lock_guard<std::mutex> lock(snap_mutex_);
+      snap_dirty_[edit.target] = true;
+      snap_edit_[edit.target] = std::chrono::steady_clock::now();
+    }
   }
+  return ok;
+}
+
+bool RemoteEngine::plugin_op(const PluginOp& op, PluginOpResult& result) {
+  result = PluginOpResult{};
+  if (op.data.size() > kPluginBlobMax) {
+    result.error = "request too large";
+    return false;
+  }
+  Wr w;
+  w.u8(static_cast<std::uint8_t>(op.kind));
+  w.u8(static_cast<std::uint8_t>(op.target));
+  w.i32(op.id);
+  w.blob(op.data);
+  std::vector<std::uint8_t> reply;
+  if (!rpc(kReqPluginOp, w.bytes(), reply, 8000)) {
+    result.error = "the engine did not answer";
+    return false;
+  }
+  Rd rd(reply.data(), reply.size());
+  const bool ok = rd.u8() != 0;
+  result.error = rd.str();
+  result.data = rd.blob(kPluginBlobMax);
+  if (!rd.ok()) {
+    result = PluginOpResult{};
+    result.error = "bad reply from the engine";
+    return false;
+  }
+  result.ok = ok;
   return ok;
 }
 

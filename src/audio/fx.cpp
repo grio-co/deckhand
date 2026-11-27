@@ -1,6 +1,7 @@
 // Effect table and processors. Original implementations: delay lines, a Schroeder-style plate reverb,
 // modulated delays, all-pass phaser, state-variable filter, two-tap delay-line pitch shifter, and so on.
 #include "fx.hpp"
+#include "fx_plugin.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -109,7 +110,7 @@ void lfo_start(const FxUnit& u, const FxCtx& cx, double& p, double& dp) {
 }
 
 // ---- echoes -------------------------------------------------------------------------------------
-enum EchoMode { kEcho, kPing, kSpiral, kLowCut, kDub };
+enum EchoMode { kEcho, kPing, kSpiral, kLowCut, kDub, kTape };
 
 void echo_run(FxUnit& u, const FxCtx& cx, float* buf, int n, int mode) {
   const K k = coefs(cx);
@@ -118,14 +119,28 @@ void echo_run(FxUnit& u, const FxCtx& cx, float* buf, int n, int mode) {
   while (tgt > maxd) tgt *= 0.5;
   tgt = std::max(tgt, 8.0);
   if (u.time_s < 0) u.time_s = tgt;
-  const float lp_a = lp_coef(mode == kDub ? 1800.0 : 6000.0, cx.sr);
+  float lp_a = lp_coef(mode == kDub ? 1800.0 : 6000.0, cx.sr);
+  float lp2_a = 1.0f;
+  double wob_dp = 0;
+  if (mode == kTape) {  // repeats get darker the lower the tone knob; a second pole keeps the roll-off tape-like
+    lp_a = lp_coef(std::min(450.0 * std::pow(20.0, static_cast<double>(u.param2_s)), cx.sr * 0.45), cx.sr);
+    lp2_a = lp_a;
+    wob_dp = 0.55 / cx.sr;
+  }
   float peak = 0;
   for (int i = 0; i < n; ++i) {
     smooth(u, k);
     u.time_s += std::clamp(tgt - u.time_s, -0.25, 0.25);  // slewed: a time change glides like a tape echo
     float yl, yr;
-    dl_read(u, 0, u.time_s, yl);
-    dl_read(u, 1, u.time_s, yr);
+    double rd = u.time_s;
+    if (mode == kTape) {  // slow wow plus a faster flutter, up to ~0.35 % of the delay time
+      u.d0 += wob_dp;
+      u.d0 -= std::floor(u.d0);
+      const double w = std::sin(2.0 * kPi * u.d0) + 0.35 * std::sin(2.0 * kPi * 9.0 * u.d0);
+      rd = u.time_s * (1.0 + 0.0026 * static_cast<double>(u.param3_s) * w);
+    }
+    dl_read(u, 0, rd, yl);
+    dl_read(u, 1, rd, yr);
     float fb = 0.15f + 0.7f * u.param_s;
     float hp_a = 0;
     double ratio = 1.0;
@@ -139,14 +154,27 @@ void echo_run(FxUnit& u, const FxCtx& cx, float* buf, int n, int mode) {
       fb = 0.5f + 0.3f * u.param_s;
       hp_a = lp_coef(150.0, cx.sr);
     }
-    u.s[0] += lp_a * (yl - u.s[0]);
-    u.s[1] += lp_a * (yr - u.s[1]);
+    if (mode == kTape) {
+      hp_a = lp_coef(90.0, cx.sr);
+      fb = 0.1f + 0.78f * u.param_s;
+      u.s[6] += lp_a * (yl - u.s[6]);
+      u.s[7] += lp_a * (yr - u.s[7]);
+      u.s[0] += lp2_a * (u.s[6] - u.s[0]);
+      u.s[1] += lp2_a * (u.s[7] - u.s[1]);
+    } else {
+      u.s[0] += lp_a * (yl - u.s[0]);
+      u.s[1] += lp_a * (yr - u.s[1]);
+    }
     float pl = u.s[0], pr = u.s[1];
     if (hp_a > 0) {
       u.s[2] += hp_a * (pl - u.s[2]);
       u.s[3] += hp_a * (pr - u.s[3]);
       pl -= u.s[2];
       pr -= u.s[3];
+    }
+    if (mode == kTape) {  // tape saturation on the repeats: gentle, level-dependent
+      pl = pl / (1.0f + 0.35f * std::fabs(pl));
+      pr = pr / (1.0f + 0.35f * std::fabs(pr));
     }
     const bool raw_out = mode == kEcho || mode == kPing || mode == kSpiral;
     const float ol = raw_out ? yl : pl, orr = raw_out ? yr : pr;
@@ -174,6 +202,7 @@ void ping_proc(FxUnit& u, const FxCtx& c, float* b, int n) { echo_run(u, c, b, n
 void spiral_proc(FxUnit& u, const FxCtx& c, float* b, int n) { echo_run(u, c, b, n, kSpiral); }
 void lowcut_proc(FxUnit& u, const FxCtx& c, float* b, int n) { echo_run(u, c, b, n, kLowCut); }
 void dub_proc(FxUnit& u, const FxCtx& c, float* b, int n) { echo_run(u, c, b, n, kDub); }
+void tape_proc(FxUnit& u, const FxCtx& c, float* b, int n) { echo_run(u, c, b, n, kTape); }
 
 // ---- plate reverb ----------------------------------------------------------------------------------
 // Input diffusion (4 all-passes) feeding two cross-coupled tanks (modulated all-pass, delay, damping,
@@ -191,8 +220,14 @@ void reverb_reset(FxUnit& u) {
     off += len;
   }
 }
-void reverb_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
+void reverb_run(FxUnit& u, const FxCtx& cx, float* buf, int n, bool beat_decay) {
   const K k = coefs(cx);
+  // Beat length decay: the signal passes one tank in about 0.36 s and meets `decay` twice on the way (at the cross-feed
+  // and after the damping), so decay = 10^(-1.5 * 0.36 / T) falls 60 dB in T.
+  const float beat_decay_target = beat_decay
+      ? static_cast<float>(std::clamp(std::pow(10.0, -1.5 * 0.36 / std::clamp(beat_time(u, cx) / cx.sr, 0.15, 12.0)), 0.2, 0.965))
+      : 0.0f;
+  if (beat_decay && u.s[12] <= 0.0f) u.s[12] = beat_decay_target;
   float* base = u.mem.data();
   const double sc = u.sr / 29761.0;
   const auto ap = [&](int line, float x, float g) {
@@ -237,7 +272,8 @@ void reverb_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
   float peak = 0;
   for (int i = 0; i < n; ++i) {
     smooth(u, k);
-    const float decay = 0.45f + 0.5f * u.param_s;
+    if (beat_decay) u.s[12] += (beat_decay_target - u.s[12]) * k.par;
+    const float decay = beat_decay ? u.s[12] : 0.45f + 0.5f * u.param_s;
     u.ph += 0.8 / cx.sr;
     u.ph -= std::floor(u.ph);
     const float lfo = std::sin(kTwoPi * static_cast<float>(u.ph));
@@ -265,6 +301,9 @@ void reverb_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
   }
   track_quiet(u, peak, n);
 }
+
+void reverb_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) { reverb_run(u, cx, buf, n, false); }
+void beat_reverb_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) { reverb_run(u, cx, buf, n, true); }
 
 // ---- modulation ------------------------------------------------------------------------------------
 void flanger_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
@@ -484,7 +523,7 @@ void noise_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
 }
 
 // ---- release effects ---------------------------------------------------------------------------
-void brake_run(FxUnit& u, const FxCtx& cx, float* buf, int n, bool spin) {
+void brake_run(FxUnit& u, const FxCtx& cx, float* buf, int n, bool spin, bool tape = false) {
   const K k = coefs(cx);
   const std::int64_t m = u.cap - 1;
   const double T = std::clamp(beat_time(u, cx), 0.1 * cx.sr, static_cast<double>(u.cap) * (spin ? 0.2 : 0.45));
@@ -500,7 +539,8 @@ void brake_run(FxUnit& u, const FxCtx& cx, float* buf, int n, bool spin) {
     u.mem[wi + 1] = r;
     ++u.w;
     if (!(u.on || u.on_s > 1e-4f)) continue;
-    const double v = spin ? -3.5 * std::exp(-u.d1 / (T / 3.0)) : std::max(0.0, 1.0 - u.d1 / T);
+    double v = spin ? -3.5 * std::exp(-u.d1 / (T / 3.0)) : std::max(0.0, 1.0 - u.d1 / T);
+    if (tape) v = std::pow(std::max(0.0, 1.0 - u.d1 / T), 1.0 + 3.0 * static_cast<double>(u.param_s));
     u.d1 += 1;
     u.d0 = std::clamp(u.d0 + v, static_cast<double>(u.w - u.cap + 16), static_cast<double>(u.w - 2));
     const std::int64_t i0 = static_cast<std::int64_t>(std::floor(u.d0));
@@ -519,6 +559,7 @@ void brake_run(FxUnit& u, const FxCtx& cx, float* buf, int n, bool spin) {
 }
 void brake_proc(FxUnit& u, const FxCtx& c, float* b, int n) { brake_run(u, c, b, n, false); }
 void spin_proc(FxUnit& u, const FxCtx& c, float* b, int n) { brake_run(u, c, b, n, true); }
+void tapestop_proc(FxUnit& u, const FxCtx& c, float* b, int n) { brake_run(u, c, b, n, false, true); }
 
 // ---- appended effects (protocol 5) ---------------------------------------------------------------------------
 // 3-band isolator: two Linkwitz-Riley (4th order) crossovers, 250 Hz and 2.5 kHz, built from cascaded second-order
@@ -697,6 +738,7 @@ void filter_proc(FxUnit& u, const FxCtx& cx, float* buf, int n) {
   }
 }
 
+void plugin_proc(FxUnit& u, const FxCtx&, float* buf, int n) { fx_plugin_run(u, buf, n); }
 void reset_none(FxUnit&) {}
 void reset_delay(FxUnit& u) { u.time_s = -1; }
 
@@ -727,6 +769,11 @@ const FxDef kDefs[] = {
     {{EffectKind::Slicer, "Slicer", "density", true, false, false, false, 1.0f, 0.5f, 0.25f, "rotation", "gate length", "slicer"}, slicer_proc, reset_none, false},
     {{EffectKind::BuildUp, "Build Up", "amount", true, true, false, false, 1.0f, 0.5f, 0.5f, "", "", "build_up"}, buildup_proc, reset_delay, false},
     {{EffectKind::Filter, "Filter", "knob (0.5 = off, low-pass below, high-pass above)", false, false, false, false, 1.0f, 0.5f, 1.0f, "resonance", "", "filter"}, filter_proc, reset_none, false},
+    {{EffectKind::TapeEcho, "Tape Echo", "feedback", true, true, false, false, 0.5f, 0.5f, 0.5f, "tone", "wobble", "tape_echo"}, tape_proc, reset_delay, false},
+    {{EffectKind::BeatReverb, "Beat Reverb", "", true, true, false, false, 0.4f, 0.5f, 2.0f, "", "", "beat_reverb"}, beat_reverb_proc, reverb_reset, false},
+    {{EffectKind::TapeStop, "Tape Stop", "curve", true, false, true, false, 1.0f, 0.3f, 1.0f, "", "", "tape_stop"}, tapestop_proc, reset_none, false},
+    // Must stay last: effect_count() leaves it out. Parameters are the plug-in's own (FxChainEdit field >= kFxFieldPluginParam).
+    {{EffectKind::Plugin, "Plug-in", "", false, true, false, false, 1.0f, 0.5f, 1.0f, "", "", "plugin"}, plugin_proc, reset_none, false},
 };
 static_assert(sizeof(kDefs) / sizeof(kDefs[0]) == static_cast<std::size_t>(EffectKind::Count), "one table row per EffectKind");
 
@@ -741,6 +788,10 @@ bool unit_active(const FxUnit& u, const FxDef& d) {
 }
 
 void run_unit(FxUnit& u, const FxCtx& cx, float* buf, int n) {
+  if (u.kind == EffectKind::Plugin) {  // no delay memory: the plug-in decides whether it has anything to do
+    plugin_proc(u, cx, buf, n);
+    return;
+  }
   if (u.kind == EffectKind::None || u.mem.empty()) return;
   const FxDef& d = def_of(u.kind);
   if (!unit_active(u, d)) {
@@ -785,7 +836,7 @@ void apply_defaults(FxUnit& u, const FxDef& dd) {
 
 }  // namespace
 
-int effect_count() { return static_cast<int>(EffectKind::Count) - 1; }
+int effect_count() { return static_cast<int>(EffectKind::Count) - 2; }  // not None, not Plugin
 const EffectInfo& effect_info_at(int i) { return kDefs[1 + std::clamp(i, 0, effect_count() - 1)].info; }
 const EffectInfo* effect_info(EffectKind k) {
   return static_cast<std::size_t>(k) < static_cast<std::size_t>(EffectKind::Count) ? &kDefs[static_cast<std::size_t>(k)].info : nullptr;
@@ -812,7 +863,10 @@ void FxUnit::clear() {
   def_of(kind).reset(*this);
 }
 
+FxUnit::~FxUnit() { delete plug; }
+
 void fx_unit_prepare(FxUnit& u, double sr) {
+  if (u.kind == EffectKind::Plugin && u.plug) fx_plugin_rate(u, sr);
   std::int64_t cap = 1;
   const double secs = small_memory(u.kind) ? 0.05 : 2.5;
   while (static_cast<double>(cap) < sr * secs) cap <<= 1;
@@ -837,6 +891,7 @@ FxUnit* fx_make_unit(EffectKind kind, double sr, std::uint32_t seed) {
 
 bool fx_unit_busy(const FxUnit& u) {
   if (u.kind == EffectKind::None) return false;
+  if (u.kind == EffectKind::Plugin) return fx_plugin_busy(u);
   const FxDef& d = def_of(u.kind);
   return u.on || u.on_s > 1e-4f || u.hold || (d.info.tail && u.quiet < u.cap + 8192);
 }

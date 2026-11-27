@@ -25,6 +25,8 @@
 
 namespace deckhand::ipc {
 
+// 9: effect plug-ins (EffectKind::Plugin, FxChainEdit::text carries the plug-in id, FxChainVerb::Set field >= kFxFieldPluginParam,
+//    kReqPluginOp side channel for parameter lists and state blobs; kReqFxChain reply timeout grows for plug-in loads).
 // 8: sampler slicing, scratch and the step sequencer (SamplerSlice / SamplerSliceTrigger / SamplerScratch / Seq* ops,
 //    SamplerView scratching / slices / slice, the StepSeqView snapshot in the segment, kReqSeqPattern).
 // 7: 16 hot cue slots (kHotCues 8 -> 16: DeckView, track block header), key sync (TrackKey / KeyMatch / KeyFollow / KeyReset /
@@ -38,7 +40,7 @@ namespace deckhand::ipc {
 // 2: microphone channel (Mic* ops, MixerView fields, InputInfo snapshot, input requests, include-mic flags).
 // Bump whenever a wire layout or the meaning of a request changes: a UI that finds an engine with another version
 // asks it to quit and starts a fresh one (RemoteEngine::establish), and the segment's fingerprint covers the sizes.
-constexpr std::uint32_t kProtocolVersion = 8;
+constexpr std::uint32_t kProtocolVersion = 9;
 constexpr int kBlockSlots = 64;  // track / sample blocks in flight at once
 
 // What the OS hands out for a file or socket: a descriptor on POSIX, a HANDLE / SOCKET on Windows (-1 = none).
@@ -559,6 +561,7 @@ enum Req : std::uint8_t {
   kReqFxChain,         // u8 verb, u8 target, i32 id, i32 pos, u8 kind, i32 field, f64 value, str text -> u8 ok, i32 id, str error, str text, chain info
   kReqStemsAttach,     // u8 deck, i64 track id, str path (.dhstems) -> u8 ok, str error   (loads in the background)
   kReqSeqPattern,      // i32 pattern, str text (see seq_pattern_to_text) -> u8 ok
+  kReqPluginOp,        // u8 kind (PluginOpKind), u8 target, i32 unit id, u32 n, n bytes -> u8 ok, str error, u32 n, n bytes (<= kPluginBlobMax)
   kReqHubDevice,       // u8 verb: 0 options (str mapping, str DeviceOptions text) -> u8 ok, str the options as applied (text);
                        //   1 jog ticks (str mapping) -> f64; 2 reload the mappings -> u8 ok; 3 prefer (u16 n, str...) -> u8 ok;
                        //   4 switch decks (str mapping, i32 layer 0 / 1 / -1 toggle) -> u8 ok, i32 layer now
@@ -577,6 +580,10 @@ class Wr {
     const std::size_t n = std::min<std::size_t>(s.size(), 65535);
     u16(static_cast<std::uint16_t>(n));
     raw(s.data(), n);
+  }
+  void blob(const std::string& s) {  // u32 length + bytes (callers keep it under kMaxFrame)
+    u32(static_cast<std::uint32_t>(s.size()));
+    raw(s.data(), s.size());
   }
   const std::vector<std::uint8_t>& bytes() const { return b_; }
 
@@ -602,6 +609,16 @@ class Rd {
   std::string str() {
     const std::size_t n = u16();
     if (!ok_ || n > n_ - at_) {
+      ok_ = false;
+      return {};
+    }
+    std::string s(reinterpret_cast<const char*>(p_ + at_), n);
+    at_ += n;
+    return s;
+  }
+  std::string blob(std::size_t max) {
+    const std::size_t n = u32();
+    if (!ok_ || n > max || n > n_ - at_) {
       ok_ = false;
       return {};
     }

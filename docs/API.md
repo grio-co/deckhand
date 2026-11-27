@@ -74,6 +74,11 @@ Send `Authorization: Bearer <token>`. Bodies and replies are JSON.
 | `POST /v1/library/analysis/strip` | `library:write` | Clear derived data only: `kinds` of grid, key, loudness, waveform, first_sound, phrases, vocals, stems for `ids`, a `playlist_id`/`search`, or `all`; `force`, `dry_run`. Tags, cues, playlists and the main cue are never touched; locked grids and hand-set keys are skipped unless forced. Undo (edit batch) restores grid, tempo, key and lock; loudness, waveform, phrases and first-sound/load cue are not undoable |
 | `GET /v1/library/duplicates`, `POST /v1/library/duplicates/hash`, `POST /v1/library/duplicates/merge` | `library:read` / `library:write` | Duplicate groups (`exact` by file hash, `likely` by artist, title and length, with confidence, differences and a `suggested_keep`), a bounded hashing step, and `merge` (`keep_id`, `remove_ids`, `options`: `copy_cues`, `fill_metadata`, `combine_history`, `dry_run`): playlists re-pointed without doubles, cues/grid copied where missing, history combined, removed tracks to the trash, audio files never touched |
 | `GET /v1/library/trash`, `POST /v1/library/trash/{id}/restore` | `library:read` / `library:write` | Removed tracks (kept 30 days) and restoring one with its cues, grid and playlist places |
+| `DELETE /v1/library/trash` | `admin` | Empty the trash for good (`?older_than_days=` keeps newer ones). Cannot be undone |
+| `GET /v1/library/folders/{id}/tracks`, `GET /v1/library/disk-folders`, `GET /v1/library/disk-folders/tracks?dir=` | `library:read` | A playlist folder shows the tracks of every playlist beneath it (each once, with `source`); the library by the directories of its files |
+| `POST /v1/library/relocate/scan`, `POST /v1/library/relocate/apply`, `POST /v1/library/tracks/{id}/relink`, `POST .../relink/siblings` | `library:read` / `library:write` | Find the files of missing tracks in folders you give (dry run, never guesses between equal candidates), apply the matches in one journal batch (undo with `POST /v1/library/edit-batches/{id}/undo`), relink one track by hand, and look for the other tracks that moved with it |
+| `GET /v1/browser`, `PUT /v1/browser/split`, `PUT /v1/browser/panes/{slot}`, `PUT /v1/browser/layout`, `POST /v1/browser/layouts`, `POST /v1/browser/layouts/delete` | `read`, `control` | The browser's saved column layouts, the split into two tables (`off`, `side`, `stacked`) and what each table shows |
+| `GET /v1/sync`, `POST /v1/sync/run`, `PUT /v1/sync/config` | `read`, `control`, `admin` | Sync settings (`mix_links`, `analysis`, `audio_playlists`, `music_folder`, `audio_budget_mb`, `audio_import_budget_mb`, `allow_unencrypted_audio`; settings keys `sync.*`, see docs/SYNC.md) and the last run: `sent`, `received`, `links_pending`, `analysis_applied` and the audio step (`exported`, `imported`, `relinked`, `waiting_budget`, `waiting_files`, `failed`, `store_bytes`) |
 | `POST /v1/library/export/xml`, `POST /v1/library/playlists/{id}/export/m3u8`, `POST /v1/library/export/m3u8` | `export` | Write the library as DJ library XML, or playlists as M3U8, to a server-side path ([INTERCHANGE.md](INTERCHANGE.md)) |
 | `POST /v1/library/import/xml`, `POST /v1/library/import/m3u8` | `library:write` | Import them; `dry_run` reports without writing; imported edits are journalled (source `import`) and keep user/API edits unless `overwrite_metadata` |
 | `POST /v1/export/preflight`, `GET /v1/export/report` | `export`, `library:read` | Check which tracks a club player can read before exporting; report of the last export. `POST /v1/export` takes `convert_incompatible` and `player_profile` |
@@ -220,3 +225,21 @@ carries `mix_links_moved` too.
 A second DeckHand started on the same data folder is refused before it touches the engine process: the first holds an OS lock on
 `<data folder>/deckhand.lock` (released by the OS when it ends, however it ends). The second shows the message (macOS also brings the first
 window forward) and exits. Portable mode keeps its data beside the app, so it has its own lock.
+
+## Effect plug-ins and chain presets (protocol 9)
+
+A chain unit can be a hosted plug-in (macOS Audio Units; `GET /v1/fx/plugins` says whether this build can host them).
+
+- `GET /v1/fx/plugins`: installed effect plug-ins with `vetted` (passed the out-of-process probe) and `blocked` (failed it, with
+  `reason`). Only vetted plug-ins can be added. `POST /v1/fx/plugins/rescan` (scope `control:fx`) scans and probes in the background;
+  poll the same `GET` for `scanning` and `progress`. The control `plugins.rescan` does the same.
+- `POST /v1/fx/chains/{target}/units` with `{"plugin": "<id>", "pos": n, "on": true}` adds a plug-in unit (`effect` and `plugin` are
+  exclusive; the effect slug `plugin` and number are refused). The unit in `GET /v1/fx/chains/{target}` carries `plugin` with `id`,
+  `name`, `loaded`, `error` and `param_count`; `GET .../units/{id}/plugin` lists the parameters (`index`, `name`, `unit`, `min`, `max`,
+  `default`, `steps`, `values`, `norm` 0..1, `plain`, `text`). `PATCH .../units/{id}` accepts `"params": {"<index>": 0..1}` besides
+  `on` and `wet`. Controls: `deckN.chain.insert_plugin[.pos]` (id as the request `text`), `deckN.chain.unit.pp<index>.<unit id>`.
+- `GET /v1/effects` now lists, per effect, `tail`, `default_wet`, `default_param`, `default_beats` and `parameters` (field, label, default).
+  Three effects joined: `tape_echo`, `beat_reverb`, `tape_stop`.
+- Named presets (chain plus plug-in states): `POST /v1/fx/chains/{target}/presets` `{"name"}` saves, `POST .../presets/load` loads
+  (`notes` names plug-ins that were missing or blocked: their units stay as pass-throughs), `GET /v1/fx/presets` lists,
+  `POST /v1/fx/presets/delete` removes. Controls: `deckN.chain.preset_save|preset_load|preset_delete` (name as `text`).

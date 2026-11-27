@@ -44,7 +44,7 @@ Command cmd(Op op, int deck = 0, float f = 0, int i = 0, double d = 0) {
 WireCommand wire(Op op, int deck = 0, float f = 0, int i = 0, double d = 0) { return to_wire(cmd(op, deck, f, i, d)); }
 
 void test_wire() {
-  CHECK(kProtocolVersion == 8);
+  CHECK(kProtocolVersion >= 8);
   Command out;
   CHECK(validate_command(wire(Op::SeqRun, 0, 0, 1), out) && out.op == Op::SeqRun && out.i == 1);
   CHECK(validate_command(wire(Op::SeqRun, 0, 0, -1), out));

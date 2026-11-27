@@ -6,6 +6,25 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Effect chain editor: a panel (CHAIN button on each deck, Cmd/Ctrl+Alt+Shift+C) to add, remove,
+  reorder, switch and mix the effects of a deck, the master, the microphone, the sampler or a stem
+  bus, with named presets. Never seen on screen.
+- Audio Unit plug-ins in effect chains (macOS): each plug-in is test-loaded in a separate process
+  first and blocklisted if it fails; parameters appear as sliders; state is saved with chain
+  presets and restored after an engine restart ([docs/PLUGINS.md](docs/PLUGINS.md)). The engine
+  helper carries the `disable-library-validation` entitlement so plug-ins signed by other makers
+  can load. No plug-in windows, no host tempo, no VST3. Only Apple's built-in units have been
+  loaded; unheard. Engine protocol 9.
+- Three effects: Tape Echo, Beat Reverb, Tape Stop. Unheard.
+- Browser: layout presets, a second browser pane, recursive folder and on-disk folder views,
+  finding moved files (`deckhandctl relocate`, a Locate panel, relink a track and its
+  neighbours), and trash and edit-history panels. Never seen on screen.
+- Sync: linked mix points; optional analysis data (phrases, vocal regions, analysis cues; about
+  1.9 KB per track, off by default); optional audio files per playlist, de-duplicated,
+  hash-verified, resumable, within size budgets, encrypted with the sync passphrase
+  ([docs/SYNC.md](docs/SYNC.md)). Settings in the sync panel; `GET /v1/sync`,
+  `POST /v1/sync/run`, `PUT /v1/sync/config`. Tested on macOS with test data only.
+- 24 new REST operations (176 in all) for chains, plug-ins, browser and sync.
 - Sampler step sequencer: 8 patterns of 16 steps over the 16 slots, locked to the playing deck's
   beat grid (or a set tempo), swing, record from pads, pattern changes queued to the next bar;
   grid in the sampler panel, shortcuts, REST routes; patterns are saved and survive an engine

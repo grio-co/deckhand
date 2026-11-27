@@ -13,6 +13,8 @@ namespace deckhand {
 
 constexpr int kFxBlock = 512;  // largest block a chain processes in one go (the engine's chunk size)
 
+struct PluginSlot;
+
 struct FxCtx {
   double sr = 44100;
   double bf = 22050;       // output frames per beat (from the deck or master BPM)
@@ -43,6 +45,12 @@ struct FxUnit {
   std::int32_t n[64] = {};
   std::uint32_t rng = 1;
 
+  PluginSlot* plug = nullptr;  // kind Plugin: the hosted plug-in (owned; freed with the unit, off the audio thread)
+
+  FxUnit() = default;
+  FxUnit(const FxUnit&) = delete;
+  FxUnit& operator=(const FxUnit&) = delete;
+  ~FxUnit();
   void clear();  // zero all state and memory (not real-time safe beyond a memset)
 };
 
@@ -75,7 +83,7 @@ struct FxChainRT {
   int phase = 0;                    // 0 steady, 1 dipped: swap at the start of the next block
   FxUnit* ghost[kFxChainMax] = {};  // removed units still ringing out
   bool bypass = false;
-  bool immediate = false;           // never processed (stem bus before the stem engine exists): swap at once
+  bool immediate = false;           // swap at once, no dip (unused: stem buses run their chains like any other)
   float wet = 1.0f, wet_s = 1.0f, act = 1.0f;
   std::uint32_t leaked = 0;         // garbage that did not fit the ring (should stay 0)
 

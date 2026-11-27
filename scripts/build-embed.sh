@@ -13,7 +13,7 @@ cmake --build "$BUILD" -j >"$LOG" 2>&1 || { grep -E "error" -A3 "$LOG" | head -3
 mkdir -p "$BUILD/embed"
 # One archive with every core library, so the package needs a single -l.
 libtool -static -o "$BUILD/embed/libdeckhand_core.a" \
-  "$BUILD"/libdh_app.a "$BUILD"/libdh_lighting.a "$BUILD"/libdh_stems.a "$BUILD"/libdh_sync.a "$BUILD"/libdh_services.a "$BUILD"/libdh_broadcast.a "$BUILD"/libdh_api.a \
+  "$BUILD"/libdh_app.a "$BUILD"/libdh_lighting.a "$BUILD"/libdh_plugins.a "$BUILD"/libdh_stems.a "$BUILD"/libdh_sync.a "$BUILD"/libdh_services.a "$BUILD"/libdh_broadcast.a "$BUILD"/libdh_api.a \
   "$BUILD"/libdh_skin.a "$BUILD"/libdh_i18n.a "$BUILD"/libdh_export.a "$BUILD"/libdh_analysis.a "$BUILD"/libdh_midi.a \
   "$BUILD"/libdh_import.a "$BUILD"/libdh_library.a "$BUILD"/libdh_audio.a "$BUILD"/libdh_gfx.a "$BUILD"/libdh_log.a \
   "$BUILD"/libdh_platform.a "$BUILD"/libdh_miniaudio.a 2>/dev/null
