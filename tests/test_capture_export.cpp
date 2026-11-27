@@ -254,11 +254,13 @@ int main() {
     CHECK(r.ok && r.frames == 5 * rate && std::fabs(r.cleanup.gain_db) > 0.01);
     WavInfo i;
     CHECK(read_wav_info(out, i, e) && i.frames == 5 * rate);
-    WavReader rd;
-    CHECK(rd.open(out, e));
-    std::vector<float> first(2);
-    rd.read(0, 1, first.data());
-    CHECK(std::fabs(first[0]) < 1e-3);
+    {  // closed before the overwrite below: an open file cannot be replaced on Windows
+      WavReader rd;
+      CHECK(rd.open(out, e));
+      std::vector<float> first(2);
+      rd.read(0, 1, first.data());
+      CHECK(std::fabs(first[0]) < 1e-3);
+    }
     CHECK(!export_edit(ws, orig, 0, 0, orig, es).ok);        // refuses the original
     CHECK(!export_edit(ws, orig, 2.0, 7.0, out, es).ok);     // refuses an existing file
     es.overwrite = true;
