@@ -231,7 +231,8 @@ RelocateReport Library::relink_siblings(std::int64_t track_id, const std::string
     if (n.size() <= old_dir.size() + 1 || n.compare(0, old_dir.size() + 1, old_dir + "/") != 0) continue;
     if (file_exists(p)) continue;
     ++rep.missing;
-    const std::string target = new_dir + "/" + n.substr(old_dir.size() + 1);
+    // Native separators, as every other stored path has.
+    const std::string target = std::filesystem::path(new_dir + "/" + n.substr(old_dir.size() + 1)).make_preferred().string();
     if (!file_exists(target)) {
       rep.not_found.push_back(id);
       continue;

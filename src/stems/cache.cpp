@@ -1,5 +1,7 @@
 #include "deckhand/stems/cache.hpp"
 
+#include <chrono>
+#include <thread>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -314,7 +316,12 @@ bool StemCache::store(const std::string& key, const Stems& s, std::string* error
 #endif
   ok = (std::fclose(f) == 0) && ok;
   if (!ok) { fs::remove(tmp, ec); return fail("write failed (disk full?)"); }
-  fs::rename(tmp, dest, ec);
+  // Another writer replacing the same file at the same moment makes the rename fail on Windows: try again briefly.
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    fs::rename(tmp, dest, ec);
+    if (!ec) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
   if (ec) { fs::remove(tmp, ec); return fail("rename failed"); }
   {
     std::lock_guard<std::mutex> g(mu_);
