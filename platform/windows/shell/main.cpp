@@ -205,9 +205,7 @@ bool list_export_targets(void*, char* out, std::uint32_t cap);
 
 constexpr int kMinW = 1100, kMinH = 700;
 constexpr UINT kMsgQuitNow = WM_APP + 1;  // posted by dh_platform.request_quit: the user answered "Quit anyway"
-void request_quit(void*) {
-  if (g_shell && g_shell->hwnd) PostMessageW(g_shell->hwnd, kMsgQuitNow, 0, 0);
-}
+void request_quit(void*);
 
 struct ShellApp {
   HWND hwnd = nullptr;
@@ -263,6 +261,10 @@ struct ShellApp {
     if (!u8.empty()) dh_app_text(core, u8.c_str());
   }
 };
+
+void request_quit(void*) {
+  if (g_shell && g_shell->hwnd) PostMessageW(g_shell->hwnd, kMsgQuitNow, 0, 0);
+}
 
 int map_key(WPARAM vk) {
   switch (vk) {
