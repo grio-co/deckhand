@@ -1,5 +1,7 @@
 #include "deckhand/capture/export.hpp"
 
+#include "deckhand/capture/flac.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -70,7 +72,7 @@ bool write_aiff(std::FILE* f, SampleSource& src, std::uint64_t start, std::uint6
 
 }  // namespace
 
-bool flac_available() { return false; }
+bool flac_available() { return true; }
 
 const char* container_extension(Container c) { return c == Container::Aiff ? "aiff" : c == Container::Flac ? "flac" : "wav"; }
 
@@ -109,7 +111,7 @@ ExportResult export_range(SampleSource& src, std::uint64_t start, std::uint64_t 
   r.start = start;
   r.end = end;
   r.frames = end - start;
-  if (s.container == Container::Flac) { r.error = "FLAC encoding is not available: no encoder is part of this build"; return r; }
+  if (s.container == Container::Flac && src.channels() > 8) { r.error = "FLAC holds at most 8 channels"; return r; }
   if (s.container == Container::Aiff && s.format == SampleFormat::Float32) { r.error = "AIFF holds 16 or 24 bit; choose one of those"; return r; }
   std::error_code ec;
   const fs::path p(path);
@@ -131,7 +133,28 @@ ExportResult export_range(SampleSource& src, std::uint64_t start, std::uint64_t 
   const std::string tmp = path + ".part";
   std::string err;
   bool ok = false;
-  if (s.container == Container::Aiff) {
+  if (s.container == Container::Flac) {
+    // 16-bit when asked for 16, otherwise 24 (float requests are converted with the same rounding as the WAV writer).
+    FlacWriter w;
+    FlacParams fp;
+    fp.sample_rate = src.sample_rate();
+    fp.channels = ch;
+    fp.bits = s.format == SampleFormat::Pcm16 ? 16 : 24;
+    fp.total_frames_hint = r.frames;
+    ok = w.create(tmp, fp, tags, err);
+    if (ok) {
+      constexpr std::uint64_t kChunk = 16384;
+      std::vector<float> buf(static_cast<std::size_t>(kChunk * ch));
+      for (std::uint64_t done = 0; done < r.frames && ok;) {
+        const std::uint64_t n = eff->read(from + done, std::min(kChunk, r.frames - done), buf.data());
+        if (n == 0) { err = "short read from the source"; ok = false; break; }
+        ok = w.write_float(buf.data(), n);
+        done += n;
+      }
+      if (!ok && err.empty()) err = w.error().empty() ? "write failed" : w.error();
+      ok = w.close() && ok;
+    }
+  } else if (s.container == Container::Aiff) {
     std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f) { r.error = "could not create " + tmp; return r; }
     ok = write_aiff(f, *eff, from, r.frames, s.format, tags, err);

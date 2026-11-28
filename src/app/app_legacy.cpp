@@ -31,6 +31,12 @@ void App::draw_legacy() {
   float right = w - 8;
   const float aw = dl_.text(right, 8, skin_->fit(audio, 12, 0, w * 0.25f), 12, th.dim, Align::Right);
   right -= aw + 16;
+  if (const std::string cap = capture_indicator_text(); !cap.empty()) {  // a recording from an input is running: click opens its panel
+    const float bw = 170;
+    right -= bw;
+    if (legacy_button({right, 4, bw, top_h - 8}, cap, true, th.warn)) press(ui::map_binding("app.capture.open"));
+    right -= 6;
+  }
   const struct {
     const char* action;
     std::string label;

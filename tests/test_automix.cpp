@@ -243,14 +243,20 @@ void check_crossfade(double bpm_a, double bpm_b, double first_a, double first_b,
   const double bf = ga.beat_frames_at(0);
   int checked = 0;
   double tempo_at_start = 0, bass_b_start = -1, bass_b_end = -1;
+  // The moves are engine ramps, not steps: the gain tracks the ideal curve within a block or two, and no block moves it
+  // by more than the curve's own slope allows (the old quarter-beat staircase moved it 3-4 times that at the steep end).
+  const double max_step = 1.5707963 * kBlock / (8 * bf) * 1.25 + 2e-3;
+  double prev_ga = -1, prev_gb = -1, worst_env = 0, worst_step = 0;
   for (const Sim::Sample& s : sim.samples) {
     const double p = (ga.frame_to_beat(s.d[0].position) - std::round(beat));
     if (s.d[1].playing && p > 0.5 && p < 7.5) {
       const double t = p / 8;
       const double ga_gain = s.d[0].fader * s.d[0].fader, gb_gain = s.d[1].fader * s.d[1].fader;
-      CHECK(std::fabs(ga_gain - std::cos(t * 1.5707963)) < 0.12);
-      CHECK(std::fabs(gb_gain - std::sin(t * 1.5707963)) < 0.12);
-      CHECK(std::fabs(ga_gain * ga_gain + gb_gain * gb_gain - 1.0) < 0.15);
+      worst_env = std::max(worst_env, std::max(std::fabs(ga_gain - std::cos(t * 1.5707963)), std::fabs(gb_gain - std::sin(t * 1.5707963))));
+      if (prev_ga >= 0) worst_step = std::max(worst_step, std::max(std::fabs(ga_gain - prev_ga), std::fabs(gb_gain - prev_gb)));
+      prev_ga = ga_gain;
+      prev_gb = gb_gain;
+      CHECK(std::fabs(ga_gain * ga_gain + gb_gain * gb_gain - 1.0) < 0.06);
       ++checked;
       if (bass_b_start < 0 && p < 1.5) bass_b_start = s.d[1].eq_low;
       if (p > 5.5) bass_b_end = s.d[1].eq_low;
@@ -258,7 +264,9 @@ void check_crossfade(double bpm_a, double bpm_b, double first_a, double first_b,
     }
   }
   CHECK(checked > 100);
-  (void)bf;
+  CHECK(worst_env < 0.03);
+  CHECK(worst_step < max_step);
+  std::printf("automix: envelope off the ideal curve by at most %.4f, largest block step %.4f (bound %.4f)\n", worst_env, worst_step, max_step);
   // bass swap: incoming bass cut at first, restored halfway
   CHECK(bass_b_start < 0.1 && bass_b_end > 0.4);
   // tempo: starts at the outgoing tempo, ends at its own, range restored
@@ -452,6 +460,8 @@ void test_override() {
     sim.queue.add_end({1, 2});
     start(sim);
     bool paused = false;
+    std::uint64_t paused_at = 0;
+    float held_a = -1, held_b = -1;
     sim.run_until(30, [&](Sim& s) {
       if (!paused && s.eng.deck(1).playing && s.eng.deck(0).fader < 0.8f) {
         Command c;
@@ -459,10 +469,16 @@ void test_override() {
         c.deck = 0;
         s.eng.send(c);
         paused = true;
+        paused_at = s.eng.clock_frames();
+      }
+      if (paused && held_a < 0 && s.eng.clock_frames() > paused_at + 44100) {  // abandoned: the engine ramps must not run on
+        held_a = s.eng.deck(0).fader;
+        held_b = s.eng.deck(1).fader;
       }
       return false;
     });
-    CHECK(paused);
+    CHECK(paused && held_a >= 0);
+    CHECK(sim.eng.deck(0).fader == held_a && sim.eng.deck(1).fader == held_b);
     CHECK(!sim.eng.deck(0).playing && sim.eng.deck(1).playing);
     CHECK(sim.count_events("automix.transition_end") == 0 && sim.eng.scheduled_count() == 0);
     CHECK(sim.svc->status().current_deck == 1);

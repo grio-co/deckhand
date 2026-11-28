@@ -33,6 +33,8 @@ namespace fs = std::filesystem;
 using deckhand::shell::Renderer;
 
 namespace {
+std::atomic<bool> g_quit_now{false};  // dh_platform.request_quit: the user answered "Quit anyway"
+void request_quit(void*) { g_quit_now = true; }
 
 struct Options {
   std::string deck_a, deck_b, screenshot;
@@ -270,6 +272,7 @@ int main(int argc, char** argv) {
   const std::string data = data_dir(exe_dir);
   const std::string resources = resource_dir(exe_dir);
   dh_platform platform{nullptr, &deckhand::shell::rasterise_text};
+  platform.request_quit = &request_quit;
   dh_config config{};
   config.data_dir = data.c_str();
   config.resource_dir = resources.c_str();
@@ -315,13 +318,17 @@ int main(int argc, char** argv) {
   const double freq = static_cast<double>(SDL_GetPerformanceFrequency());
   int frames = 0;
   bool running = true;
+  bool quit_asked = false;
   int exit_code = 0;
   while (running) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
       switch (e.type) {
         case SDL_EVENT_QUIT:
-        case SDL_EVENT_WINDOW_CLOSE_REQUESTED: running = false; break;
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:  // ask the core first: while a recording is running it shows a question instead
+          if (dh_app_may_quit(core)) running = false;
+          else quit_asked = true;
+          break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
           sync_mods(0);
           dh_app_key_release_all(core);
@@ -366,6 +373,7 @@ int main(int argc, char** argv) {
         default: break;
       }
     }
+    if (g_quit_now || (quit_asked && dh_app_quit_confirmed(core))) running = false;
     if (!running) break;
     if (SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) {
       SDL_Delay(50);

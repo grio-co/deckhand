@@ -32,7 +32,7 @@ CueHabit cue_habit(Library& lib, HabitCache& cache) {
   std::vector<HabitSample> samples;
   for (const std::int64_t id : lib.tracks_with_phrases()) {
     if (samples.size() >= kHabitTrackCap) break;
-    const std::vector<Cue> cs = lib.cues(id);
+    const std::vector<Cue> cs = lib.user_cues(id);  // suggestions nobody changed are not the user's habit
     if (cs.empty()) continue;
     const auto sp = lib.phrases(id);
     if (!sp) continue;
@@ -131,7 +131,10 @@ ApplyResult apply_suggestions(Library& lib, std::int64_t track_id, const Suggest
     added.push_back(c);
     out.written.push_back(std::move(a));
   }
-  if (!dry_run && !added.empty()) lib.replace_all_cues(track_id, cues);
+  if (!dry_run && !added.empty()) {
+    lib.mark_suggested_cues(track_id, added);  // first: a habit summary built in between must already see them as suggested
+    lib.replace_all_cues(track_id, cues);
+  }
   return out;
 }
 

@@ -406,6 +406,8 @@ std::vector<UiActionInfo> list_ui_actions() {
   add("ui.layout_prev", "trigger", "none", "Switch to the previous browser layout");
   add("ui.locate", "trigger", "none", "Open or close the search for moved files");
   add("ui.capture", "trigger", "none", "Open or close recording from an analogue input (record a side, split it into tracks, export)");
+  add("ui.shared_playlist", "trigger", "none", "Open or close the shared-playlist panel for the selected playlist (share it, join one from the folder, sync, stop sharing)");
+  add("ui.metadata", "trigger", "none", "Open or close the metadata fill panel (look up the selected tracks in an open music database; off until enabled in the settings)");
   add("ui.split", "trigger", "none", "Split the browser into two track tables (side by side, stacked, off)");
   add("ui.focus_pane", "trigger", "none", "Move the keyboard focus to the other track table"); 
   add("ui.close_panel", "trigger", "none", "Close the open panel, or clear the search");

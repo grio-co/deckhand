@@ -26,6 +26,7 @@
 #include "recorder.hpp"
 #include "stemset.hpp"
 #include "stretch.hpp"
+#include "deckhand/audio/mixer_laws.hpp"
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -87,12 +88,6 @@ void high_pass(Biquad& q, double fs, double f0, double Q) {
   q.set((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + al, -2 * c, 1 - al);
 }
 
-// Knob position (0..1, centre = flat) to EQ gain in dB: -26 dB at minimum, +6 dB at maximum.
-double eq_db(float k) { return k < 0.5f ? -26.0 * (1.0 - 2.0 * k) : 6.0 * (2.0 * k - 1.0); }
-// Trim: silence at minimum, unity at centre, +9 dB at maximum.
-float trim_gain(float k) {
-  return k < 0.5f ? (2 * k) * (2 * k) : static_cast<float>(std::pow(10.0, (2.0 * k - 1.0) * 9.0 / 20.0));
-}
 float level_gain(float k) { return k * k * 1.5625f; }  // unity at 0.8
 
 inline float soft_clip(float x) {
@@ -222,6 +217,13 @@ struct Deck {
   double tempo_mult = 1;      // last effective tempo multiplier
   double bpm_now = 0;
 
+  struct KnobRamp {  // Op::MixRamp: a knob moving to a target; advanced once per chunk
+    bool on = false;
+    mixer::RampShape shape = mixer::RampShape::Linear;
+    float from = 0, to = 0;
+    double done = 0, total = 1;  // frames
+  };
+  KnobRamp ramps[static_cast<int>(mixer::RampField::Count)];
   float trim = 0.5f, eq_high = 0.5f, eq_mid = 0.5f, eq_low = 0.5f, filter = 0.5f, fader = 1.0f;
   bool pfl = false;
   float s_trim = 0.5f, s_high = 0.5f, s_mid = 0.5f, s_low = 0.5f, s_filter = 0.5f;
@@ -335,6 +337,7 @@ struct Engine::Impl {
   bool stem_quit = false;
 
   Deck decks[kMaxDecks];
+  mixer::Settings mix;
   float crossfader = 0.5f, head_mix = 0.5f, head_level = 0.8f, master_level = 0.8f;
   float g_master_prev = 1, g_head_prev = 1, s_head_mix = 0.5f;
   float metro_level = 0.5f;
@@ -793,7 +796,36 @@ struct Engine::Impl {
     }
   }
 
+  static float* knob_of(Deck& d, mixer::RampField f) {
+    switch (f) {
+      case mixer::RampField::EqLow: return &d.eq_low;
+      case mixer::RampField::EqMid: return &d.eq_mid;
+      case mixer::RampField::EqHigh: return &d.eq_high;
+      case mixer::RampField::Trim: return &d.trim;
+      case mixer::RampField::Filter: return &d.filter;
+      default: return &d.fader;
+    }
+  }
+  // Moves the knobs that are ramping to where the ramp is at the END of this chunk (n frames); the per-chunk smoothing
+  // and gain interpolation downstream carry the value on from where the previous chunk left it.
+  void advance_ramps(int n) {
+    for (Deck& d : decks)
+      for (int f = 0; f < static_cast<int>(mixer::RampField::Count); ++f) {
+        Deck::KnobRamp& r = d.ramps[f];
+        if (!r.on) continue;
+        r.done += n;
+        *knob_of(d, static_cast<mixer::RampField>(f)) = mixer::ramp_value(mix, static_cast<mixer::RampField>(f), r.shape, r.from, r.to, r.done / r.total);
+        if (r.done >= r.total) r.on = false;
+      }
+  }
+
   void apply_core(const Command& c) {
+    if (c.op == Op::MixerSetting) {
+      if (c.i < 0 || c.i >= static_cast<int>(mixer::MixerField::Count)) return;
+      mixer::set_field(mix, static_cast<mixer::MixerField>(c.i), c.f);
+      for (Deck& dk : decks) dk.c_low = dk.c_mid = dk.c_high = -1;  // rebuild the EQ coefficients (kill depth, crossovers)
+      return;
+    }
     if (c.op == Op::Crossfader) { crossfader = std::clamp(c.f, 0.0f, 1.0f); return; }
     if (c.op == Op::HeadMix) { head_mix = std::clamp(c.f, 0.0f, 1.0f); return; }
     if (c.op == Op::HeadLevel) { head_level = std::clamp(c.f, 0.0f, 1.0f); return; }
@@ -834,12 +866,31 @@ struct Engine::Impl {
         }
         return;
       }
-      case Op::Trim: d.trim = k; return;
-      case Op::EqHigh: d.eq_high = k; return;
-      case Op::EqMid: d.eq_mid = k; return;
-      case Op::EqLow: d.eq_low = k; return;
-      case Op::Filter: d.filter = k; return;
-      case Op::Fader: d.fader = k; return;
+      case Op::Trim: d.trim = k; d.ramps[static_cast<int>(mixer::RampField::Trim)].on = false; return;
+      case Op::EqHigh: d.eq_high = k; d.ramps[static_cast<int>(mixer::RampField::EqHigh)].on = false; return;
+      case Op::EqMid: d.eq_mid = k; d.ramps[static_cast<int>(mixer::RampField::EqMid)].on = false; return;
+      case Op::EqLow: d.eq_low = k; d.ramps[static_cast<int>(mixer::RampField::EqLow)].on = false; return;
+      case Op::Filter: d.filter = k; d.ramps[static_cast<int>(mixer::RampField::Filter)].on = false; return;
+      case Op::Fader: d.fader = k; d.ramps[static_cast<int>(mixer::RampField::Fader)].on = false; return;
+      case Op::MixRamp: {
+        const int f = c.i & 0xFF, sh = (c.i >> 8) & 0xFF;
+        if (f < 0 || f >= static_cast<int>(mixer::RampField::Count)) return;
+        float* knob = knob_of(d, static_cast<mixer::RampField>(f));
+        const float target = std::clamp(c.f, 0.0f, 1.0f);
+        Deck::KnobRamp& r = d.ramps[f];
+        if (!(c.d > 0)) {
+          *knob = target;
+          r.on = false;
+          return;
+        }
+        r.on = true;
+        r.shape = sh == 1 ? mixer::RampShape::EqualPower : mixer::RampShape::Linear;
+        r.from = *knob;
+        r.to = target;
+        r.done = 0;
+        r.total = c.d;
+        return;
+      }
       case Op::Pfl: d.pfl = c.i < 0 ? !d.pfl : c.i != 0; return;
       case Op::Tempo: d.tempo_fader = std::clamp(c.f, -1.0f, 1.0f); return;
       case Op::TempoRange: d.tempo_range = std::clamp(c.f, 0.0f, 1.0f); return;
@@ -1401,6 +1452,7 @@ struct Engine::Impl {
       case Op::StemParam: case Op::StemEnable: case Op::StemPreset: case Op::StemDetach: case Op::StemAttach:
         apply_stem(c);
         return true;
+      case Op::MixerSetting: case Op::MixRamp: return false;  // handled by apply_core
       case Op::SchedInsert: sched_accept(c.i); return true;
       case Op::SchedCancel: sched_cancel(static_cast<std::uint64_t>(c.d)); return true;
       case Op::SchedCancelAll: sched_cancel_all(); return true;
@@ -1982,9 +2034,9 @@ struct Engine::Impl {
     d.s_low += (d.eq_low - d.s_low) * sm;
     d.s_filter += (d.filter - d.s_filter) * sm;
     const double fs = sr;
-    if (std::fabs(d.s_low - d.c_low) > 1e-4f) low_shelf(d.q_low, fs, 180.0, eq_db(d.c_low = d.s_low));
-    if (std::fabs(d.s_mid - d.c_mid) > 1e-4f) peaking(d.q_mid, fs, 1000.0, 0.8, eq_db(d.c_mid = d.s_mid));
-    if (std::fabs(d.s_high - d.c_high) > 1e-4f) high_shelf(d.q_high, fs, 5000.0, eq_db(d.c_high = d.s_high));
+    if (std::fabs(d.s_low - d.c_low) > 1e-4f) low_shelf(d.q_low, fs, static_cast<double>(mix.eq_low_hz), mixer::eq_db(mix, d.c_low = d.s_low));
+    if (std::fabs(d.s_mid - d.c_mid) > 1e-4f) peaking(d.q_mid, fs, 1000.0, 0.8, mixer::eq_db(mix, d.c_mid = d.s_mid));
+    if (std::fabs(d.s_high - d.c_high) > 1e-4f) high_shelf(d.q_high, fs, static_cast<double>(mix.eq_high_hz), mixer::eq_db(mix, d.c_high = d.s_high));
     const float fk = d.color == 0 ? d.s_filter : 0.5f;  // other colour effects take the knob instead
     if (std::fabs(fk - d.c_filter) > 1e-4f) {
       const float f = d.c_filter = fk;
@@ -1998,7 +2050,7 @@ struct Engine::Impl {
       }
     }
     d.s_auto += (std::pow(10.0f, d.autogain_db / 20.0f) - d.s_auto) * sm;
-    const float g0 = d.g_trim_prev, g1 = trim_gain(d.s_trim) * d.s_auto;
+    const float g0 = d.g_trim_prev, g1 = mixer::trim_gain(mix, d.s_trim) * d.s_auto;
     d.g_trim_prev = g1;
     float peak = 0;
     for (int i = 0; i < n; ++i) {
@@ -2207,6 +2259,7 @@ struct Engine::Impl {
     float master[kChunk * 2];
     float cue[kChunk * 2];
     float buf[kChunk * 2];
+    advance_ramps(n);
     std::memset(master, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
     std::memset(cue, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
     std::memset(click_bus, 0, sizeof(float) * 2 * static_cast<std::size_t>(n));
@@ -2224,7 +2277,7 @@ struct Engine::Impl {
         const FxCtx cx = make_ctx(d, fxb[di], n, pos0[di]);
         chains[di].run(buf, n, cx, fx_garbage);
         if (!d.cue_only)
-          for (int i = 0; i < n * 2; ++i) master[i] += buf[i] * d.fader * d.fader;
+          for (int i = 0; i < n * 2; ++i) master[i] += buf[i] * mixer::fader_gain(mix, d.fader);
         continue;
       }
       render_deck(d, di, buf, n);
@@ -2241,8 +2294,8 @@ struct Engine::Impl {
       }
       process_channel(d, di, buf, n, cx);
       chains[di].run(buf, n, cx, fx_garbage);
-      const float xf = (di % 2 == 0) ? std::min(1.0f, 2.0f * (1.0f - crossfader)) : std::min(1.0f, 2.0f * crossfader);
-      const float gm1 = d.cue_only ? 0.0f : d.fader * d.fader * xf, gm0 = d.cue_only ? 0.0f : d.g_master_prev;  // cue-only: silent from the first sample
+      const float xf = (di % 2 == 0) ? mixer::crossfader_gain(mix, 1.0f - crossfader) : mixer::crossfader_gain(mix, crossfader);
+      const float gm1 = d.cue_only ? 0.0f : mixer::fader_gain(mix, d.fader) * xf, gm0 = d.cue_only ? 0.0f : d.g_master_prev;  // cue-only: silent from the first sample
       const float gc1 = d.pfl ? 1.0f : 0.0f, gc0 = d.g_cue_prev;
       d.g_master_prev = gm1;
       d.g_cue_prev = gc1;

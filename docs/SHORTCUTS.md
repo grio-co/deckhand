@@ -98,6 +98,8 @@ Besides the engine's control table the keymap can call these application actions
 | `Mod+Shift+,` | Previous browser layout | `ui.layout_prev` |
 | `Mod+Shift+U` | Find moved or renamed files | `ui.locate` |
 | `Mod+Alt+Shift+V` | Record from an analogue input and split into tracks | `ui.capture` |
+| `Mod+Shift+S` | Shared playlist: share the selected playlist, join one, sync, stop sharing | `ui.shared_playlist` |
+| `Mod+Alt+Shift+M` | Metadata fill: look up the selected tracks (opt-in) | `ui.metadata` |
 | `Mod+Shift+M` | Split the browser: side by side, stacked, off | `ui.split` |
 | `F6` | Switch between the two- and four-deck layouts | `ui.layout` |
 | `F7` | Switch to the next skin | `ui.skin_next` |

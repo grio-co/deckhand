@@ -427,7 +427,14 @@ void label_sections(PhraseAnalysis& pa, const std::vector<SecStat>& st, const Ba
     emin = std::min(emin, s.e);
   }
   const double spread = emax - emin;
-  auto is_high = [&](std::size_t i) { return spread > 0.12 && st[i].e >= std::max(0.5, emin + 0.7 * spread); };
+  // A section that climbs and is then followed by a clearly higher one is the build into it, however close to the top it
+  // already sits: at fast tempi the kick tails overlap and every part of a track reads louder, which pushed the build
+  // over the absolute line (the builds of 150 BPM and faster tracks read as drops).
+  auto is_high = [&](std::size_t i) {
+    if (!(spread > 0.12 && st[i].e >= std::max(0.5, emin + 0.7 * spread))) return false;
+    const bool climbs = st[i].slope > 0.06 && i + 1 < n && st[i + 1].e > st[i].e + 0.1;
+    return !climbs;
+  };
   auto kickless = [&](std::size_t i) { return bf.has_kick && st[i].kick < 0.35; };
   // "club" style: there is a kick-less middle section or something rising into a high section
   bool clubby = false;

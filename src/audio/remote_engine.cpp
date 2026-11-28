@@ -294,7 +294,10 @@ void RemoteEngine::monitor_main() {
     bool spawned = false;
     last_start_ns = now_ns();
     if (establish(error, true, spawned)) {
-      if (spawned) restore_chains();
+      if (spawned) {
+        restore_chains();
+        restore_mixer();
+      }
       notify(Status::Restarted, spawned ? "the audio engine was restarted; load your tracks again" : "re-attached to the audio engine");
     } else {
       DH_LOG(Warn, "engine restart failed: %s", error.c_str());
@@ -330,6 +333,20 @@ void RemoteEngine::restore_chains() {
     std::string err;
     if (!fx_chain_load_full(*this, t, text, &err)) DH_LOG(Warn, "could not restore effect chain %d after the engine restart: %s", t, err.c_str());
     else if (!err.empty()) DH_LOG(Warn, "effect chain %d restored with notes: %s", t, err.c_str());
+  }
+}
+
+void RemoteEngine::restore_mixer() {
+  for (int f = 0; f < 16; ++f) {
+    Command c;
+    {
+      std::lock_guard<std::mutex> lock(snap_mutex_);
+      if (!mix_set_[f]) continue;
+      c.f = mix_value_[f];
+    }
+    c.op = Op::MixerSetting;
+    c.i = f;
+    send(c);
   }
 }
 
@@ -530,6 +547,11 @@ FxChainInfo RemoteEngine::fx_chain(int target) const {
 }
 
 void RemoteEngine::send(const Command& c) {
+  if (c.op == Op::MixerSetting && c.i >= 0 && c.i < 16) {
+    std::lock_guard<std::mutex> lock(snap_mutex_);
+    mix_value_[c.i] = c.f;
+    mix_set_[c.i] = true;
+  }
   if (c.op >= Op::FxSelect && c.op <= Op::FxParam) invalidate_chain(c.deck);
   const auto l = link();
   if (!l || c.track || c.sample || c.op == Op::Load || c.op == Op::SamplerLoad) {

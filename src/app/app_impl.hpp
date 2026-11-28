@@ -23,10 +23,17 @@
 #include <thread>
 
 #include "browser_layouts.hpp"
+#include "confirm_dialog.hpp"
+#include "cue_follow_confirm.hpp"
+#include "export_report.hpp"
+#include "shared_playlist_ui.hpp"
+#include "status_indicators.hpp"
 #include "browser_panes.hpp"
 #include "trash_history.hpp"
 #include "deckhand/app/api_bridge.hpp"
 #include "deckhand/app/automix.hpp"
+#include "deckhand/app/metadata_job.hpp"
+#include "mixer_prefs.hpp"
 #include "deckhand/app/play_queue.hpp"
 #include "deckhand/app/capi.h"
 #include "deckhand/app/controller_prefs.hpp"
@@ -132,7 +139,8 @@ struct DeckInfo {
 
 struct Job {
   enum Kind { Load, Reattach, AddFile, Import, SaveMainCue, SaveHotCue, ClearHotCue, HistoryStart, HistoryUpdate, Export, RecFinish, LoadSample, Sync, SyncInfo, RestoreSamples,
-              SaveGrid, SaveMemCues, SaveHotStyle, SaveTrackColor, Reanalyse, PreviewLoad, SuggestCues, SyncCues, StemsReady, VerifyStick, SeqSave, RefreshLinks } kind = Load;
+              SaveGrid, SaveMemCues, SaveHotStyle, SaveTrackColor, Reanalyse, PreviewLoad, SuggestCues, SyncCues, StemsReady, VerifyStick, SeqSave, RefreshLinks,
+              ExportCheck, FollowCues, SharedOp } kind = Load;
   int deck = -1;
   std::int64_t track_id = 0;
   std::string path;
@@ -144,7 +152,8 @@ struct Job {
   std::vector<Cue> cues;              // SaveMemCues
   std::string text;                   // SaveHotStyle: the name
   int color = -1;                     // SaveHotStyle / SaveTrackColor
-  bool flag = false;                  // SaveGrid: lock the grid; PreviewLoad: start playing
+  bool flag = false;                  // SaveGrid: lock the grid; PreviewLoad: start playing; ExportCheck: show the report even when it is clean
+  std::int64_t batch = 0;             // FollowCues: the journal batch of the grid edit
   std::shared_ptr<ApiExportRequest> export_req;  // Export: every option (null = the panel / settings)
 };
 
@@ -261,7 +270,7 @@ struct CaptureUi {
   bool env_dirty = true;
   Field name, artist, album;
   std::vector<Field> titles;
-  bool dc = false, rumble = false, declick = false, normalise = false, fades = false, aiff = false;
+  bool dc = false, rumble = false, declick = false, normalise = false, fades = false, aiff = false, flac = false;
   int bits = 24;
   double min_gap = 1.0, min_depth = 15.0;
   std::string note;
@@ -632,7 +641,7 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   Rect inner_rect() const;
 
   // ---- overlays (app_panels.cpp) ----------------------------------------------------
-  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart, Shortcuts, Tools, Suggest, PrepMode, Controller, Trash, Layouts, Locate, Chain, Capture };
+  enum class Panel { None, Settings, Sampler, Learn, Tags, Relink, Export, AddTo, CueEdit, Columns, Smart, Shortcuts, Tools, Suggest, PrepMode, Controller, Trash, Layouts, Locate, Chain, Capture, Confirm, ExportReport, Shared, Metadata };
   bool overlay_open() const { return panel_ != Panel::None; }
   void open_panel(Panel p);
   void close_panel();
@@ -649,6 +658,18 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   void keys_commit_capture(const KeyChord& chord);
   void keys_export_cheat_sheet();
   void draw_settings(const Rect& m);
+  // ---- mixer laws (app_mixer.cpp) and the metadata fill (app_metadata.cpp)
+  void send_mixer_field(mixer::MixerField f, float v);
+  void apply_mixer_settings();                 // load "mixer.*" from the library, send all fields, tell automix
+  void resend_mixer();                         // send the cached laws again (after an audio restart)
+  void mixer_changed(const mixer::Settings& s);
+  void set_mixer_pref(const MixerPref& p, float v);
+  void draw_mixer_section(float x, float& y, float rw);
+  void api_mixer_apply(const mixer::Settings& s) override;
+  MetadataJob* api_metadata() override { return meta_.get(); }
+  void draw_metadata_section(float x, float& y, float rw);
+  void draw_metadata_panel(const Rect& m);
+  void open_metadata_panel();
   void draw_sampler(const Rect& m);
   void draw_sequencer(const Rect& r);
   void draw_learn(const Rect& m);
@@ -697,6 +718,28 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   bool chain_slider(const Rect& track, double v, int id, double& out);
   void draw_locate_panel(const Rect& m);
   void draw_capture_panel(const Rect& m);
+  // ---- confirmations, the quit guard, the export report, shared playlists (app_dialogs.cpp)
+ public:
+  // Asks a question in a small dialog (Panel::Confirm). Any thread; the answer runs on the UI thread. See confirm_dialog.hpp.
+  void ask_confirm(ConfirmRequest r) { confirm_q_.ask(std::move(r)); }
+  // The shell asks before it quits or closes the main window. True: nothing would be lost, quit now. False: a recording is
+  // running, the dialog is up, and the shell waits for request_quit (dh_platform) or dh_app_quit_confirmed.
+  bool may_quit();
+  bool quit_confirmed() const { return quit_ok_; }
+
+ private:
+  void pump_dialogs();                        // UI thread, once per frame: shows the next waiting question, the report, the panel
+  void answer_confirm(bool ok);
+  void draw_confirm_panel(const Rect& m);
+  void draw_export_report(const Rect& m);
+  void draw_shared_panel(const Rect& m);
+  void request_export(const std::string& destination, std::int64_t list);  // UI thread: check, show the report if needed, then export
+  void export_check_job(Library& lib, const Job& j);
+  void open_shared_panel();
+  void shared_job(Library& lib, const Job& j);
+  void queue_shared(const std::string& op, std::int64_t playlist, const std::string& shared_id = {});
+  std::string capture_indicator_text();
+  std::string mix_indicator_text();
   std::string fx_name(const EffectInfo& info) const;     // the effect's name in the language pack (the built-in English name without one)
   std::string fx_param(const char* english) const;       // a parameter name likewise
   void start_relocate_scan();
@@ -779,6 +822,11 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   std::int64_t load_failed_[kMaxDecks] = {};  // track id whose load failed, per deck; state_mutex_
   std::thread signal_thread_;
   std::unique_ptr<StemService> stems_;  // before api_: the bridge is destroyed first
+  mixer::Settings laws_;  // the laws the engine has (state_mutex_)
+  std::unique_ptr<MetadataJob> meta_;
+  std::vector<std::int64_t> meta_sel_;  // the tracks the panel will look up (selection when it opened)
+  std::string meta_note_;
+  bool meta_overwrite_ = false;
   std::unique_ptr<CaptureService> capture_;  // likewise
   CaptureUi cap_ui_;
   std::unique_ptr<ApiBridge> api_;
@@ -1055,6 +1103,24 @@ class App final : public ControlSink, public ApiHost, public ui::SkinHost {
   // ---- overlay state
   Panel panel_ = Panel::None;
   Rect panel_rect_;
+  ConfirmQueue confirm_q_;       // questions from any thread
+  ConfirmState confirm_;         // the one on screen (UI thread)
+  Panel confirm_return_ = Panel::None;  // the panel to go back to when the question is declined
+  std::atomic<bool> quit_ok_{false}, quit_asked_{false};
+  struct ExportReportUi {        // guarded by state_mutex_ except `scroll`
+    ExportReport report;
+    std::string destination;
+    std::int64_t list = 0;
+    bool pending_open = false;   // the loader thread has a report ready: the UI thread opens the panel
+  } export_ui_;
+  struct SharedUi {              // guarded by state_mutex_ except the UI-only fields
+    std::int64_t playlist = 0;   // the playlist the panel is about (0 = none selected / not a plain playlist)
+    std::string playlist_name;
+    SharedStatus status;
+    std::vector<JoinChoice> choices;
+    std::string note;            // the outcome of the last action
+    bool busy = false;
+  } shared_ui_;
   std::vector<std::string> export_targets_;
   bool export_other_ = false;  // the last entry of the export menu is "Other folder..." (needs choose_folder)
   Field* focus_ = nullptr;  // focused overlay field

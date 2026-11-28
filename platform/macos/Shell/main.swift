@@ -341,7 +341,7 @@ final class Shell: NSObject {
     let level = levels[ProcessInfo.processInfo.environment["DECKHAND_LOG"] ?? "info"] ?? 2
     let resources = Bundle.main.resourcePath ?? ""
     var platform = dh_platform(user: nil, rasterise_text: rasteriseText, show_bluetooth_midi: Platform.showBluetooth,
-                               choose_folder: Platform.chooseFolder, list_export_targets: nil)
+                               choose_folder: Platform.chooseFolder, list_export_targets: nil, request_quit: Platform.requestQuit)
     core = dataDir.withCString { data in
       resources.withCString { res in
         var config = dh_config(data_dir: data, resource_dir: res, log_level: Int32(level), touch: false, manage_audio: true)
@@ -590,6 +590,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+  // The quit guard: Quit (menu or Cmd-Q), the main window's close button and the dock all arrive here. While a recording is
+  // running the core shows its own question; we cancel the termination and quit once it is answered ("Quit anyway"): through
+  // dh_platform.request_quit, or the poll below for a shell that has none.
+  private var quitPoll: Timer?
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    if Platform.quitConfirmed { return .terminateNow }
+    let ok = shell.map { dh_app_may_quit($0.core) } ?? classicView?.mayQuit() ?? true
+    if ok { return .terminateNow }
+    if quitPoll == nil {
+      quitPoll = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] t in
+        guard let self else { t.invalidate(); return }
+        let answered = self.shell.map { dh_app_quit_confirmed($0.core) } ?? self.classicView?.quitAnswered ?? true
+        if answered {
+          t.invalidate()
+          self.quitPoll = nil
+          Platform.quitConfirmed = true
+          NSApp.terminate(nil)
+        }
+      }
+    }
+    return .terminateCancel
+  }
   func applicationWillTerminate(_ notification: Notification) {
     shell?.shutdown()
     classicView?.shutdown()

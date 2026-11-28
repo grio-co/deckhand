@@ -284,8 +284,18 @@ void App::draw_capture_panel(const Rect& m) {
   if (ui_toggle({x + 3 * (tw + 4), y, tw, 22}, T("capture.normalise"), u.normalise)) u.normalise = !u.normalise;
   y += 26;
   if (ui_toggle({x, y, tw, 22}, T("capture.fades"), u.fades)) u.fades = !u.fades;
-  if (ui_button({x + tw + 4, y, tw / 2 - 2, 22}, "WAV", !u.aiff)) u.aiff = false;
-  if (ui_button({x + tw + 4 + tw / 2 + 2, y, tw / 2 - 2, 22}, "AIFF", u.aiff)) u.aiff = true;
+  const bool can_flac = capture::flac_available();
+  if (!can_flac) u.flac = false;
+  const float fw = (tw - 8) / (can_flac ? 3.0f : 2.0f);
+  if (ui_button({x + tw + 4, y, fw, 22}, "WAV", !u.aiff && !u.flac)) u.aiff = u.flac = false;
+  if (ui_button({x + tw + 4 + fw + 4, y, fw, 22}, "AIFF", u.aiff)) {
+    u.aiff = true;
+    u.flac = false;
+  }
+  if (can_flac && ui_button({x + tw + 4 + 2 * (fw + 4), y, fw, 22}, "FLAC", u.flac)) {  // 16 or 24 bit only, like the 16 / 24 chooser
+    u.flac = true;
+    u.aiff = false;
+  }
   if (ui_button({x + 2 * (tw + 4), y, tw / 2 - 2, 22}, "16", u.bits == 16)) u.bits = 16;
   if (ui_button({x + 2 * (tw + 4) + tw / 2 + 2, y, tw / 2 - 2, 22}, "24", u.bits == 24)) u.bits = 24;
   y += 30;
@@ -298,7 +308,7 @@ void App::draw_capture_panel(const Rect& m) {
     a.album = trim_ws(u.album.text);
     capture_->set_album(a);
     capture::ExportSettings es;
-    es.container = u.aiff ? capture::Container::Aiff : capture::Container::Wav;
+    es.container = u.flac ? capture::Container::Flac : u.aiff ? capture::Container::Aiff : capture::Container::Wav;
     es.format = u.bits == 16 ? capture::SampleFormat::Pcm16 : capture::SampleFormat::Pcm24;
     es.cleanup.remove_dc = u.dc;
     es.cleanup.rumble_filter = u.rumble;

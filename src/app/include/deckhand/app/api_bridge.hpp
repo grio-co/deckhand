@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "deckhand/audio/engine.hpp"
+#include "deckhand/audio/mixer_laws.hpp"
 
 namespace deckhand {
 
@@ -15,6 +16,7 @@ class AutomixService;
 class LightingBridge;
 class CaptureService;
 class Library;
+class MetadataJob;
 
 // Arguments of a track-preparation action (grid editing, cues, loops). Which fields an action reads is in docs/API.md.
 struct PrepArgs {
@@ -96,6 +98,10 @@ class ApiHost {
   }
   // Recording from an analogue input (docs/CAPTURE.md); null when the host has none.
   virtual CaptureService* api_capture() { return nullptr; }
+  // The mixer laws changed through the API (the bridge has stored the settings): send them to the engine and the automix service.
+  virtual void api_mixer_apply(const mixer::Settings& s) { (void)s; }
+  // The opt-in metadata fill (docs/METADATA.md); null when the host has none.
+  virtual MetadataJob* api_metadata() { return nullptr; }
   // The lighting module's application side; null when the host has none. A build without the module returns a stub.
   virtual LightingBridge* api_lighting() { return nullptr; }
   // The connected and previously seen controllers with their mapping and per-controller settings, as JSON text.

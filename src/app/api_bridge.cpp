@@ -38,6 +38,9 @@
 #include "deckhand/import/interchange.hpp"
 #include "deckhand/library/library.hpp"
 #include "deckhand/sync/shared_playlist.hpp"
+#include "shared_playlist_ui.hpp"
+#include "mixer_prefs.hpp"
+#include "deckhand/app/metadata_job.hpp"
 #include "deckhand/log/log.hpp"
 
 namespace deckhand {
@@ -2231,8 +2234,9 @@ struct ApiBridge::Impl {
       const std::string c = b["container"].as_string();
       if (c == "wav") e.container = capture::Container::Wav;
       else if (c == "aiff") e.container = capture::Container::Aiff;
+      else if (c == "flac" && capture::flac_available()) e.container = capture::Container::Flac;
       else {
-        error = "container is wav or aiff";
+        error = capture::flac_available() ? "container is wav, aiff or flac" : "container is wav or aiff";
         return false;
       }
     }
@@ -2243,6 +2247,10 @@ struct ApiBridge::Impl {
         return false;
       }
       e.format = bits == 16 ? capture::SampleFormat::Pcm16 : bits == 32 ? capture::SampleFormat::Float32 : capture::SampleFormat::Pcm24;
+    }
+    if (e.container == capture::Container::Flac && e.format == capture::SampleFormat::Float32) {
+      error = "FLAC holds 16 or 24 bits";
+      return false;
     }
     if (e.container == capture::Container::Aiff && e.format == capture::SampleFormat::Float32) {
       error = "AIFF holds 16 or 24 bits";
@@ -2553,7 +2561,7 @@ struct ApiBridge::Impl {
       }
       const Json& b = r.body;
       const std::string out = b["out"].as_string();
-      if (!absolute_path(out)) return Response::error(400, "out must be an absolute file path (.wav or .aiff)");
+      if (!absolute_path(out)) return Response::error(400, "out must be an absolute file path (.wav, .aiff or .flac)");
       for (const char* k : {"start", "end"})
         if (b.contains(k) && (!b[k].is_number() || b[k].as_double() < 0 || b[k].as_double() > 86400)) return Response::error(400, std::string(k) + " is seconds from the start");
       const double start = b["start"].as_double(0), end = b["end"].as_double(0);
@@ -2561,10 +2569,194 @@ struct ApiBridge::Impl {
       capture::ExportSettings es;
       std::string error;
       if (out.size() > 5 && out.compare(out.size() - 5, 5, ".aiff") == 0) es.container = capture::Container::Aiff;
+      else if (out.size() > 5 && out.compare(out.size() - 5, 5, ".flac") == 0 && capture::flac_available()) es.container = capture::Container::Flac;
       if (!capture_export_settings(b, es, error)) return Response::error(400, error);
       const capture::ExportResult res = CaptureService::export_edit(source, start, end, out, es, nullptr, error);
       if (!res.ok) return Response::error(409, error.empty() ? res.error : error);
       return Response::ok(capture_result_json(res));
+    });
+  }
+
+
+  // ---- mixer laws (GET/PUT /v1/mixer) and the opt-in metadata fill (/v1/metadata...) ----
+  Json mixer_json(const mixer::Settings& st) {
+    Json j = Json::object();
+    Json info = Json::object();
+    for (const MixerPref& p : mixer_prefs()) {
+      j.set(p.name, static_cast<double>(mixer_value(st, p.field)));
+      Json i = Json::object();
+      i.set("min", static_cast<double>(p.lo));
+      i.set("max", static_cast<double>(p.hi));
+      i.set("default", static_cast<double>(mixer_value(mixer::Settings{}, p.field)));
+      i.set("unit", p.unit);
+      i.set("choice", p.choice);
+      info.set(p.name, std::move(i));
+    }
+    Json out = Json::object();
+    out.set("settings", std::move(j));
+    out.set("ranges", std::move(info));
+    return out;
+  }
+  static Json metadata_track_json(const MetadataJob::Track& t) {
+    Json j = Json::object();
+    j.set("track_id", static_cast<double>(t.track_id));
+    j.set("label", t.label);
+    j.set("status", metadata::status_name(t.status));
+    j.set("message", t.message);
+    j.set("matched", t.matched);
+    j.set("confidence", t.confidence);
+    Json rows = Json::array();
+    for (const MetadataJob::Row& r : t.rows) {
+      Json x = Json::object();
+      x.set("field", r.p.field);
+      x.set("current", r.p.current);
+      x.set("proposed", r.p.proposed);
+      x.set("confidence", r.p.confidence);
+      x.set("overwrites", r.p.overwrites);
+      x.set("info_only", r.p.info_only);
+      x.set("edited_by_hand", r.p.edited_by_hand);
+      x.set("accepted", r.accepted);
+      x.set("source_url", r.p.source_url);
+      rows.push_back(std::move(x));
+    }
+    j.set("proposals", std::move(rows));
+    return j;
+  }
+  static Json metadata_json(MetadataJob& m) {
+    const MetadataJob::Status st = m.status();
+    Json j = Json::object();
+    j.set("enabled", st.enabled);
+    j.set("network_built", st.network_built);
+    j.set("running", st.running);
+    j.set("done", static_cast<double>(st.done));
+    j.set("total", static_cast<double>(st.total));
+    j.set("last_batch", static_cast<double>(st.last_batch));
+    j.set("provider", "MusicBrainz");
+    j.set("note", st.note);
+    Json tr = Json::array();
+    for (const MetadataJob::Track& t : m.results()) tr.push_back(metadata_track_json(t));
+    j.set("tracks", std::move(tr));
+    return j;
+  }
+  void add_mixer_metadata_routes() {
+    auto& s = *server;
+    s.add_route("GET", "/v1/mixer/laws", "read", [this](const Request&) {
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      return Response::ok(mixer_json(mixer_settings_load(lib)));
+    });
+    s.add_route("PUT", "/v1/mixer/laws", "control", [this](const Request& r) {
+      const Json& b = r.body;
+      if (!b.is_object()) return Response::error(400, "the body is an object of mixer settings (see GET /v1/mixer for the names and ranges)");
+      if (b.contains("reset") && !b["reset"].is_bool()) return Response::error(400, "reset must be true or false");
+      std::vector<std::pair<const MixerPref*, float>> changes;
+      for (const MixerPref& p : mixer_prefs()) {
+        if (!b.contains(p.name)) continue;
+        const Json& v = b[p.name];
+        if (!v.is_number()) return Response::error(400, std::string(p.name) + " must be a number");
+        const double d = v.as_double();
+        if (!std::isfinite(d) || d < p.lo - 1e-6 || d > p.hi + 1e-6)
+          return Response::error(400, std::string(p.name) + " is " + mixer_value_text(p.lo) + " to " + mixer_value_text(p.hi) + (p.unit[0] ? std::string(" ") + p.unit : std::string()));
+        if (p.choice && d != std::floor(d)) return Response::error(400, std::string(p.name) + " is a whole number (a law)");
+        changes.push_back({&p, static_cast<float>(d)});
+      }
+      for (std::size_t i = 0; i < b.size(); ++i) {
+        const std::string& k = b.key_at(i);
+        if (k != "reset" && !mixer_pref_by_name(k)) return Response::error(400, "unknown mixer setting: " + k);
+      }
+      mixer::Settings st;
+      {
+        std::lock_guard<std::mutex> lock(lib_mutex);
+        if (b["reset"].as_bool(false))
+          for (const MixerPref& p : mixer_prefs()) lib.set_setting(p.key, "");
+        for (const auto& c : changes) mixer_setting_store(lib, *c.first, c.second);
+        st = mixer_settings_load(lib);
+      }
+      host.api_mixer_apply(st);
+      return Response::ok(mixer_json(st));
+    });
+
+    s.add_route("GET", "/v1/metadata", "read", [this](const Request&) {
+      MetadataJob* m = host.api_metadata();
+      if (!m) return Response::error(404, "metadata fill is not available");
+      return Response::ok(metadata_json(*m));
+    });
+    s.add_route("PUT", "/v1/metadata", "admin", [this](const Request& r) {  // the opt-in switch
+      MetadataJob* m = host.api_metadata();
+      if (!m) return Response::error(404, "metadata fill is not available");
+      if (!r.body["enabled"].is_bool()) return Response::error(400, "enabled must be true or false");
+      m->set_enabled(r.body["enabled"].as_bool());
+      return Response::ok(metadata_json(*m));
+    });
+    s.add_route("POST", "/v1/metadata/lookup", "library:write", [this](const Request& r) {
+      MetadataJob* m = host.api_metadata();
+      if (!m) return Response::error(404, "metadata fill is not available");
+      if (!m->enabled()) return Response::error(403, "metadata lookup is off: enable it with PUT /v1/metadata {\"enabled\": true} (it sends artist and title of the tracks to MusicBrainz)");
+      const Json& b = r.body;
+      std::vector<std::int64_t> ids;
+      if (!b["ids"].is_array() || b["ids"].size() == 0 || b["ids"].size() > 500) return Response::error(400, "ids is a list of 1 to 500 track ids");
+      for (std::size_t i = 0; i < b["ids"].size(); ++i) {
+        if (!b["ids"].at(i).is_integer()) return Response::error(400, "ids holds whole numbers");
+        ids.push_back(b["ids"].at(i).as_int());
+      }
+      metadata::FillOptions fo;
+      fo.overwrite_nonempty = opt_bool(b, "overwrite", false);
+      fo.overwrite_edited = opt_bool(b, "overwrite_edited", false);
+      if (b.contains("min_confidence")) {
+        if (!b["min_confidence"].is_number() || b["min_confidence"].as_double() < 0.5 || b["min_confidence"].as_double() > 1) return Response::error(400, "min_confidence is 0.5 to 1");
+        fo.match.min_confidence = b["min_confidence"].as_double();
+      }
+      std::string error;
+      if (!m->start(ids, fo, error)) return Response::error(409, error);
+      Response ok = Response::ok(metadata_json(*m));
+      ok.status = 202;
+      return ok;
+    });
+    s.add_route("POST", "/v1/metadata/cancel", "library:write", [this](const Request&) {
+      MetadataJob* m = host.api_metadata();
+      if (!m) return Response::error(404, "metadata fill is not available");
+      m->cancel();
+      return Response::ok(metadata_json(*m));
+    });
+    s.add_route("POST", "/v1/metadata/review", "library:write", [this](const Request& r) {  // accept or reject proposals before applying
+      MetadataJob* m = host.api_metadata();
+      if (!m) return Response::error(404, "metadata fill is not available");
+      const Json& b = r.body;
+      if (!b["accepted"].is_bool()) return Response::error(400, "accepted must be true or false");
+      if (b.contains("track_id")) {
+        if (!b["track_id"].is_integer() || !b["field"].is_string()) return Response::error(400, "track_id and field name one proposal");
+        if (!m->set_accepted(b["track_id"].as_int(), b["field"].as_string(), b["accepted"].as_bool())) return Response::error(404, "no such proposal");
+      } else {
+        m->set_all_accepted(b["accepted"].as_bool());
+      }
+      return Response::ok(metadata_json(*m));
+    });
+    s.add_route("POST", "/v1/metadata/apply", "library:write", [this](const Request& r) {
+      MetadataJob* m = host.api_metadata();
+      if (!m) return Response::error(404, "metadata fill is not available");
+      metadata::ApplyResult ar;
+      std::string error;
+      if (!m->apply(opt_bool(r.body, "allow_overwrite", false), ar, error)) return Response::error(409, error);
+      host.api_library_changed();
+      Json j = Json::object();
+      j.set("applied", static_cast<double>(ar.applied));
+      j.set("skipped", static_cast<double>(ar.skipped));
+      j.set("batch_id", static_cast<double>(ar.batch_id));
+      Json why = Json::array();
+      for (const std::string& w : ar.skipped_reasons) why.push_back(w);
+      j.set("skipped_reasons", std::move(why));
+      return Response::ok(std::move(j));
+    });
+    s.add_route("POST", "/v1/metadata/undo", "library:write", [this](const Request&) {
+      MetadataJob* m = host.api_metadata();
+      if (!m) return Response::error(404, "metadata fill is not available");
+      UndoResult ur;
+      std::string error;
+      if (!m->undo_last(ur, error)) return Response::error(409, error);
+      if (ur.status != UndoStatus::Ok) return Response::error(409, "the fields were edited since: nothing was restored");
+      host.api_library_changed();
+      Json j = Json::object();
+      j.set("restored", static_cast<double>(ur.applied));
+      return Response::ok(std::move(j));
     });
   }
 
@@ -4060,6 +4252,32 @@ struct ApiBridge::Impl {
       if (res.received > 0) host.api_library_changed();
       return Response::ok(shared_result_json(res));
     });
+    // Whether a playlist is shared, with whom, and how much of the shared list this library can match. `folder` (query)
+    // overrides the folder of the settings (shared.folder, else sync.folder).
+    s.add_route("GET", "/v1/library/playlists/{id}/share", "library:read", [this](const Request& r) {
+      std::int64_t id = 0;
+      if (!int_param(r, "id", id)) return Response::error(400, "bad playlist id");
+      std::lock_guard<std::mutex> lock(lib_mutex);
+      bool plain = false;
+      for (const PlaylistNode& n : lib.playlists())
+        if (n.id == id && !n.is_folder) plain = true;
+      if (!plain) return Response::error(404, "no such playlist");
+      sync::SharedConfig cfg = shared_settings_config(lib);
+      if (r.query.count("folder") && !r.query.at("folder").empty()) cfg.folder = r.query.at("folder");
+      const SharedStatus st = shared_status(lib, id, cfg);
+      Json j = Json::object();
+      j.set("playlist_id", static_cast<double>(id));
+      j.set("shared", st.linked);
+      j.set("shared_id", st.shared_id);
+      j.set("folder", st.folder);
+      j.set("folder_ok", st.folder_ok);
+      Json who = Json::array();
+      for (const std::string& p : st.participants) who.push_back(Json(p));
+      j.set("participants", std::move(who));
+      j.set("entries", st.entries);
+      j.set("missing", st.missing);
+      return Response::ok(std::move(j));
+    });
     s.add_route("DELETE", "/v1/library/playlists/{id}/share", "library:write", [this](const Request& r) {
       std::int64_t id = 0;
       if (!int_param(r, "id", id)) return Response::error(400, "bad playlist id");
@@ -4602,6 +4820,7 @@ struct ApiBridge::Impl {
     add_browser_routes();
     add_sync_routes();
     add_capture_routes();
+    add_mixer_metadata_routes();
     add_queue_routes();
     add_keymap_stem_routes();
     if (!server->start(&error)) {

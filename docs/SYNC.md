@@ -331,7 +331,7 @@ for one playlist at a time.
 
 Where it lives: `src/sync/shared_playlist.cpp` (`deckhand::sync::share_playlist`, `join_shared_playlist`,
 `sync_shared_playlist`, `shared_playlist_entries`), tested with two libraries and a temp folder in
-`tests/test_shared_playlist.cpp`. It is not wired to a screen or the API yet.
+`tests/test_shared_playlist.cpp`. The shared-playlist panel (`ui.shared_playlist`, `Panel::Shared`: share the selected playlist, join one from the folder, sync, stop sharing) and the REST routes under `/v1/library/shared-playlists` use it.
 
 ## How it works
 

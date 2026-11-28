@@ -159,6 +159,9 @@ class RemoteEngine final : public IEngine {
   // included) of every edited chain; when it starts a fresh engine process it loads them back.
   void snapshot_chains(bool force);
   void restore_chains();
+  void restore_mixer();
+  float mix_value_[16] = {};  // last Op::MixerSetting per field, replayed after an engine restart (guarded by snap_mutex_)
+  bool mix_set_[16] = {};
   mutable std::mutex snap_mutex_;
   std::string snap_[kFxTargetCount];
   bool snap_dirty_[kFxTargetCount] = {};

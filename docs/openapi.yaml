@@ -209,6 +209,7 @@ tags:
   - {name: Export}
   - {name: Lighting, description: "DMX lighting (Art-Net, sACN, serial) driven by the music. Off until enabled."}
   - {name: Controllers, description: Hardware controllers, their mappings and per-controller settings.}
+  - {name: Metadata, description: "Opt-in lookup of missing track details in an open music database (docs/METADATA.md)."}
   - {name: Settings}
   - {name: Tokens}
 
@@ -1157,7 +1158,7 @@ paths:
       tags: [Capture]
       operationId: exportEditedTrack
       summary: Export an edited copy of a library track
-      description: "Required scope: `export`. Body: `out` (absolute file, .wav or .aiff), `start` and `end` in seconds (end 0 = to the end), `container` (wav or aiff), `bits` (16, 24 or 32; AIFF 16 or 24), `overwrite` and `cleanup` (`remove_dc`, `rumble_filter`, `rumble_hz`, `click_repair`, `normalise`, `target_lufs`, `fade_in_ms`, `fade_out_ms`; everything off by default). The original is never written to: 409 when `out` is the original or any existing file (unless `overwrite`)."
+      description: "Required scope: `export`. Body: `out` (absolute file, .wav, .aiff or .flac), `start` and `end` in seconds (end 0 = to the end), `container` (wav, aiff or flac), `bits` (16, 24 or 32; AIFF and FLAC 16 or 24), `overwrite` and `cleanup` (`remove_dc`, `rumble_filter`, `rumble_hz`, `click_repair`, `normalise`, `target_lufs`, `fade_in_ms`, `fade_out_ms`; everything off by default). The original is never written to: 409 when `out` is the original or any existing file (unless `overwrite`)."
       x-scope: "export"
       requestBody:
         required: true
@@ -1251,6 +1252,146 @@ paths:
       responses:
         "200": {description: OK, content: {application/json: {schema: {type: object}}}}
         "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/mixer/laws:
+    get:
+      tags: [Mixer]
+      operationId: getMixerLaws
+      summary: The mixer laws
+      description: "Required scope: `read`. The laws the engine mixes with (channel fader, crossfader, EQ depth and crossovers, trim) and the range of each (`ranges`: min, max, default, unit, choice). Defaults reproduce the original behaviour."
+      x-scope: "read"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        default: {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Mixer]
+      operationId: putMixerLaws
+      summary: Change the mixer laws
+      description: "Required scope: `control`. Any of `fader_law` (0 audio taper, 1 linear, 2 dB-linear), `fader_range_db` (20 to 90), `crossfader_law` (0 standard, 1 constant power, 2 linear, 3 sharp cut), `crossfader_cut_in` (0.005 to 0.5), `eq_kill_db` (6 to 120), `eq_boost_db` (0 to 12), `eq_low_hz` (60 to 500), `eq_high_hz` (1500 to 10000), `trim_max_db` (0 to 24), `trim_cut_db` (0 to 40; 0 = the trim falls to silence); `reset: true` first restores every default. Stored under `mixer.*`, sent to the engine and to automix at once. Changing the EQ depth or crossovers while a band is cut can click. Out-of-range values are refused, not clamped."
+      x-scope: "control"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {crossfader_law: 1, eq_kill_db: 120}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/metadata:
+    get:
+      tags: [Metadata]
+      operationId: getMetadata
+      summary: "Metadata fill: status and proposals"
+      description: "Required scope: `read`. `enabled` (the opt-in), `network_built`, `running`, `done` / `total`, `last_batch` and `tracks`: per track `status`, `confidence` and `proposals` (field, current, proposed, confidence, overwrites, info_only, accepted, source_url). 404 when the host has no metadata fill."
+      x-scope: "read"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+    put:
+      tags: [Metadata]
+      operationId: putMetadata
+      summary: Turn the metadata lookup on or off
+      description: "Required scope: `admin`. Body `enabled` (boolean). Off by default. While on, a lookup sends the artist and title of the chosen tracks, and nothing else, to MusicBrainz over HTTPS (docs/METADATA.md). Turning it off cancels a running lookup."
+      x-scope: "admin"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {enabled: true}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/metadata/lookup:
+    post:
+      tags: [Metadata]
+      operationId: lookupMetadata
+      summary: Look tracks up
+      description: "Required scope: `library:write`. Body `ids` (1 to 500 track ids), optional `overwrite` (also propose changes to fields that have a value), `overwrite_edited`, `min_confidence` (0.5 to 1). Runs on a worker thread, one request per second: poll GET /v1/metadata. 403 while the opt-in is off, 409 when a lookup is already running. Nothing is written to the library."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {ids: [12, 13]}
+      responses:
+        "202": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/metadata/cancel:
+    post:
+      tags: [Metadata]
+      operationId: cancelMetadata
+      summary: Cancel the running lookup
+      description: "Required scope: `library:write`. The tracks not yet looked up are marked cancelled; proposals already found stay for review."
+      x-scope: "library:write"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/metadata/review:
+    post:
+      tags: [Metadata]
+      operationId: reviewMetadata
+      summary: Accept or reject proposals
+      description: "Required scope: `library:write`. Body `accepted` (boolean) and either `track_id` with `field` (one proposal) or nothing (all proposals). Proposals that would replace a value start rejected."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {track_id: 12, field: album, accepted: true}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/metadata/apply:
+    post:
+      tags: [Metadata]
+      operationId: applyMetadata
+      summary: Apply the accepted proposals
+      description: "Required scope: `library:write`. Writes the accepted proposals as one journal batch with source `metadata` (visible in GET /v1/library/edits). Optional `allow_overwrite` (default false: proposals that replace a value are skipped). The answer has `applied`, `skipped`, `batch_id` and `skipped_reasons`."
+      x-scope: "library:write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object}
+            example: {allow_overwrite: false}
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+
+  /v1/metadata/undo:
+    post:
+      tags: [Metadata]
+      operationId: undoMetadata
+      summary: Undo the last applied batch
+      description: "Required scope: `library:write`. Restores every field of the last batch applied through this route or the panel; 409 when none, or when a field was edited since."
+      x-scope: "library:write"
+      responses:
+        "200": {description: OK, content: {application/json: {schema: {type: object}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Error"}
         default: {$ref: "#/components/responses/Error"}
 
   /v1/keymap:
@@ -1708,7 +1849,7 @@ paths:
       tags: [Capture]
       operationId: exportCapture
       summary: Export the pieces of the side
-      description: "Required scope: `export`. Body: `dir` (absolute folder, created when missing), `contiguous` (true: pieces tile the audible range with no lost frame), `container` (wav or aiff), `bits` (16, 24 or 32; AIFF 16 or 24), `overwrite` and `cleanup` (`remove_dc`, `rumble_filter`, `rumble_hz`, `click_repair`, `normalise`, `target_lufs`, `fade_in_ms`, `fade_out_ms`; everything off by default). Files are named `NN - Artist - Title`. Existing files are kept unless `overwrite`; the answer lists every file with its own `ok`."
+      description: "Required scope: `export`. Body: `dir` (absolute folder, created when missing), `contiguous` (true: pieces tile the audible range with no lost frame), `container` (wav, aiff or flac), `bits` (16, 24 or 32; AIFF and FLAC 16 or 24), `overwrite` and `cleanup` (`remove_dc`, `rumble_filter`, `rumble_hz`, `click_repair`, `normalise`, `target_lufs`, `fade_in_ms`, `fade_out_ms`; everything off by default). Files are named `NN - Artist - Title`. Existing files are kept unless `overwrite`; the answer lists every file with its own `ok`."
       x-scope: "export"
       requestBody:
         required: true
@@ -3704,6 +3845,24 @@ paths:
         default: {$ref: "#/components/responses/Error"}
 
   /v1/library/playlists/{id}/share:
+    get:
+      tags: [Library]
+      operationId: sharedPlaylistStatus
+      summary: Whether a playlist is shared
+      description: "Required scope: `library:read`. `shared`, `shared_id`, the `folder` looked at (query `folder` overrides the settings `shared.folder` / `sync.folder`) and whether it exists (`folder_ok`); when shared and the folder is readable also `participants` (labels), `entries` of the merged list and how many of them this library has no match for (`missing`). 404 for a folder or a missing playlist. See docs/SYNC.md."
+      x-scope: "library:read"
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: folder, in: query, required: false, schema: {type: string}}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {type: object, additionalProperties: true}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        default: {$ref: "#/components/responses/Error"}
     post:
       tags: [Library]
       operationId: sharePlaylist

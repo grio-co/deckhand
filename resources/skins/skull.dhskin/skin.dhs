@@ -239,6 +239,8 @@ window main size=1100x1440 min=550x720 title="@app.title" chrome=none background
     button bind="app.import" text="@app.import_library" show="app.has_import" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=714 y=1331 w=94 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
     button bind="app.learn" text="@app.learn" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=624 y=1331 w=84 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
     label bind="app.status" font=ui color=dim text_align=left x=292 y=1387 w=184 h=22 bg=panel radius=8 pad=8,0
+    button bind="app.capture.open" show="app.capture_active" tooltip="@capture.indicator_hint" font=ui color=bad text_align=right x=480 y=1387 w=124 h=22 { state hover { color=text } state on { color=warn } }
+    label bind="app.rec_status" show="app.rec_active" font=ui color=bad text_align=right x=606 y=1387 w=108 h=22
     button bind="sampler.stop" text="@sampler.stop_all" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=718 y=1383 w=90 h=28 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
     button bind="app.controller.open" tooltip="@app.controller_hint" font=ui color=dim text_align=center x=18 y=1408 w=242 h=16 { state hover { color=text } } 
     label bind="app.audio" font=ui color=dim text_align=center x=840 y=1408 w=242 h=16 
@@ -265,6 +267,7 @@ window browser role=browser size=800x470 min=400x235 title="@window.browser" chr
     button bind="browser.playlist.add_smart" text="@playlist.add_smart" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=102 y=278 w=84 h=22 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
     button bind="browser.playlist.rename" text="@playlist.rename" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=190 y=278 w=84 h=22 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
     button bind="browser.playlist.delete" text="@playlist.delete" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=102 y=304 w=84 h=22 { state hover { bg=hover } state pressed { bg=press } state on { bg=bad color=bg } }
+    button bind="browser.playlist.share" text="@playlist.share" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=190 y=304 w=84 h=22 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
     browser bind="browser.tracks" columns="title,artist,bpm,key,time" row_h=22 font=ui color=text x=282 y=82 w=416 h=250
     button bind="app.import" text="@app.import_library" show="app.has_import" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=102 y=338 w=84 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }
     button bind="app.export" text="@app.export_usb" font=small color=text bg=panel border=line border_w=1 radius=6 transition=90 x=190 y=338 w=84 h=24 { state hover { bg=hover } state pressed { bg=press } state on { bg=accent color=bg } }

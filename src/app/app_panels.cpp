@@ -80,6 +80,13 @@ bool App::field_key(dh_key key) {
 
 // ---- panel management ----------------------------------------------------------------------------------------
 void App::close_panel() {
+  if (panel_ == Panel::Confirm) {  // dismissed: the same as declining, without going back to what was open
+    confirm_return_ = Panel::None;
+    panel_ = Panel::None;
+    focus_ = nullptr;
+    confirm_.cancel();
+    return;
+  }
   if (panel_ == Panel::Settings) commit_settings();
   if (panel_ == Panel::Learn) hub_->learn_cancel();
   if (panel_ == Panel::Shortcuts) {
@@ -331,6 +338,10 @@ Rect App::panel_size(float w, float h, std::string& title) {
     case Panel::Layouts: m = {0, 0, std::min(420.0f, w - 24), std::min(440.0f, h - 24)}; title = T("layouts.title"); break;
     case Panel::Locate: m = {0, 0, std::min(700.0f, w - 24), std::min(500.0f, h - 24)}; title = T("locate.title"); break;
     case Panel::Capture: m = {0, 0, std::min(720.0f, w - 24), std::min(640.0f, h - 24)}; title = T("capture.title"); break;
+    case Panel::Confirm: m = {0, 0, std::min(480.0f, w - 24), std::min(230.0f, h - 24)}; title = confirm_.open() ? confirm_.request().title : std::string(); break;
+    case Panel::ExportReport: m = {0, 0, std::min(760.0f, w - 24), std::min(600.0f, h - 24)}; title = T("export.report_title"); break;
+    case Panel::Shared: m = {0, 0, std::min(640.0f, w - 24), std::min(560.0f, h - 24)}; title = T("shared.title"); break;
+    case Panel::Metadata: m = {0, 0, std::min(720.0f, w - 24), std::min(600.0f, h - 24)}; title = T("metadata.title"); break;
     case Panel::Smart: m = {0, 0, std::min(720.0f, w - 24), std::min(470.0f, h - 24)}; title = T("smart.title"); break;
     case Panel::Tools: m = {0, 0, std::min(640.0f, w - 24), std::min(480.0f, h - 24)}; title = T("tools.title"); break;
     case Panel::Suggest: m = {0, 0, std::min(760.0f, w - 24), std::min(540.0f, h - 24)}; title = T("suggest.title"); break;
@@ -388,6 +399,10 @@ void App::draw_panel_body(const Rect& m, const std::string& title) {
   else if (panel_ == Panel::Suggest) draw_suggest(m);
   else if (panel_ == Panel::PrepMode) draw_prep_mode(m);
   else if (panel_ == Panel::Controller) draw_controller(m);
+  else if (panel_ == Panel::Confirm) draw_confirm_panel(m);
+  else if (panel_ == Panel::ExportReport) draw_export_report(m);
+  else if (panel_ == Panel::Shared) draw_shared_panel(m);
+  else if (panel_ == Panel::Metadata) draw_metadata_panel(m);
 }
 
 void App::draw_overlays() {
@@ -448,11 +463,7 @@ void App::draw_export_menu(const Rect& m) {
       return;
     }
     if (ov_.pressed && row.contains(ov_.x, ov_.y) && !check.contains(ov_.x, ov_.y)) {
-      Job j;
-      j.kind = Job::Export;
-      j.path = export_targets_[i];
-      j.track_id = list;
-      post(j);
+      request_export(export_targets_[i], list);  // checks the files first; a report with proceed / cancel when there is something to say
       close_panel();
       return;
     }
@@ -478,13 +489,7 @@ void App::draw_export_menu(const Rect& m) {
     dl_.text(row.x + 8, row.y + 5, T("export.other"), 12, theme_.accent, Align::Left, row.w - 16, 1);
     if (ov_.pressed && row.contains(ov_.x, ov_.y)) {
       std::string dest;
-      if (choose_folder(T("export.choose_title"), dest)) {
-        Job j;
-        j.kind = Job::Export;
-        j.path = dest;
-        j.track_id = list;
-        post(j);
-      }
+      if (choose_folder(T("export.choose_title"), dest)) request_export(dest, list);
       close_panel();
     }
   }
@@ -642,6 +647,8 @@ void App::draw_settings(const Rect& m) {
 
   draw_microphone_section(x, y, rw);
   draw_controller_section(x, y, rw);
+  draw_mixer_section(x, y, rw);
+  draw_metadata_section(x, y, rw);
   draw_sync_section(x, y, rw);
 
   ui_heading(x, y, T("settings.library"));

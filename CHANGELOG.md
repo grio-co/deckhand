@@ -6,6 +6,23 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 ## [Unreleased]
 
 ### Added
+- Mixer settings: channel fader law (audio taper, linear, dB-linear with a range), crossfader law
+  (engine curve, constant power, linear, sharp cut with adjustable cut-in), EQ kill depth, boost
+  and crossover points, trim range. Settings panel section, `GET/PUT /v1/mixer/laws`. Defaults
+  are the previous curves. Changing EQ depth or crossovers while playing is not click-free.
+  Engine protocol 12. Unheard.
+- Metadata fill from the open MusicBrainz database, off by default: select tracks, fetch
+  proposals for album, year and genre (Cmd/Ctrl+Alt+Shift+M), accept or reject each, undo the
+  batch. Only the artist and title of the selected tracks are sent, as `DeckHand/<version>`
+  ([docs/METADATA.md](docs/METADATA.md)). `deckhandctl metadata`, REST routes. Never tried
+  against the real service; no key data there.
+- FLAC export for recordings and edited copies, through an encoder written for DeckHand from
+  the format specification; output decodes bit-exactly in three independent decoders.
+- Status-row indicators for a running input or mix recording; quitting or closing the window
+  while recording asks first (Windows and Linux shell changes are uncompiled).
+- USB export shows a compatibility report first when a selected track has a problem.
+- Shared playlists panel (Cmd/Ctrl+Shift+S): share, join, sync now, leave.
+- A confirm dialog, used for quit, leaving a shared playlist and "cues follow the grid".
 - Record from an input (vinyl): a panel (Cmd/Ctrl+Alt+Shift+V) with input chooser, level meter and
   clip count, record/pause/stop to a crash-safe WAV (RF64 beyond 4 GB); after recording, the side
   is split into tracks at the gaps with draggable split points, optional click repair, rumble
@@ -250,6 +267,10 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 - Tests for the library, analysis, API, export, effects, scheduling, languages, skins and streaming.
 
 ### Fixed
+- Smart playlist rules that name a playlist follow it through the trash and back.
+- Suggested cues the user left untouched no longer count as the user's habits.
+- Phrase analysis: builds at 150-165 BPM were read as drops.
+- `test_engine_stems` depended on machine load.
 - Sync: a locked beat grid is no longer replaced by a re-analysis from another device.
 - Engine: the beat position given to chain effects was taken at the end of each rendered chunk,
   so beat-locked effects drifted by the chunk size.
@@ -277,4 +298,7 @@ versions follow [Semantic Versioning](https://semver.org/) once releases begin.
 - iOS: the engine no longer overrides the audio session the shell configures.
 
 ### Changed
+- Automix fader and EQ moves are single sample-accurately started ramps, no longer quarter-beat
+  steps; the bass swap takes half a beat.
+- `cues_follow_grid = always` now moves the cues (it used to ask); grid and cues undo together.
 - Core language is C++20 with thin platform shells (was a single-language plan).

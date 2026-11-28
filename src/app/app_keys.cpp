@@ -366,6 +366,10 @@ void App::do_ui_action(const std::string& name, bool has_value, double value) {
   } else if (n == "columns" || n == "trash" || n == "layouts" || n == "locate" || n == "capture" || n == "split" || n == "focus_pane" || n == "layout_next" ||
              n == "layout_prev") {
     action(n.c_str());
+  } else if (n == "metadata") {
+    action("metadata");
+  } else if (n == "shared_playlist") {
+    action("playlist_share");
   } else if (n == "close_panel") {
     key(DH_KEY_ESCAPE, 0);  // closes the panel, or clears the search
   } else if (n == "window.browser") {

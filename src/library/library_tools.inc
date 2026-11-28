@@ -203,6 +203,39 @@ void Library::replace_all_cues(std::int64_t track_id, const std::vector<Cue>& li
   tx.commit();
 }
 
+void Library::mark_suggested_cues(std::int64_t track_id, const std::vector<Cue>& added) {
+  if (added.empty()) return;
+  const std::string key = "cues.suggested." + std::to_string(track_id);
+  std::string text = setting(key);
+  for (const Cue& c : added) {
+    const std::string line = cues_text({c});
+    if (text.find(line) == std::string::npos) text += line;
+  }
+  set_setting(key, text);
+}
+
+std::vector<Cue> Library::user_cues(std::int64_t track_id) {
+  std::vector<Cue> all = cues(track_id);
+  const std::string text = setting("cues.suggested." + std::to_string(track_id));
+  if (text.empty()) return all;
+  std::vector<Cue> out;
+  for (Cue& c : all) {
+    const std::string line = cues_text({c});
+    // a whole line only: the text is a list of lines ending in a newline
+    std::size_t at = 0;
+    bool suggested = false;
+    while ((at = text.find(line, at)) != std::string::npos) {
+      if (at == 0 || text[at - 1] == '\n') {
+        suggested = true;
+        break;
+      }
+      ++at;
+    }
+    if (!suggested) out.push_back(std::move(c));
+  }
+  return out;
+}
+
 void Library::apply_cue_moves(std::int64_t track_id, const std::vector<Cue>& before, const CueFollowProposal& p) {
   std::vector<Cue> next = before;
   std::vector<bool> used(p.moves.size(), false);

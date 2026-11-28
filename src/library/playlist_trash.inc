@@ -39,7 +39,43 @@ bool row_exists(Db& db, const char* sql, std::int64_t id) {
   return s.step();
 }
 
+// An "in playlist" rule whose playlist is in the trash keeps a marker instead of the id: -(entry << 32 | old id). The id may
+// be handed to another playlist while it is away; the marker cannot, and restore rewrites it to whatever id the
+// playlist got back.
+std::int64_t trash_marker(std::int64_t entry, std::int64_t old_id) { return -((entry << 32) | (old_id & 0xffffffffLL)); }
+
 }  // namespace
+
+void Library::rewrite_playlist_refs(const std::function<std::optional<std::int64_t>(std::int64_t)>& map) {
+  const auto rewrite = [&](const std::string& json) -> std::optional<std::string> {
+    std::vector<SmartRule> rules;
+    if (!smart_rules_from_json(json, rules)) return std::nullopt;
+    bool changed = false;
+    for (SmartRule& r : rules) {
+      if (r.field != SmartRule::Field::InPlaylist) continue;
+      if (const auto to = map(r.id); to && *to != r.id) {
+        r.id = *to;
+        changed = true;
+      }
+    }
+    if (!changed) return std::nullopt;
+    return smart_rules_json(rules);
+  };
+  for (const char* table : {"smart_playlists", "trash_playlist_entries"}) {
+    std::vector<std::pair<std::int64_t, std::string>> rows;
+    {
+      Stmt s(db_, (std::string("SELECT id, rules FROM ") + table + (table[0] == 's' ? "" : " WHERE kind = 'smart'")).c_str());
+      while (s.step()) rows.emplace_back(s.i64(0), s.text(1));
+    }
+    for (const auto& [id, json] : rows) {
+      const auto out = rewrite(json);
+      if (!out) continue;
+      Stmt u(db_, (std::string("UPDATE ") + table + " SET rules = ?1 WHERE id = ?2").c_str());
+      u.bind(1, *out).bind(2, id);
+      u.run();
+    }
+  }
+}
 
 std::int64_t Library::trash_playlist_node(std::int64_t id, bool smart, std::string* kind) {
   OptionalTx tx(db_);
@@ -129,6 +165,11 @@ std::int64_t Library::trash_playlist_node(std::int64_t id, bool smart, std::stri
     c.bind(1, id);
     c.run();
   }
+  // Rules that name the playlist (or anything inside a folder) now name the trash entry instead of a reusable id.
+  rewrite_playlist_refs([&](std::int64_t ref) -> std::optional<std::int64_t> {
+    if (std::find(nodes.begin(), nodes.end(), ref) == nodes.end()) return std::nullopt;
+    return trash_marker(entry, ref);
+  });
   Stmt d(db_, "DELETE FROM playlists WHERE id = ?1");  // children and entries cascade
   d.bind(1, id);
   d.run();
@@ -274,6 +315,12 @@ std::int64_t Library::restore_playlist_entry(std::int64_t entry, std::string* ki
       for (const auto c : ch->second) stack.push_back({c, id});
   }
   place(remap[old_id], false, parent);
+  rewrite_playlist_refs([&](std::int64_t ref) -> std::optional<std::int64_t> {
+    if (ref >= 0 || ((-ref) >> 32) != entry) return std::nullopt;
+    const auto it = remap.find((-ref) & 0xffffffffLL);
+    if (it == remap.end()) return std::nullopt;
+    return it->second;
+  });
   drop();
   tx.commit();
   return remap[old_id];

@@ -204,6 +204,10 @@ bool choose_folder(void*, const char* title, char* out_path, std::uint32_t cap);
 bool list_export_targets(void*, char* out, std::uint32_t cap);
 
 constexpr int kMinW = 1100, kMinH = 700;
+constexpr UINT kMsgQuitNow = WM_APP + 1;  // posted by dh_platform.request_quit: the user answered "Quit anyway"
+void request_quit(void*) {
+  if (g_shell && g_shell->hwnd) PostMessageW(g_shell->hwnd, kMsgQuitNow, 0, 0);
+}
 
 struct ShellApp {
   HWND hwnd = nullptr;
@@ -214,6 +218,7 @@ struct ShellApp {
   bool minimized = false;
   bool button_down = false;
   bool tracking_size = false;
+  bool quit_asked = false;  // a close was refused (a recording is running) and the core is asking; quit when it is answered
   std::chrono::steady_clock::time_point last_frame = std::chrono::steady_clock::now();
   wchar_t high_surrogate = 0;
   POINT last_click{0, 0};
@@ -239,6 +244,10 @@ struct ShellApp {
     const double dt = std::min(0.25, std::chrono::duration<double>(now - last_frame).count());
     last_frame = now;
     const dh_frame* f = dh_app_frame(core, dt);
+    if (quit_asked && dh_app_quit_confirmed(core)) {  // "Quit anyway" (a shell without request_quit would poll like this)
+      quit_asked = false;
+      PostMessageW(hwnd, kMsgQuitNow, 0, 0);
+    }
     if (!f) return;
     renderer.render(*f, w, h);
     if (!renderer.present(vsync)) std::this_thread::sleep_for(std::chrono::milliseconds(50));  // occluded
@@ -273,7 +282,11 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   ShellApp* s = g_shell;
   if (!s || !s->core) return DefWindowProcW(hwnd, msg, wp, lp);
   switch (msg) {
-    case WM_CLOSE: DestroyWindow(hwnd); return 0;
+    case WM_CLOSE:  // the close button and Alt+F4: ask the core first; it shows a question while a recording is running
+      if (dh_app_may_quit(s->core)) DestroyWindow(hwnd);
+      else s->quit_asked = true;
+      return 0;
+    case kMsgQuitNow: DestroyWindow(hwnd); return 0;
     case WM_ENDSESSION:
       // Logoff or shutdown: the system ends the process soon after this returns. Quit the way a window close does
       // (the audio engine fades out and stops, a recording is finished), then leave.
@@ -520,6 +533,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
   platform.rasterise_text = &deckhand::shell::rasterise_text;
   platform.choose_folder = &choose_folder;
   platform.list_export_targets = &list_export_targets;
+  platform.request_quit = &request_quit;
   dh_config config{};
   config.data_dir = data.c_str();
   config.resource_dir = resources.c_str();

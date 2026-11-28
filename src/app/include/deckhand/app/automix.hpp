@@ -17,6 +17,7 @@
 
 #include "deckhand/app/play_queue.hpp"
 #include "deckhand/audio/engine.hpp"
+#include "deckhand/audio/mixer_laws.hpp"
 #include "deckhand/library/library.hpp"
 
 namespace deckhand {
@@ -152,6 +153,9 @@ class AutomixService {
   void resume();
   bool skip();                      // start the next transition now (on the next bar)
   void set_listener(std::function<void(const AutomixEvent&)> cb);
+  // The engine's mixer laws (Op::MixerSetting values), so a transition's ideal fader curve is judged against the right law.
+  // Call whenever the settings change; the defaults match an engine that was never configured.
+  void set_mixer_laws(const mixer::Settings& laws);
 
   AutomixSettings settings() const;
   void set_settings(const AutomixSettings& s);

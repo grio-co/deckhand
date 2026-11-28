@@ -187,7 +187,8 @@ void App::draw_tools(const Rect& m) {
     for (const TrackEditRecord& e : tools_edits_) {
       std::string title;
       if (const auto row = lib_->track(e.track_id)) title = name_of(row->artist, row->title);
-      const std::string change = e.field + ": " + e.old_value.value_or("") + " > " + e.new_value.value_or("");
+      std::string change = e.field + ": " + e.old_value.value_or("") + " > " + e.new_value.value_or("");
+      if (e.source == "metadata") change += "   [" + e.source + "]";  // filled in from the open music database
       dl_.text(lx, cy + 1, skin_->fit(title.empty() ? std::to_string(e.track_id) : title, 12, 0, lw), 12, th.text, Align::Left, lw);
       dl_.text(lx, cy + 17, skin_->fit(change, 10, 0, lw), 10, th.dim, Align::Left, lw);
       if (e.source != "undo" && ui_button({x + rw - bw, cy + 3, bw, 26}, T("tools.undo"), false)) {

@@ -231,7 +231,7 @@ int main() {
     CHECK(!export_range(src, 0, 100, (dir / "x.aiff").string(), fl).ok);
     ExportSettings fc;
     fc.container = Container::Flac;
-    CHECK(!flac_available() && !export_range(src, 0, 100, (dir / "x.flac").string(), fc).ok);
+    CHECK(flac_available() && export_range(src, 0, 100, (dir / "x.flac").string(), fc).ok);
   }
 
   // ---- edited export: the original is never touched ---------------------------------------------------------------------

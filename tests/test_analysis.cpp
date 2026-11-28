@@ -12,6 +12,7 @@
 #include "check.hpp"
 #include "deckhand/analysis/analysis.hpp"
 #include "deckhand/audio/track.hpp"
+#include "../src/analysis/phrases_internal.hpp"
 
 using namespace deckhand;
 
@@ -1046,6 +1047,63 @@ void test_phrase_short() {
 
 // The default run keeps every arrangement shape at 64 to 68 bars and faster tempi (minutes of audio were too slow for CI);
 // DH_FULL_PHRASES=1 runs the original full-length matrix (128-bar arrangements at 124, 128 and 135.55 BPM and so on).
+// Fast tempi: the build must not read as a drop, the drops must read as drops (the labels once flipped from about 150 BPM,
+// where the kick tails of the arrangement overlap and everything reads louder).
+void check_fast_phrases(const Rendered& R, const PhraseAnalysis& pa) {
+  CHECK(pa.ok);
+  const auto section_at = [&](std::size_t spec) -> const PhraseSection* {
+    const std::size_t a = static_cast<std::size_t>(R.start_bar[spec]);
+    const std::size_t b = a + static_cast<std::size_t>(R.secs[spec].bars);
+    const double mid = 0.5 * (R.L.start[a] + R.L.start[b]) * 1000.0;
+    for (const auto& s : pa.sections)
+      if (mid >= s.start_ms && mid < s.end_ms) return &s;
+    return nullptr;
+  };
+  const PhraseSection *intro = section_at(0), *build = section_at(1), *drop1 = section_at(2), *brk = section_at(3), *drop2 = section_at(4);
+  CHECK(intro && build && drop1 && brk && drop2);
+  CHECK(build->label != "drop" && build->label != "chorus");
+  CHECK(drop1->label == "drop" && drop2->label == "drop");
+  CHECK(brk->label == "breakdown" && intro->label == "intro");
+  CHECK(build->energy < drop1->energy && brk->energy < intro->energy);
+  CHECK(pa.sections.size() == 6);
+}
+
+void test_phrases_fast_tempo() {
+  for (double bpm : {150.0, 165.0}) {  // through the whole pipeline, beat tracker included
+    char nm[64];
+    std::snprintf(nm, sizeof nm, "fast tempo 64 bars @%.0f", bpm);
+    PhraseScore sc;
+    auto R = run_phrase_track(nm, bpm, bpm, classic(8, 16, 8), 0, 0.5, &sc);
+    phrase_basic_checks(*R, sc, 3);
+    CHECK(std::fabs(R->r.beats.bpm - bpm) < 2.0);  // the premise: the grid is at the true tempo
+    check_fast_phrases(*R, R->r.phrases);
+    int on_drop = 0;
+    for (const auto& c : suggest_cues(R->r))
+      on_drop += c.type == "first_drop" && std::fabs(c.position_ms - R->L.start[static_cast<std::size_t>(R->start_bar[2])] * 1000.0) < 2 * R->L.beat[0] * 1000.0;
+    CHECK(on_drop == 1);  // the first-drop cue sits on the real drop, not on the build
+  }
+  // The classifier alone on the exact grid (the beat tracker reads this arrangement at 180 BPM as 120).
+  for (double bpm : {150.0, 165.0, 180.0}) {
+    auto R = render_arrangement(bpm, bpm, classic(8, 16, 8), 0, 0.5);
+    std::vector<float> mono(static_cast<std::size_t>(R->pcm.frames / 2));  // left channel, decimated by two
+    for (std::size_t i = 0; i < mono.size(); ++i) mono[i] = 0.5f * (R->pcm.d[4 * i] + R->pcm.d[4 * i + 2]);
+    BeatGrid g;
+    g.ok = true;
+    g.bpm = bpm;
+    g.confidence = 1.0;
+    g.downbeat_phase = 0;
+    for (std::size_t b = 0; b + 1 < R->L.start.size(); ++b)
+      for (int k = 0; k < 4; ++k) g.beats_ms.push_back((R->L.start[b] + k * R->L.beat[b]) * 1000.0);
+    g.beats_ms.push_back(R->L.start.back() * 1000.0);
+    const double end_ms = R->L.start.back() * 1000.0;
+    const PhraseAnalysis pa = detail::phrases_from_mono(mono, kRate / 2.0, g, 500.0, end_ms, end_ms + 1000.0, AnalysisOptions{});
+    std::printf("  fixed grid @%.0f:", bpm);
+    for (const auto& s : pa.sections) std::printf(" %s(e%d)", s.label.c_str(), s.energy);
+    std::printf("\n");
+    check_fast_phrases(*R, pa);
+  }
+}
+
 void test_phrases() {
   const bool full = std::getenv("DH_FULL_PHRASES") != nullptr;
   using Clock = std::chrono::steady_clock;
@@ -1106,6 +1164,8 @@ void test_phrases() {
     check_cue_invariants(R->r, suggest_cues(R->r));
     lap("tempo ramp", t);
   }
+  test_phrases_fast_tempo();
+  lap("fast tempi", t);
   test_phrase_ambient();
   lap("ambient", t);
   test_phrase_short();

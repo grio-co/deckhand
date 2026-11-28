@@ -341,18 +341,22 @@ int main(int, char** argv) {
     std::string err;
     CHECK(b->stems_attach(0, 5, w.path, err));
     std::vector<float> xa, xb;
-    for (int k = 0; k < 400 && b->deck(0).stems_state != 2; ++k) {
+    // Wait on the clock, not on a number of blocks: how long the loader thread takes depends on the machine's load. Both
+    // engines render the same blocks in lockstep, so what they play stays comparable whenever the stems arrive.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (b->deck(0).stems_state != 2 && std::chrono::steady_clock::now() < deadline) {
       auto p = run(*a, 0.01), q = run(*b, 0.01);
       xa.insert(xa.end(), p.begin(), p.end());
       xb.insert(xb.end(), q.begin(), q.end());
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     CHECK(b->deck(0).stems_state == 2);
-    for (int k = 0; k < 8; ++k) {
+    while (b->deck(0).stems_mix < 0.999f && std::chrono::steady_clock::now() < deadline) {  // the blend in is frame-driven: it completes
       auto p = run(*a, 0.01), q = run(*b, 0.01);
       xa.insert(xa.end(), p.begin(), p.end());
       xb.insert(xb.end(), q.begin(), q.end());
     }
+    CHECK(b->deck(0).stems_mix > 0.999f);
     std::vector<float> diff(xa.size());
     for (std::size_t i = 0; i < xa.size(); ++i) diff[i] = xa[i] - xb[i];
     const double step = max_step(diff);
@@ -361,11 +365,27 @@ int main(int, char** argv) {
     CHECK(std::fabs(a->deck(0).position - b->deck(0).position) < 1e-6);
     // detach: back to the original mix, position untouched
     b->stems_detach(0);
-    xa = run(*a, 0.3);
-    xb = run(*b, 0.3);
+    run(*a, 0.01);
+    run(*b, 0.01);
+    while ((b->deck(0).stems_state != 0 || b->deck(0).stems_mix > 0.0f) && std::chrono::steady_clock::now() < deadline) {
+      run(*a, 0.01);
+      run(*b, 0.01);
+    }
+    // After the blend the engine plays the original mix again, but a slow tail of the stem path (about -100 dB, decaying over a
+    // few seconds) is still dying out, and how much of it is left depends on exactly when the stems were adopted relative to
+    // the render blocks. So compare once it has decayed, judged on audio frames (deterministic), not on wall time.
+    double tail = 1;
+    int rounds = 0;
+    for (; rounds < 400; ++rounds) {  // at most 40 s of audio
+      xa = run(*a, 0.1);
+      xb = run(*b, 0.1);
+      tail = max_diff(std::vector<float>(xa.end() - 4000, xa.end()), std::vector<float>(xb.end() - 4000, xb.end()));
+      if (tail < 1e-9) break;
+    }
+    std::printf("detach: the original mix is exact again after %.1f s (last difference %.2e)\n", rounds * 0.1, tail);
     CHECK(std::fabs(a->deck(0).position - b->deck(0).position) < 1e-6);
     CHECK(b->deck(0).stems_state == 0);
-    CHECK(max_diff(std::vector<float>(xa.end() - 4000, xa.end()), std::vector<float>(xb.end() - 4000, xb.end())) < 1e-9);
+    CHECK(tail < 1e-9);
     for (std::size_t i = 0; i < xa.size(); ++i) diff[i % diff.size()] = 0;
     // and toggling the stems off and on while playing
     auto c = engine(), pl = engine();

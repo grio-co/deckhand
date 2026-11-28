@@ -475,6 +475,10 @@ class Library {
   FollowResult apply_cue_follow(std::int64_t track_id, std::int64_t batch_id, double tolerance_ms = kCueGridToleranceMs);
   // Replaces every cue and loop of the track (hot, memory, loops); journalled as one "cues" row.
   void replace_all_cues(std::int64_t track_id, const std::vector<Cue>& cues);
+  // Provenance of cue suggestions: the cues written by a suggestion are remembered (setting "cues.suggested.<track>") and
+  // count as suggested for as long as they are unchanged; editing, moving or relabelling one makes it the user's own.
+  void mark_suggested_cues(std::int64_t track_id, const std::vector<Cue>& added);
+  std::vector<Cue> user_cues(std::int64_t track_id);  // cues() without the untouched suggestions: what the user made
 
   // Removes derived data only (never tags, cues, playlists, the main cue). One journal batch; key, tempo, grid and lock
   // are undoable, loudness, waveform cache, first-sound / load-cue are not (analysis re-creates them).
@@ -647,6 +651,10 @@ class Library {
   int undo_playlist_trash(const TrackEditRecord& e);
   std::int64_t trash_playlist_node(std::int64_t id, bool smart, std::string* kind);  // 0 when absent; not journalled
   std::int64_t restore_playlist_entry(std::int64_t entry, std::string* kind);        // 0 when absent; not journalled
+  // Rewrites the playlist id of every "in playlist" rule, in live smart playlists and in smart playlists in the trash,
+  // through `map` (nullopt = leave). Trashing a playlist turns the rules that name it into a marker naming the trash
+  // entry (a negative id, matches nothing); restoring puts the id the playlist got back.
+  void rewrite_playlist_refs(const std::function<std::optional<std::int64_t>(std::int64_t)>& map);
   int undo_whole(const TrackEditRecord& e);  // the "grid" and "cues" rows
   int follow_mix_links(std::int64_t track_id, const std::vector<BeatSection>& old_grid, const std::vector<BeatSection>& new_grid,
                        double tolerance_ms, bool apply);  // moved (apply) or movable (!apply) link ends

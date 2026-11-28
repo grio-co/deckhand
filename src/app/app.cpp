@@ -3,6 +3,7 @@
 // code-drawn fallback in app_legacy.cpp.
 #include "deckhand/sync/sync.hpp"
 #include "app_impl.hpp"
+#include "mixer_prefs.hpp"
 #include "deckhand/app/instance_lock.hpp"
 #include "deckhand/analysis/analysis.hpp"
 #include "deckhand/core/key_math.hpp"
@@ -96,6 +97,8 @@ App::App(const dh_platform& platform, const dh_config& config)
   }
   apply_input(false);
   setup_automix();
+  meta_ = std::make_unique<MetadataJob>(data_dir_ + "/library.db");
+  apply_mixer_settings();
   loader_ = std::thread([this] { loader_main(); });
   control_ = std::thread([this] { control_main(); });
   vocals_thread_ = std::thread([this] { vocals_main(); });
@@ -368,6 +371,7 @@ void App::start_audio() {
   if (!pref.empty()) c.device_hint = lower(pref);  // an explicit choice wins over the controller
   std::string error;
   const bool ok = engine_->start(c, error);  // stops a running stream first
+  if (ok) resend_mixer();
   std::lock_guard<std::mutex> lock(state_mutex_);
   audio_choice_ = pref.empty() ? followed : "pref:" + pref;
   if (ok) {
@@ -384,6 +388,15 @@ void App::start_audio() {
 }
 
 void App::restart_audio() { start_audio(); }
+
+void App::resend_mixer() {
+  mixer::Settings s;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    s = laws_;
+  }
+  for (const auto& p : mixer_prefs()) send_mixer_field(p.field, mixer_value(s, p.field));
+}
 
 void App::apply_input(bool force) {
   std::string pref;
@@ -651,15 +664,22 @@ void App::run_job(Library& lib, const Job& j) {
     case Job::ClearHotCue: lib.clear_hot_cue(j.track_id, j.slot); break;
     case Job::SaveGrid:
       if (j.ms >= 0) {  // an edited grid: sections, the track's tempo, and the lock that keeps analysis away from it
-        // One journal batch (undoable) for grid, tempo and lock. Cues are only proposed here (setting cues_follow_grid:
-        // ask | always | never): moving them needs the API call (POST .../cues/follow-grid) until the panel has a confirm.
+        // One journal batch (undoable) for grid, tempo and lock. The cues that sit on the old grid follow it according to
+        // the setting cues_follow_grid: always (moved with it), never (left), ask (a question, answered by FollowCues).
         const CueFollow mode = cue_follow_from(lib.setting("cues_follow_grid", "ask"));
-        const GridCommit c = lib.commit_grid(j.track_id, j.grid, j.ms, j.flag, mode == CueFollow::Never ? CueFollow::Never : CueFollow::Ask);
-        if (!c.proposal.moves.empty()) {
+        const GridCommit c = lib.commit_grid(j.track_id, j.grid, j.ms, j.flag, mode);
+        if (cue_follow_needs_question(mode, c)) {
           lib.set_setting("cues_follow_pending", std::to_string(j.track_id) + ":" + std::to_string(c.batch_id));
-          set_status(std::to_string(c.proposal.moves.size()) + " cues sit on the old grid; move them with the cues/follow-grid API call (edit batch " +
-                     std::to_string(c.batch_id) + ")" +
-                     (c.mix_links_moved > 0 ? ", with " + std::to_string(c.mix_links_moved) + " linked mix points" : std::string()));
+          ask_confirm(cue_follow_request(i18n_, j.track_id, c, [this](std::int64_t track, std::int64_t batch) {
+            Job f;
+            f.kind = Job::FollowCues;
+            f.track_id = track;
+            f.batch = batch;
+            post(f);
+          }));
+        } else if (c.applied && !c.proposal.moves.empty()) {
+          set_status(T("cues.followed", {{"count", static_cast<int>(c.proposal.moves.size())}}));
+          sync_deck_cues(lib, j.track_id);
         }
       } else {
         lib.set_grid_locked(j.track_id, j.flag);
@@ -743,6 +763,19 @@ void App::run_job(Library& lib, const Job& j) {
       else if (res.converted > 0 || res.remaining_will_not_play > 0)
         set_status(T("status.exported_report", {{"tracks", res.tracks}, {"converted", res.converted}, {"remaining", res.remaining_will_not_play}, {"path", j.path}}));
       else set_status(T("status.exported", {{"tracks", res.tracks}, {"playlists", res.playlists}, {"path", j.path}}));
+      break;
+    }
+    case Job::ExportCheck: export_check_job(lib, j); break;
+    case Job::SharedOp: shared_job(lib, j); break;
+    case Job::FollowCues: {  // the answer "move them" to the question after a grid edit
+      const FollowResult f = lib.apply_cue_follow(j.track_id, j.batch);
+      if (f.status == FollowStatus::Ok) {
+        lib.set_setting("cues_follow_pending", "");
+        set_status(T("cues.followed", {{"count", static_cast<int>(f.proposal.moves.size())}}));
+        sync_deck_cues(lib, j.track_id);
+      } else {
+        set_status(T("cues.follow_failed"));
+      }
       break;
     }
     case Job::VerifyStick: {  // "Check this stick": the pre-gig check, summarised in the status line
@@ -1250,6 +1283,10 @@ void App::move_selection(int steps) {  // browse_mutex_ held
 
 void App::key(dh_key key, std::uint32_t mods) {
   if (focus_ && field_key(key)) return;  // an overlay text field has the keyboard
+  if (panel_ == Panel::Confirm && key == DH_KEY_ENTER) {
+    answer_confirm(true);
+    return;
+  }
   if (panel_ != Panel::None) {
     if (key == DH_KEY_ESCAPE) {
       if (panel_ == Panel::Shortcuts && !keys_ui_.capture_control.empty()) keys_ui_.capture_control.clear();
@@ -1522,6 +1559,7 @@ void App::prepare_frame() {
     set_status(status_note_);
     status_note_.clear();
   }
+  pump_dialogs();
   {  // plug-in rescan: progress while it runs, the outcome when it ends
     const PluginScanStatus ps = plugin_service().status();
     if (ps.running) {
@@ -1717,6 +1755,8 @@ void dh_app_open_file(dh_app* app, const char* path, float x, float y) {
   if (path) app->app.open_file(path, x, y);
 }
 void dh_app_audio_route(dh_app* app) { app->app.audio_route(); }
+bool dh_app_may_quit(dh_app* app) { return app->app.may_quit(); }
+bool dh_app_quit_confirmed(dh_app* app) { return app->app.quit_confirmed(); }
 const dh_frame* dh_app_frame(dh_app* app, double) { return app->app.frame(); }
 
 void dh_app_set_capabilities(dh_app* app, uint32_t caps) { app->app.set_capabilities(caps); }

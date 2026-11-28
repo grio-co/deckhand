@@ -246,12 +246,13 @@ Target map_binding(std::string_view n) {
   }
 
   if (g == "app" && s.size() == 3 && s[1].name == "window" && s[2].idx < 0) return info("window:" + s[2].name);  // true while that module window is shown
+  if (g == "app" && s.size() == 3 && s[1].name == "capture" && s[2].name == "open") return action("capture_open");  // the recording indicator: its text, click opens the recording panel
   if (g == "app" && s.size() == 3 && s[1].name == "controller" && s[2].name == "open") return action("controller_open");  // the controller's name: click opens its panel
   if (g == "app" && s.size() == 2) {
     const std::string& k = s[1].name;
     for (const char* a : {"import", "rec", "export", "language", "skin", "layout", "settings", "sampler", "learn", "chain"})
       if (k == a) return action(a);
-    for (const char* i : {"any_grid_edit", "controller", "audio", "status", "has_import", "multi_language", "multi_skin", "has_four", "rec_time", "tracks_loading", "multi_window"})
+    for (const char* i : {"any_grid_edit", "controller", "audio", "status", "has_import", "multi_language", "multi_skin", "has_four", "rec_time", "tracks_loading", "multi_window", "capture_active", "rec_active", "rec_status"})
       if (k == i) return info(i);
     return {};
   }
@@ -266,6 +267,7 @@ Target map_binding(std::string_view n) {
     if (k == "playlist.add_folder") return action("playlist_add_folder");
     if (k == "playlist.rename") return action("playlist_rename");
     if (k == "playlist.delete") return action("playlist_delete");
+    if (k == "playlist.share") return action("playlist_share");
     if (k == "edit") return action("edit_track");
     if (k == "columns") return action("columns");
     if (k == "trash") return action("trash");

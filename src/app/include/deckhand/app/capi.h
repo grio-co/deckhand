@@ -70,6 +70,10 @@ typedef struct {
      ('\n'-separated, UTF-8, NUL-terminated), into out[cap]; return true if the list is authoritative (it may
      be empty) or false to let the core fall back to its own scan of /Volumes, /media, /run/media and /mnt. */
   bool (*list_export_targets)(void* user, char* out, uint32_t cap);
+
+  /* The user answered "Quit anyway" to the question dh_app_may_quit() raised (a recording is running). Called on the UI
+     thread from within dh_app_frame: quit now, without asking again. NULL = poll dh_app_quit_confirmed() each frame. */
+  void (*request_quit)(void* user);
 } dh_platform;
 
 typedef struct {
@@ -109,6 +113,13 @@ void    dh_app_text(dh_app* app, const char* utf8);
 void    dh_app_open_file(dh_app* app, const char* path, float x_px, float y_px);
 /* The audio route changed (device plugged, session interruption ended): reopen the output. */
 void    dh_app_audio_route(dh_app* app);
+/* Before the shell quits or closes the main window (menu Quit, the close button, Alt+F4): true = nothing would be lost,
+   go ahead. False = a recording is running; the core now shows a question and the shell must NOT quit yet. It quits when
+   request_quit (dh_platform) is called, or when dh_app_quit_confirmed() turns true. Asking again while the question is
+   up is harmless. */
+bool    dh_app_may_quit(dh_app* app);
+/* True once the user has answered "Quit anyway" (and after it dh_app_may_quit() returns true). */
+bool    dh_app_quit_confirmed(dh_app* app);
 
 /* Build the next frame. The returned pointers stay valid until the next call. */
 const dh_frame* dh_app_frame(dh_app* app, double dt_seconds);

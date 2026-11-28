@@ -1,6 +1,6 @@
 #pragma once
-// Export: split pieces of a recording, or an edited copy of a decoded track, to WAV or AIFF with tags. The original is
-// never written to. FLAC needs an encoder and the tree has none (flac_available() is false): asking for it is an error.
+// Export: split pieces of a recording, or an edited copy of a decoded track, to WAV, AIFF or FLAC with tags. The original is
+// never written to. FLAC uses the encoder in flac.hpp (flac_available() is true; 16 or 24 bit, 1 to 8 channels).
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -17,7 +17,7 @@ const char* container_extension(Container c);  // "wav", "aiff", "flac"
 
 struct ExportSettings {
   Container container = Container::Wav;
-  SampleFormat format = SampleFormat::Pcm24;  // AIFF: Pcm16 or Pcm24
+  SampleFormat format = SampleFormat::Pcm24;  // AIFF: Pcm16 or Pcm24; FLAC: Pcm16, else 24 bit (Float32 is converted to 24)
   CleanupSettings cleanup;                    // off by default; with everything off a piece is the source samples, untouched
   bool overwrite = false;                     // refuse to replace an existing file
 };

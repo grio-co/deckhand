@@ -25,6 +25,7 @@
 
 namespace deckhand::ipc {
 
+// 12: Op::MixerSetting (fader / crossfader / EQ / trim laws) and Op::MixRamp (sample-accurate knob ramps) appended before Op::Count.
 // 11: raw input tap (kReqInputTapEnable, Shared::input_tap and Header::input_tap_dropped: the capture device's frames for recording).
 // 10: sequencer steps can play a slice (SeqPatternData::slice grows StepSeqView; SeqStep's i carries a slice code in bits 8+; pattern
 //     text may carry "@<slice>"), four new EffectKinds (Riser, BandKill, Reverser, AutoPan) sit before Plugin, which moves up.
@@ -43,7 +44,7 @@ namespace deckhand::ipc {
 // 2: microphone channel (Mic* ops, MixerView fields, InputInfo snapshot, input requests, include-mic flags).
 // Bump whenever a wire layout or the meaning of a request changes: a UI that finds an engine with another version
 // asks it to quit and starts a fresh one (RemoteEngine::establish), and the segment's fingerprint covers the sizes.
-constexpr std::uint32_t kProtocolVersion = 11;
+constexpr std::uint32_t kProtocolVersion = 12;
 constexpr int kBlockSlots = 64;  // track / sample blocks in flight at once
 
 // What the OS hands out for a file or socket: a descriptor on POSIX, a HANDLE / SOCKET on Windows (-1 = none).

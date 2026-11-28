@@ -75,22 +75,21 @@ them in [CHANGELOG.md](CHANGELOG.md).
 Library and discovery
 - [x] Analysis: BPM, variable beat grid, key, loudness, three-band waveforms
 - [x] First-sound load cue (user's main cue remembered), grid drift fix, downbeat tests (synthetic audio only)
-- [~] Phrase analysis shown on the waveform (tuned on synthetic tracks; unseen on screen; builds at
-      150 BPM and above can read as drops)
+- [~] Phrase analysis shown on the waveform (tuned on synthetic tracks; unseen on screen; the beat
+      tracker reads a synthetic 180 BPM arrangement as 120)
 - [~] Vocal regions on the main and overview waveforms from cached stems (synthetic tests only; unseen)
-- [~] Cue suggestions from phrases and the user's habits (free slots only, undoable; suggested cues
-      currently feed back into the habit summary)
+- [~] Cue suggestions from phrases and the user's habits (free slots only, undoable; unseen)
 - [~] Track suggestions from the library by tempo, key, genre, energy and play history (unseen on screen)
 - [~] Two-player audition for set preparation: preparation mode on decks 3/4, headphones only (unheard)
 - [~] Browser: column view, filters, smart playlists, layout presets, a second pane, recursive folder
       view, relocation of missing files (all unseen on screen)
-- [~] Shared (collaborative) playlists through the sync folder (API; no menu entry yet)
+- [~] Shared (collaborative) playlists through the sync folder (API and panel; unseen; untried with a real replicated folder)
 - [x] Metadata safety: edit history, undo, restorable trash (API, CLI, panels; panels unseen)
 - [x] Library import/export through the common DJ library XML and M3U8 (untested against other applications' files)
 - [ ] Streaming services and promo pools: each needs a partner agreement and account; pick services
       with the owner before any work
 - [x] USB export for club players (offline-verified; hardware test pending)
-- [x] Export compatibility check and on-stick 24-bit conversion (rule table unverified against hardware; no panel for the report yet)
+- [x] Export compatibility check and on-stick 24-bit conversion (rule table unverified against hardware; report panel unseen)
 - [~] Backup, verify and restore of an exported device library (API and CLI; untested on a real stick); SD card export
 
 Performance
@@ -110,7 +109,7 @@ Visuals, lighting, recording
 - [~] Lighting: DMX output (Art-Net / sACN / serial) driven by beats and phrases (off by default; no real fixture or node tried)
 - [x] Mix recording
 - [~] Record from an analogue input (vinyl) with track splitting; export an edited track (synthetic audio and a fake
-      input only; never tried with a real input or record; no FLAC; no recording indicator outside the panel)
+      input only; never tried with a real input or record)
 
 Sync
 - [x] Library sync through any replicated folder, passphrase-encrypted
@@ -130,12 +129,13 @@ Gaps in the incumbent that DeckHand should close (owner's list, 2026-11-26)
       controllers and stems on the USB stick exist (untested on hardware)
 - [~] Fluid beat grid: drifting tempo, live drummers and tempo jumps become as many sections as
       needed (within ~10 ms on synthetic tests); untested on real recordings
-- [x] Cues follow the grid (API; the in-app confirm is still a status line only)
+- [x] Cues follow the grid (API and confirm dialog; dialog unseen)
 - [x] Remove analysis selectively across many tracks (API and CLI)
 - [~] Automix and play queue with per-track points and "play next" (simulation-tested; never heard;
-      untested with the separate engine process; fader/EQ moves are quarter-beat steps)
+      untested with the separate engine process)
 - [x] Duplicate finder with merge (panel, API, CLI)
-- [ ] Opt-in metadata and key fill from an open music database
+- [~] Opt-in metadata fill from an open music database (album, year, genre; never tried against the real
+      service; that database has no key data, so key stays with local analysis)
 - [~] Effect chains per deck/master/mic/sampler/stem bus with a chain editor and Audio Unit
       plug-ins on macOS (unseen, unheard; only Apple's built-in units loaded so far; no plug-in
       windows); VST3 hosting not started
@@ -149,14 +149,13 @@ Beyond the list
       OBS integration; portable mode; no account, no subscription
 
 ## Known limits of the current build
-- A smart playlist rule that names a playlist by id does not follow that playlist if a restore
-  from the trash had to give it a new id.
-- `test_engine_stems` failed once in a loaded full run (timing); not reproduced.
 - A plug-in's first load holds chain edits for up to 8 s while it is test-loaded.
 - If the engine helper misses its start-up limit (60 s), the app falls back to in-process audio
   and the late helper exits by itself; the wait shows only in the status line and the log.
-- Controller panel: channel fader and crossfader gain laws, EQ kill depth and trim range need the
-  engine; no mappings for other makers' controllers yet (each needs the maker's MIDI document).
+- No mappings for other makers' controllers yet (each needs the maker's MIDI document).
+- Changing EQ kill depth or crossover points while playing can click.
+- The quit-while-recording guard is uncompiled on Windows and Linux; language-pack strings added
+  since 26 Nov are unreviewed machine translations.
 - The single-instance lock and the shell messages are compile-checked only on Windows; the Swift
   shell change has not been run.
 - Tracks are decoded fully into memory.

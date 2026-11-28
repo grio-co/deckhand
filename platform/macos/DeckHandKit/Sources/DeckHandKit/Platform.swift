@@ -14,6 +14,18 @@ enum Platform {
     bluetoothWindow?.window?.makeKeyAndOrderFront(nil)
   }
 
+  /// Set once the user has answered "Quit anyway" to the core's question about a running recording (or the core had nothing to ask).
+  static var quitConfirmed = false
+
+  /// dh_platform.request_quit: called by the core on the UI thread inside dh_app_frame. The terminate happens on the next run
+  /// loop turn, never from inside the frame.
+  static let requestQuit: @convention(c) (UnsafeMutableRawPointer?) -> Void = { _ in
+    DispatchQueue.main.async {
+      Platform.quitConfirmed = true
+      NSApp.terminate(nil)
+    }
+  }
+
   static let showBluetooth: @convention(c) (UnsafeMutableRawPointer?) -> Void = { _ in
     Platform.showBluetoothMIDI()
   }

@@ -211,12 +211,16 @@ bool App::read_text(const ui::Target& t, std::string& out) {
   } else if (n == "status" && t.type == ui::Target::Type::Info) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     out = status_;
+  } else if (n == "rec_status" && t.type == ui::Target::Type::Info) {
+    out = mix_indicator_text();
   } else if (n == "search" && t.type == ui::Target::Type::Info) {
     out = search_;
   } else if (t.type == ui::Target::Type::Action) {
     if (n == "rec") {
       const RecorderStatus rec = engine_->recorder_status();
       out = rec.recording ? T("app.rec") + " " + clock_text(rec.seconds) : T("app.rec");
+    } else if (n == "capture_open") {
+      out = capture_indicator_text();
     } else if (n == "controller_open") {
       const auto c = hub_->connected();
       out = c.empty() ? T("app.no_controller") : c.front();
@@ -251,6 +255,8 @@ bool App::read_flag(const ui::Target& t) {
     if (n == "stems_available") return deck_ok && views_[d].stems_state == 2;
     if (n == "loaded") return deck_ok && views_[d].loaded;
     if (n == "has_import") return import_available();
+    if (n == "capture_active") return capture_ && capture_indicator(capture_->status()).active;
+    if (n == "rec_active") return mix_indicator(engine_->recorder_status()).active;
     if (n == "multi_language") return i18n_.available().size() > 1;
     if (n == "multi_skin") return skins_.size() > 1;
     if (n == "has_four") return skin_ && skin_->has_window("four");
@@ -269,6 +275,7 @@ bool App::read_flag(const ui::Target& t) {
   }
   if (t.type == ui::Target::Type::Action) {
     if (n == "rec") return engine_->recorder_status().recording;
+    if (n == "capture_open") return capture_ && capture_indicator(capture_->status()).warn;  // lit: clipped or dropped samples
     if (n.compare(0, 7, "window.") == 0) {
       const std::size_t c = n.find(':');
       return c != std::string::npos && n.compare(0, 14, "window.toggle:") == 0 && module_visible(n.substr(c + 1));
@@ -284,6 +291,8 @@ bool App::read_flag(const ui::Target& t) {
     if (n == "layouts") return panel_ == Panel::Layouts;
     if (n == "locate") return panel_ == Panel::Locate;
     if (n == "capture") return panel_ == Panel::Capture;
+    if (n == "playlist_share") return panel_ == Panel::Shared;
+    if (n == "metadata") return panel_ == Panel::Metadata;
     if (n == "split") return split_ != SplitMode::Off;
     if (n == "compatible") return compat_on_;
     if (n == "preview_play") return engine_->preview().playing != 0;
@@ -430,6 +439,15 @@ void App::do_action(const ui::Target& t) {
       }
       trash_dirty_ = true;
     }
+  } else if (n == "capture_open") {
+    ui::Target open = t;
+    open.name = "capture";
+    do_action(open);
+  } else if (n == "metadata") {
+    open_metadata_panel();
+  } else if (n == "playlist_share") {
+    if (panel_ == Panel::Shared) close_panel();
+    else open_shared_panel();
   } else if (n == "capture") {
     if (panel_ == Panel::Capture) {
       close_panel();

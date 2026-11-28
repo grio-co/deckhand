@@ -89,6 +89,7 @@ int usage() {
                "  devices                      list audio outputs\n"
                "  midi                         list connected MIDI input devices\n"
                "  capture    info|repair|split|edit ...   analogue-input recordings: stats, header repair, track splitting, edited export (see docs/CAPTURE.md)\n"
+               "  metadata   status|enable|disable|fill ...   opt-in tag fill from MusicBrainz (off by default; see docs/METADATA.md)\n"
                "  hid                          list HID devices (vid:pid, usage, product); keyboards and mice are left out, nothing is opened\n"
                "  play FILE  [--seconds N] [--silent 1] [--device NAME]   decode and play through the engine\n");
   return 2;
@@ -97,11 +98,13 @@ int usage() {
 }  // namespace
 
 int capture_command(int argc, char** argv);  // src/cli/capture_cmd.cpp
+int metadata_command(int argc, char** argv);  // src/cli/metadata_cmd.cpp
 
 int main(int argc, char** argv) {
   if (argc < 2) return usage();
   const std::string cmd = argv[1];
   if (cmd == "capture") return capture_command(argc, argv);
+  if (cmd == "metadata") return metadata_command(argc, argv);
   if (cmd == "devices") {
     for (const auto& d : Engine::output_devices()) std::printf("%s\n", d.c_str());
     return 0;

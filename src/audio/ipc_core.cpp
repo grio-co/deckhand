@@ -5,6 +5,7 @@
 #include <new>
 
 #include "deckhand/audio/ipc.hpp"
+#include "deckhand/audio/mixer_laws.hpp"
 
 namespace deckhand::ipc {
 
@@ -272,7 +273,7 @@ Scope scope_of(Op op) {
     case Op::MicOn: case Op::MicLevel: case Op::MicEqLow: case Op::MicEqHigh: case Op::MicTalkover:
     case Op::MicTalkoverDepth: case Op::MicMonitor: case Op::MicGate: case Op::MetronomeLevel:
     case Op::PreviewPlay: case Op::PreviewStop: case Op::PreviewSeek: case Op::PreviewLevel: case Op::PreviewMaster:
-    case Op::SeqRun: case Op::SeqBpm: case Op::SeqSwing: case Op::SeqSelect: case Op::SeqRecord: case Op::SeqClear:
+    case Op::MixerSetting: case Op::SeqRun: case Op::SeqBpm: case Op::SeqSwing: case Op::SeqSelect: case Op::SeqRecord: case Op::SeqClear:
       return Scope::Global;
     case Op::FxSelect: case Op::FxEnable: case Op::FxWet: case Op::FxTime: case Op::FxParam:
       return Scope::Fx;
@@ -394,6 +395,13 @@ bool validate_command(const WireCommand& w, Command& out) {
       break;
     case Op::MicLevel: case Op::MicEqLow: case Op::MicEqHigh:
       if (!finite_in(w.f, -0.001, 1.001)) return false;  // the engine clamps
+      break;
+    case Op::MixerSetting:
+      if (w.i < 0 || w.i >= static_cast<int>(mixer::MixerField::Count) || !finite_in(w.f, -1000.0, 1000.0)) return false;
+      break;
+    case Op::MixRamp:
+      if (w.i < 0 || (w.i & 0xFF) >= static_cast<int>(mixer::RampField::Count) || ((w.i >> 8) & 0xFF) > 1 || (w.i >> 16) != 0) return false;
+      if (!finite_in(w.f, -0.001, 1.001) || !finite_in(w.d, -1e15, 1e12)) return false;
       break;
     case Op::MicTalkoverDepth:
       if (!finite_in(w.f, -24.001, 0.001)) return false;

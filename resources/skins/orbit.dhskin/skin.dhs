@@ -79,6 +79,8 @@ window main size=1000x560 min=500x280 title="@app.title" chrome=none background=
       use flank n=2 color=deck2 tx=405 td="M 15 8 Q 62 140 15 272"
     }
     // the waist: module buttons, EQ and faders, crossfader
+    button bind="app.capture.open" show="app.capture_active" tooltip="@capture.indicator_hint" font=small color=bad text_align=center x=388 y=168 w=112 h=18 { state hover { color=text } state on { color=warn } }
+    label bind="app.rec_status" show="app.rec_active" font=small color=bad text_align=center x=502 y=168 w=111 h=18
     button action="window.toggle:browser" text="@window.browser" font=small color=text bg=panel2 border=line border_w=1 radius=9 x=388 y=190 w=54 h=19 {
       state hover { bg=hover }
       state on { bg=accent color=bg }

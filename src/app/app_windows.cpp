@@ -50,6 +50,10 @@ const char* App::panel_role(Panel p) {
     case Panel::Layouts: return "layouts";
     case Panel::Locate: return "locate";
     case Panel::Capture: return "capture";
+    case Panel::Confirm: return "confirm";
+    case Panel::ExportReport: return "export_report";
+    case Panel::Shared: return "shared";
+    case Panel::Metadata: return "metadata";
     case Panel::Smart: return "smart";
     case Panel::Shortcuts: return "shortcuts";
     case Panel::Tools: return "tools";
@@ -800,7 +804,9 @@ void App::window_event(std::uint32_t id, dh_window_event kind, float a, float b)
       }
       break;
     case DH_WE_CLOSE:
-      if (w->panel) {
+      if (!w->panel && w->role == "main") {  // a shell that reports the close of the main window instead of quitting itself
+        if (may_quit() && platform_.request_quit) platform_.request_quit(platform_.user);
+      } else if (w->panel) {
         close_panel();
       } else if (w->role != "main") {
         if (panel_ != Panel::None && w->role == panel_role(panel_)) close_panel();

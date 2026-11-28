@@ -28,9 +28,9 @@ int usage_capture() {
                "  info FILE                         format, length, peak, RMS, clip count and DC offset of a recording\n"
                "  repair FILE                       fix the header of a recording that was cut short (keeps every whole frame)\n"
                "  split FILE [--min-gap S] [--min-track S] [--min-depth DB] [--confidence C]   list the track boundaries found\n"
-               "        [--export DIR] [--contiguous 1] [--format wav|aiff] [--bits 16|24|32] [--artist A] [--album B] [--titles \"T1;T2;...\"]\n"
+               "        [--export DIR] [--contiguous 1] [--format wav|aiff|flac] [--bits 16|24|32] [--artist A] [--album B] [--titles \"T1;T2;...\"]\n"
                "        [--dc 1] [--rumble HZ] [--declick 1] [--normalise LUFS] [--fade MS]   optional clean-up of the exported pieces\n"
-               "  edit IN OUT [--start S] [--end S] [--fade-in MS] [--fade-out MS] [--normalise LUFS] [--format wav|aiff] [--bits 16|24|32]\n"
+               "  edit IN OUT [--start S] [--end S] [--fade-in MS] [--fade-out MS] [--normalise LUFS] [--format wav|aiff|flac] [--bits 16|24|32]\n"
                "                                    export an edited copy of a track; the original is never touched\n");
   return 2;
 }

@@ -235,6 +235,12 @@ struct Step {
   Command cmd;
   std::uint64_t id = 0;
   bool fired = false;
+  // A ramp (Op::MixRamp) instead of a jump: the knob goes from `from` to cmd.f over `len` plan units, evaluated by the engine
+  // every block. The ideal curve is kept here so the watcher can tell the plan from a hand on the control.
+  double len = 0;
+  double from = 0;
+  mixer::RampField field = mixer::RampField::Fader;
+  mixer::RampShape shape = mixer::RampShape::Linear;
 };
 
 // A command that is not handed to the engine's scheduler but sent by tick() some time after the transition began. Used
@@ -290,7 +296,6 @@ Command make_cmd(Op op, int deck, float f = 0, int i = 0, double d = 0) {
   return c;
 }
 
-float fader_for_gain(double g) { return static_cast<float>(std::sqrt(std::clamp(g, 0.0, 1.0))); }  // the engine's gain is fader^2
 
 double ms_to_frame(double ms, double sr) { return ms / 1000.0 * sr; }
 
@@ -399,14 +404,24 @@ Plan build_plan(const PlanInput& in) {
     d.cmd = c;
     p.deferred.push_back(d);
   };
+  // One ramp per knob move (sample-accurate in the engine, no steps): `len` plan units from `at`.
+  const double frames_per_unit = p.beat_timeline ? out_beat_frames : in.sr_out;
+  const auto ramp = [&](int tag, int deck, mixer::RampField field, mixer::RampShape shape, double at, double len, double from, double to) {
+    Step s;
+    s.tag = tag;
+    s.at = at;
+    s.len = std::max(0.0, len);
+    s.from = from;
+    s.field = field;
+    s.shape = shape;
+    s.cmd = make_cmd(Op::MixRamp, deck, static_cast<float>(to), static_cast<int>(field) | (static_cast<int>(shape) << 8),
+                     std::max(1.0, std::round(s.len * frames_per_unit)));
+    p.steps.push_back(s);
+  };
   const auto gain_steps = [&](double from, double to, bool down_a, bool up_b) {  // equal-power over [from, to]
     const double span = to - from;
-    const int n = std::clamp(static_cast<int>(span * (p.beat_timeline ? 4 : 8)), 12, 128);
-    for (int k = 1; k <= n; ++k) {
-      const double t = static_cast<double>(k) / n, at = from + span * t;
-      if (down_a) add(kFaderA, at, make_cmd(Op::Fader, a, fader_for_gain(std::cos(t * 1.5707963267948966))));
-      if (up_b) add(kFaderB, at, make_cmd(Op::Fader, b, fader_for_gain(std::sin(t * 1.5707963267948966))));
-    }
+    if (down_a) ramp(kFaderA, a, mixer::RampField::Fader, mixer::RampShape::EqualPower, from, span, in.da.fader, 0.0);
+    if (up_b) ramp(kFaderB, b, mixer::RampField::Fader, mixer::RampShape::EqualPower, from, span, 0.0, 1.0);
   };
   p.baseline[kFaderA] = in.da.fader;
   p.baseline[kFaderB] = 0.0;
@@ -426,8 +441,9 @@ Plan build_plan(const PlanInput& in) {
       mid = std::clamp(mid, 1.0, std::max(1.0, p.length - 1));
       p.pre.push_back(make_cmd(Op::EqLow, b, 0.0f));
       p.baseline[kEqLowB] = 0.0;
-      add(kEqLowA, mid, make_cmd(Op::EqLow, a, 0.0f));
-      add(kEqLowB, mid, make_cmd(Op::EqLow, b, 0.5f));
+      const double swap = std::min(p.beat_timeline ? 0.5 : 0.25, std::max(0.0, p.length - mid));  // half a beat: a swap, not a click
+      ramp(kEqLowA, a, mixer::RampField::EqLow, mixer::RampShape::Linear, mid, swap, in.da.eq_low, 0.0);
+      ramp(kEqLowB, b, mixer::RampField::EqLow, mixer::RampShape::Linear, mid, swap, 0.0, 0.5);
     }
     add(kPlayB, 0, make_cmd(Op::PlayToggle, b));
     ramp_from = 0;
@@ -441,11 +457,7 @@ Plan build_plan(const PlanInput& in) {
     gain_steps(0, half, true, false);
     add(kPlayB, half, make_cmd(Op::PlayToggle, b));
     const double rest = std::max(1.0, p.length - half);
-    const int n = std::clamp(static_cast<int>(rest * (p.beat_timeline ? 4 : 8)), 12, 128);
-    for (int k = 1; k <= n; ++k) {
-      const double t = static_cast<double>(k) / n;
-      add(kFaderB, half + rest * t, make_cmd(Op::Fader, b, fader_for_gain(t)));
-    }
+    ramp(kFaderB, b, mixer::RampField::Fader, mixer::RampShape::EqualPower, half, rest, 0.0, 1.0);
     p.length = std::max(p.length, half + rest);
     ramp_from = half;
   } else if (type == "echo_out") {
@@ -515,6 +527,8 @@ struct AutomixService::Impl {
   std::vector<AutomixEvent> out;
   std::function<void(const AutomixEvent&)> listener;
   AutomixSettings st;
+  std::uint64_t reasserted[kTagCount] = {};
+  mixer::Settings mix;  // the engine's fader law, so the watcher knows the ideal curve (set_mixer_laws)
 
   bool running = false, paused = false, stop_after = false, skip_req = false, resume_hint = false;
   enum class Phase { Idle, Playing, Transitioning };
@@ -609,7 +623,12 @@ struct AutomixService::Impl {
     for (Step& s : p.steps) {
       if (only_tag >= 0 && s.tag != only_tag) continue;
       if (s.id && !s.fired) eng().cancel(s.id);
-      if (only_tag >= 0 || true) s.id = 0;
+      if (s.id && s.fired && s.len > 0 && s.cmd.op == Op::MixRamp) {  // a ramp already under way: freeze the knob where it is
+        const DeckView v = eng().deck(s.cmd.deck);
+        if (s.field == mixer::RampField::Fader) send(make_cmd(Op::Fader, s.cmd.deck, v.fader));
+        else if (s.field == mixer::RampField::EqLow) send(make_cmd(Op::EqLow, s.cmd.deck, v.eq_low));
+      }
+      s.id = 0;
     }
   }
 
@@ -785,15 +804,24 @@ struct AutomixService::Impl {
   }
   BeatGrid plan_grid;  // the outgoing track's grid, kept while a plan is committed
 
+  // The value the plan wants for `tag` at plan position x: the ideal ramp curve while a ramp runs.
   double value_at(int tag, double x) const {
     double v = plan.baseline[tag];
-    for (const Step& s : plan.steps)
-      if (s.tag == tag && s.at <= x + 1e-9) v = s.cmd.f;
+    for (const Step& s : plan.steps) {
+      if (s.tag != tag || s.at > x + 1e-9) continue;
+      if (s.len > 0 && x < s.at + s.len) v = mixer::ramp_value(mix, s.field, s.shape, static_cast<float>(s.from), s.cmd.f, (x - s.at) / s.len);
+      else v = s.cmd.f;
+    }
     return v;
   }
   bool in_band(int tag, double observed, double p, double tol) const {
     const double d = plan.beat_timeline ? 0.5 : 0.25;
     double lo = value_at(tag, p - d), hi = lo;
+    for (int k = 1; k <= 8; ++k) {
+      const double v = value_at(tag, p - d + 2 * d * k / 8);
+      lo = std::min(lo, v);
+      hi = std::max(hi, v);
+    }
     for (const Step& s : plan.steps) {
       if (s.tag != tag || s.at < p - d || s.at > p + d) continue;
       lo = std::min<double>(lo, s.cmd.f);
@@ -842,10 +870,32 @@ struct AutomixService::Impl {
 
   // Compares what the engine reports with what the plan says it should be.
   void check_user(const DeckView dv[], const MixerView& mx, std::uint64_t clock) {
-    if (!have_plan || !plan.committed || st.override_mode == "hands_off" || clock < grace_until) return;
+    if (!have_plan || !plan.committed || clock < grace_until) return;
     const DeckView& A = dv[plan.a];
     const DeckView& B = dv[plan.b];
     const double p = progress(A);
+    if (st.override_mode == "hands_off") {  // the plan carries on: a hand on a ramped control is answered with a ramp to where it should be
+      struct Watched { int tag; const DeckView* d; float DeckView::*knob; };
+      const Watched w[] = {{kFaderA, &A, &DeckView::fader}, {kFaderB, &B, &DeckView::fader}, {kEqLowA, &A, &DeckView::eq_low}, {kEqLowB, &B, &DeckView::eq_low}};
+      for (const Watched& x : w) {
+        if (x.tag == kFaderB || x.tag == kEqLowB) { if (!plan.has_b) continue; }
+        if (in_band(x.tag, (*x.d).*x.knob, p, 0.07) || clock < reasserted[x.tag] + static_cast<std::uint64_t>(0.2 * eng().sample_rate())) continue;
+        const Step* act = nullptr;
+        for (const Step& s : plan.steps)
+          if (s.tag == x.tag && s.len > 0 && s.at <= p && p < s.at + s.len) act = &s;
+        if (act) {
+          const double left = (act->at + act->len - p) / act->len;
+          Command c = act->cmd;
+          c.d = std::max(1.0, std::round(act->cmd.d * left));
+          send(c);
+        } else {  // between ramps (or after the last): put it where the plan has it
+          const bool fader = x.tag == kFaderA || x.tag == kFaderB;
+          send(make_cmd(fader ? Op::Fader : Op::EqLow, x.tag == kFaderA || x.tag == kEqLowA ? plan.a : plan.b, static_cast<float>(value_at(x.tag, p))));
+        }
+        reasserted[x.tag] = clock;
+      }
+      return;
+    }
     // transport: pause, jump, loop, jog
     const auto jumped = [&](const DeckView& d, int idx) {
       if (!have_last || clock <= last_clock) return false;
@@ -1280,6 +1330,11 @@ bool AutomixService::skip() {
 void AutomixService::set_listener(std::function<void(const AutomixEvent&)> cb) {
   std::lock_guard<std::mutex> lock(impl_->evm);
   impl_->listener = std::move(cb);
+}
+
+void AutomixService::set_mixer_laws(const mixer::Settings& laws) {
+  std::lock_guard<std::mutex> lock(impl_->m);
+  impl_->mix = laws;
 }
 
 AutomixSettings AutomixService::settings() const {

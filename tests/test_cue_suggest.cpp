@@ -102,6 +102,7 @@ int main() {
     if (c.slot == 2) { CHECK(c.start_ms == 23456 && c.label == "mine"); ++kept; }
   }
   CHECK(kept == 2);
+  CHECK(lib.user_cues(a).size() == 2);  // the suggestions are not counted as the user's cues
   for (const AppliedCue& w : real.written) CHECK(w.slot >= 0 && w.slot != 0 && w.slot != 2 && w.slot < 8);
   // Applying again adds nothing (the positions are taken), and never touches the first batch.
   const ApplyResult again = apply_suggestions(lib, a, o, &cache, false);
@@ -137,6 +138,8 @@ int main() {
   // The habit summary: built from cued tracks that have phrases, cached, and refreshed when the cues change.
   const CueHabit h0 = cue_habit(lib, cache);
   const int before = h0.samples;
+  CHECK(!lib.cues(a).empty() && lib.user_cues(a).empty());
+  CHECK(before == 0);  // track a only holds suggestions nobody touched: they are not the user's habit
   const std::int64_t b = add_track(lib, "/m/b.mp3", true);
   Cue c;
   c.kind = CueKind::Hot;
@@ -146,6 +149,15 @@ int main() {
   const CueHabit h1 = cue_habit(lib, cache);
   CHECK(h1.samples > before);
   CHECK(cue_habit(lib, cache).samples == h1.samples);  // cached
+  CHECK(h1.samples == 1);
+  // Moving a suggested cue makes it the user's own; the others stay suggestions.
+  {
+    std::vector<Cue> cs = lib.cues(a);
+    cs.front().start_ms += 1000;
+    lib.replace_all_cues(a, cs);
+    CHECK(lib.user_cues(a).size() == 1 && std::fabs(lib.user_cues(a)[0].start_ms - cs.front().start_ms) < 0.01);
+    CHECK(cue_habit(lib, cache).samples == 2);
+  }
 
   // Automix's automatic mix points from the phrases.
   const StoredPhrases sp = make_phrases();

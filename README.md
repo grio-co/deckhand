@@ -40,6 +40,7 @@ full control API.
 - Optional sync of analysis data and of audio files per playlist, encrypted with the sync passphrase.
 - Record a vinyl side from an input, split it into tracks, clean it up and export tagged files.
 - Restorable trash for tracks, playlists and folders.
+- Selectable fader, crossfader, EQ and trim laws. Opt-in metadata fill from an open database. FLAC export.
 - Key sync, 16 hot cues, track suggestions and a headphones-only preparation mode.
 - Controller settings per device: click the controller's name in the status row.
 - Lighting: beat- and phrase-driven DMX over Art-Net, sACN or serial (off by default; untested on fixtures).

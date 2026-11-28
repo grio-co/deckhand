@@ -63,7 +63,7 @@ public final class DeckHandView: MTKView, MTKViewDelegate {
 
     // list_export_targets stays NULL: the core's own scan of /Volumes is right on macOS.
     var platform = dh_platform(user: nil, rasterise_text: rasteriseText, show_bluetooth_midi: Platform.showBluetooth,
-                               choose_folder: Platform.chooseFolder, list_export_targets: nil)
+                               choose_folder: Platform.chooseFolder, list_export_targets: nil, request_quit: nil)
     core = dataDir.withCString { data in
       resources.withCString { res in
         var config = dh_config(data_dir: data, resource_dir: res, log_level: Int32(level), touch: false,
@@ -73,6 +73,17 @@ public final class DeckHandView: MTKView, MTKViewDelegate {
     }
     if core == nil { NSLog("DeckHand: core could not be created") }
     return core != nil
+  }
+
+  /// Before the host quits or closes the window: false = a recording is running, the core is asking the user, do not quit yet.
+  /// It becomes true (or `quitAnswered`) once the user has answered "Quit anyway".
+  public func mayQuit() -> Bool {
+    guard let core else { return true }
+    return dh_app_may_quit(core)
+  }
+  public var quitAnswered: Bool {
+    guard let core else { return true }
+    return dh_app_quit_confirmed(core)
   }
 
   public func shutdown() {

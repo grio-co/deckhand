@@ -174,6 +174,11 @@ enum class Op : std::uint8_t {
   SeqRecord,       // i = 1 on, 0 off, -1 toggle: sampler triggers while running are written into the current pattern
   SeqClear,        // i = pattern (-1 = all), d = slot (< 0 = all slots)
   SeqPatternSwap,  // internal pointer command (IEngine::seq_pattern_set): i = pattern, Command::seq = 16 x 16 cells
+  // ---- mixer laws and ramps (protocol 12) ----
+  MixerSetting,    // i = mixer::MixerField (mixer_laws.hpp), f = value (clamped); engine-wide, not stored by the engine across restarts
+  MixRamp,         // deck, i = mixer::RampField | (mixer::RampShape << 8), f = target knob value 0..1, d = duration in frames
+                   //   (<= 0 = set now): the knob moves from where it is to the target, evaluated every block; any direct
+                   //   command for the same knob cancels the ramp
   Count,           // number of ops; not a command
 };
 

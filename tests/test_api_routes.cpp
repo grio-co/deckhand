@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <mutex>
 
 #include "check.hpp"
 #include "deckhand/api/auth.hpp"
@@ -27,6 +28,8 @@
 #include "capture_synth.hpp"
 #include "deckhand/app/capture_service.hpp"
 #include "deckhand/app/chain_presets.hpp"
+#include "deckhand/app/metadata_job.hpp"
+#include "mixer_prefs.hpp"
 #include "deckhand/app/plugin_service.hpp"
 #include "deckhand/audio/engine.hpp"
 #include "deckhand/audio/plugin_host.hpp"
@@ -54,6 +57,15 @@ class StubHost : public ApiHost {
     capture = std::make_unique<CaptureService>(engine, folder, o);
   }
   CaptureService* api_capture() override { return capture.get(); }
+  std::unique_ptr<MetadataJob> meta;
+  bool hide_meta = false;
+  mixer::Settings laws;
+  int mixer_applies = 0;
+  MetadataJob* api_metadata() override { return hide_meta ? nullptr : meta.get(); }
+  void api_mixer_apply(const mixer::Settings& s) override {
+    laws = s;
+    ++mixer_applies;
+  }
   IEngine& api_engine() override { return engine; }
   bool api_load(int, std::int64_t, std::string& e) override { e = "stub"; return false; }
   void api_add_file(const std::string&, int) override {}
@@ -679,6 +691,137 @@ void test_sequencer_slice(StubHost& host) {
   fails("POST", "/v1/sequencer/step", "/v1/sequencer/step", "{\"pattern\":1,\"step\":2,\"slot\":3,\"slice\":1.5}", 400);
 }
 
+
+// ---- mixer laws and the opt-in metadata fill (canned transport: no request can leave the machine) ------------------------------
+struct CannedClock : metadata::Clock {
+  std::int64_t t = 1000;
+  std::int64_t now_ms() override { return t; }
+  void sleep_ms(std::int64_t ms) override { t += ms; }
+};
+struct CannedTransport : metadata::Transport {
+  std::mutex m;
+  std::vector<std::string> urls, agents;
+  metadata::HttpResponse get(const metadata::HttpRequest& r) override {
+    {
+      std::lock_guard<std::mutex> lock(m);
+      urls.push_back(r.url);
+      agents.push_back(r.user_agent);
+    }
+    metadata::HttpResponse x;
+    x.status = 200;
+    if (r.url.find("/recording?") != std::string::npos)
+      x.body = R"J({"count":1,"offset":0,"recordings":[{"id":"aaaaaaaa-0000-0000-0000-000000000001","score":100,"title":"Nightfall","length":241000,
+  "artist-credit":[{"name":"Aurora Vale","artist":{"name":"Aurora Vale"}}],
+  "releases":[{"id":"rel-orig","title":"Dusk Tapes","status":"Official","date":"2016-03-09","release-group":{"primary-type":"Album","secondary-types":[]}}]}]})J";
+    else
+      x.body = R"J({"id":"rel-orig","title":"Dusk Tapes","status":"Official","date":"2016-03-09","genres":[{"count":5,"name":"house"}]})J";
+    return x;
+  }
+};
+
+void test_mixer_metadata(StubHost& host, const fs::path& dir) {
+  // ---- mixer
+  Http h = ok("GET", "/v1/mixer/laws", "/v1/mixer/laws", "", 200);
+  CHECK(h.json()["settings"]["eq_kill_db"].as_double() == 26.0 && h.json()["settings"]["fader_law"].as_int() == 0);
+  CHECK(h.json()["ranges"]["eq_kill_db"]["max"].as_double() == 120.0);
+  const int before = host.mixer_applies;
+  h = ok("PUT", "/v1/mixer/laws", "/v1/mixer/laws", "{\"crossfader_law\":1,\"eq_kill_db\":120}", 200);
+  CHECK(h.json()["settings"]["crossfader_law"].as_int() == 1 && host.mixer_applies == before + 1);
+  CHECK(host.laws.crossfader_law == 1 && host.laws.eq_kill_db == 120.0f);
+  CHECK(call("GET", "/v1/mixer/laws", g_tok.admin).json()["settings"]["eq_kill_db"].as_double() == 120.0);
+  fails("PUT", "/v1/mixer/laws", "/v1/mixer/laws", "{\"eq_kill_db\":500}", 400);   // refused, not clamped
+  fails("PUT", "/v1/mixer/laws", "/v1/mixer/laws", "{\"fader_law\":1.5}", 400);
+  fails("PUT", "/v1/mixer/laws", "/v1/mixer/laws", "{\"fader_law\":\"linear\"}", 400);
+  fails("PUT", "/v1/mixer/laws", "/v1/mixer/laws", "{\"nonsense\":1}", 400);
+  fails("PUT", "/v1/mixer/laws", "/v1/mixer/laws", "{\"reset\":1}", 400);
+  fails("PUT", "/v1/mixer/laws", "/v1/mixer/laws", "[1]", 400);
+  CHECK(host.mixer_applies == before + 1);  // none of the refused ones reached the engine
+  h = ok("PUT", "/v1/mixer/laws", "/v1/mixer/laws", "{\"reset\":true,\"trim_max_db\":12}", 200);
+  CHECK(h.json()["settings"]["eq_kill_db"].as_double() == 26.0 && h.json()["settings"]["trim_max_db"].as_double() == 12.0 && host.laws.crossfader_law == 0);
+  ok("PUT", "/v1/mixer/laws", "/v1/mixer/laws", "{\"reset\":true}", 200);
+
+  // ---- metadata
+  auto tr = std::make_shared<CannedTransport>();
+  host.meta = std::make_unique<MetadataJob>((dir / "library.db").string(), tr, std::make_shared<CannedClock>());
+  host.hide_meta = true;
+  fails("GET", "/v1/metadata", "/v1/metadata", "", 404);
+  fails("PUT", "/v1/metadata", "/v1/metadata", "{\"enabled\":true}", 404);
+  fails("POST", "/v1/metadata/lookup", "/v1/metadata/lookup", "{\"ids\":[1]}", 404);
+  fails("POST", "/v1/metadata/cancel", "/v1/metadata/cancel", "", 404);
+  fails("POST", "/v1/metadata/review", "/v1/metadata/review", "{\"accepted\":true}", 404);
+  fails("POST", "/v1/metadata/apply", "/v1/metadata/apply", "", 404);
+  fails("POST", "/v1/metadata/undo", "/v1/metadata/undo", "", 404);
+  host.hide_meta = false;
+
+  std::int64_t id = 0;
+  {
+    Library lib((dir / "library.db").string());
+    NewTrack t;
+    t.path = (dir / "nightfall.mp3").string();
+    t.title = "Nightfall";
+    t.artist = "Aurora Vale";
+    t.duration_ms = 241000;
+    id = lib.upsert_track(t);
+  }
+  CHECK(id > 0);
+  h = ok("GET", "/v1/metadata", "/v1/metadata", "", 200);
+  CHECK(!h.json()["enabled"].as_bool() && !h.json()["running"].as_bool() && h.json()["tracks"].is_array());
+  // off: a lookup is refused and nothing is requested
+  fails("POST", "/v1/metadata/lookup", "/v1/metadata/lookup", "{\"ids\":[" + std::to_string(id) + "]}", 403);
+  CHECK(tr->urls.empty());
+  fails("PUT", "/v1/metadata", "/v1/metadata", "{\"enabled\":\"yes\"}", 400);
+  fails("PUT", "/v1/metadata", "/v1/metadata", "{}", 400);
+  h = ok("PUT", "/v1/metadata", "/v1/metadata", "{\"enabled\":true}", 200);
+  CHECK(h.json()["enabled"].as_bool());
+  fails("POST", "/v1/metadata/lookup", "/v1/metadata/lookup", "{}", 400);
+  fails("POST", "/v1/metadata/lookup", "/v1/metadata/lookup", "{\"ids\":[]}", 400);
+  fails("POST", "/v1/metadata/lookup", "/v1/metadata/lookup", "{\"ids\":[\"a\"]}", 400);
+  fails("POST", "/v1/metadata/lookup", "/v1/metadata/lookup", "{\"ids\":[1.5]}", 400);
+  fails("POST", "/v1/metadata/lookup", "/v1/metadata/lookup", "{\"ids\":[1],\"min_confidence\":2}", 400);
+  CHECK(tr->urls.empty());
+  ok("POST", "/v1/metadata/cancel", "/v1/metadata/cancel", "", 200);  // nothing running: harmless
+  fails("POST", "/v1/metadata/apply", "/v1/metadata/apply", "", 409);  // nothing to apply yet
+  fails("POST", "/v1/metadata/undo", "/v1/metadata/undo", "", 409);
+  ok("POST", "/v1/metadata/lookup", "/v1/metadata/lookup", "{\"ids\":[" + std::to_string(id) + "]}", 202);
+  host.meta->wait();
+  h = ok("GET", "/v1/metadata", "/v1/metadata", "", 200);
+  CHECK(!h.json()["running"].as_bool() && h.json()["done"].as_int() == 1 && h.json()["tracks"].size() == 1);
+  CHECK(h.json()["tracks"].at(0)["status"].as_string() == "ok" && h.json()["tracks"].at(0)["proposals"].size() >= 1);
+  CHECK(!tr->urls.empty());
+  for (const auto& u : tr->urls) CHECK(u.rfind("https://musicbrainz.org/ws/2/", 0) == 0);
+  for (const auto& a : tr->agents) CHECK(a.rfind("DeckHand/", 0) == 0 && a.find(' ') == std::string::npos);
+  // review
+  ok("POST", "/v1/metadata/review", "/v1/metadata/review", "{\"accepted\":false}", 200);
+  fails("POST", "/v1/metadata/apply", "/v1/metadata/apply", "", 409);  // everything rejected
+  fails("POST", "/v1/metadata/review", "/v1/metadata/review", "{}", 400);
+  fails("POST", "/v1/metadata/review", "/v1/metadata/review", "{\"accepted\":true,\"track_id\":\"x\",\"field\":\"album\"}", 400);
+  fails("POST", "/v1/metadata/review", "/v1/metadata/review", "{\"accepted\":true,\"track_id\":" + std::to_string(id) + ",\"field\":\"nonsense\"}", 404);
+  ok("POST", "/v1/metadata/review", "/v1/metadata/review", "{\"accepted\":true,\"track_id\":" + std::to_string(id) + ",\"field\":\"album\"}", 200);
+  const int changed = host.library_changed;
+  h = ok("POST", "/v1/metadata/apply", "/v1/metadata/apply", "{}", 200);
+  CHECK(h.json()["applied"].as_int() == 1 && h.json()["batch_id"].as_int() > 0 && host.library_changed == changed + 1);
+  {
+    Library lib((dir / "library.db").string());
+    CHECK(lib.track(id)->album == "Dusk Tapes");
+  }
+  h = ok("GET", "/v1/library/edits", "/v1/library/edits", "", 200);
+  bool metadata_source = false;
+  const Json items = h.json()["items"];
+  for (std::size_t i = 0; i < items.size(); ++i) metadata_source = metadata_source || items.at(i)["source"].as_string() == "metadata";
+  CHECK(metadata_source);
+  ok("POST", "/v1/metadata/undo", "/v1/metadata/undo", "", 200);
+  {
+    Library lib((dir / "library.db").string());
+    CHECK(lib.track(id)->album.empty());
+  }
+  fails("POST", "/v1/metadata/undo", "/v1/metadata/undo", "", 409);
+  // off again: no new lookup
+  ok("PUT", "/v1/metadata", "/v1/metadata", "{\"enabled\":false}", 200);
+  const std::size_t n = tr->urls.size();
+  fails("POST", "/v1/metadata/lookup", "/v1/metadata/lookup", "{\"ids\":[" + std::to_string(id) + "]}", 403);
+  CHECK(tr->urls.size() == n);
+}
+
 // ---- recording from an input -------------------------------------------------------------------------------------------------
 void wait_frames(StubHost& host, std::uint64_t at_least) {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -781,7 +924,8 @@ void test_capture(StubHost& host, const fs::path& dir) {
   CHECK(call("GET", "/v1/capture/splits", g_tok.reader).json()["pieces"].at(1)["title"].as_string() == "Two");
   const fs::path out = dir / "capture-out";
   fails("POST", "/v1/capture/export", "/v1/capture/export", "{\"dir\":\"relative\"}", 400);
-  fails("POST", "/v1/capture/export", "/v1/capture/export", "{\"dir\":\"" + out.generic_string() + "\",\"container\":\"flac\"}", 400);
+  fails("POST", "/v1/capture/export", "/v1/capture/export", "{\"dir\":\"" + out.generic_string() + "\",\"container\":\"ogg\"}", 400);
+  fails("POST", "/v1/capture/export", "/v1/capture/export", "{\"dir\":\"" + out.generic_string() + "\",\"container\":\"flac\",\"bits\":32}", 400);
   fails("POST", "/v1/capture/export", "/v1/capture/export", "{\"dir\":\"" + out.generic_string() + "\",\"bits\":20}", 400);
   fails("POST", "/v1/capture/export", "/v1/capture/export", "{\"dir\":\"" + out.generic_string() + "\",\"container\":\"aiff\",\"bits\":32}", 400);
   fails("POST", "/v1/capture/export", "/v1/capture/export", "{\"dir\":\"" + out.generic_string() + "\",\"cleanup\":{\"normalise\":1}}", 400);
@@ -791,6 +935,14 @@ void test_capture(StubHost& host, const fs::path& dir) {
   std::size_t wavs = 0;
   for (const auto& e : fs::directory_iterator(out)) wavs += e.path().extension() == ".wav" ? 1 : 0;
   CHECK(wavs == 3);
+  {  // FLAC pieces go to their own folder
+    const fs::path flac_out = dir / "capture-out-flac";
+    h = ok("POST", "/v1/capture/export", "/v1/capture/export", "{\"dir\":\"" + jesc(flac_out.generic_string()) + "\",\"container\":\"flac\",\"bits\":24}", 200);
+    CHECK(h.json()["ok"].as_bool() && h.json()["files"].size() == 3);
+    std::size_t flacs = 0;
+    for (const auto& e : fs::directory_iterator(flac_out)) flacs += e.path().extension() == ".flac" ? 1 : 0;
+    CHECK(flacs == 3);
+  }
   h = call("POST", "/v1/capture/export", token_for("export"), "{\"dir\":\"" + out.generic_string() + "\"}");  // the files exist now: not overwritten
   CHECK(h.status == 200 && !h.json()["ok"].as_bool());
   // an existing recording can be loaded
@@ -943,6 +1095,7 @@ int main() {
       test_playlist_trash(fx);
       test_sequencer_slice(host);
       test_capture(host, dir);
+      test_mixer_metadata(host, dir);
       // every operation this test is about was called
       for (const char* k : {"GET /v1/fx/chains/{target}/units/{id}/plugin", "GET /v1/fx/plugins", "POST /v1/fx/plugins/rescan", "GET /v1/fx/presets", "POST /v1/fx/presets/delete",
                             "POST /v1/fx/chains/{target}/presets", "POST /v1/fx/chains/{target}/presets/load", "GET /v1/browser", "PUT /v1/browser/split",
@@ -954,7 +1107,9 @@ int main() {
                             "POST /v1/sequencer/step", "GET /v1/capture/inputs", "GET /v1/capture", "GET /v1/capture/meter", "POST /v1/capture/start", "POST /v1/capture/pause",
                             "POST /v1/capture/stop", "POST /v1/capture/load", "POST /v1/capture/analyse", "GET /v1/capture/splits", "PUT /v1/capture/splits", "POST /v1/capture/splits",
                             "PUT /v1/capture/splits/{index}", "DELETE /v1/capture/splits/{index}", "PUT /v1/capture/tags", "POST /v1/capture/export",
-                            "POST /v1/library/tracks/{id}/export-edit"})
+                            "POST /v1/library/tracks/{id}/export-edit",
+                            "GET /v1/mixer/laws", "PUT /v1/mixer/laws", "GET /v1/metadata", "PUT /v1/metadata", "POST /v1/metadata/lookup", "POST /v1/metadata/cancel",
+                            "POST /v1/metadata/review", "POST /v1/metadata/apply", "POST /v1/metadata/undo"})
         if (g_plugin_unit_ran || std::strcmp(k, "GET /v1/fx/chains/{target}/units/{id}/plugin") != 0) CHECK(g_called.count(k));  // the 200 answer needs a hosted plug-in
       std::printf("api routes ok\n");
     }

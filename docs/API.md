@@ -113,6 +113,7 @@ Send `Authorization: Bearer <token>`. Bodies and replies are JSON.
 | `GET`/`PUT /v1/lighting/config` | `admin` | The whole lighting configuration (outputs, patch, show: master, latency, palette, strobe cap, `strobe_enabled: false` = no strobes). PUT merges, validates, saves `lighting.json`. Everything is off by default; an output only sends once enabled with an address |
 | `POST /v1/lighting/command` | `control` | `{"action": "blackout" / "hold" / "enable" / "master" / "strobe" / "override" / "release", ...}` |
 | `GET /v1/library/shared-playlists?folder=` | `library:read` | Shared playlists found in a replicated folder |
+| `GET /v1/library/playlists/{id}/share?folder=` | `library:read` | Status of a shared playlist: `shared`, `shared_id`, `folder` (default: the settings `shared.folder`, else `sync.folder`), `folder_ok`, `participants`, `entries`, `missing` (entries this library has no match for) |
 | `POST /v1/library/playlists/{id}/share`, `DELETE ...` | `library:write` | Publish a playlist to a shared folder (`{"folder": "/abs/dir", "label": "Alice"}`) / stop sharing |
 | `POST /v1/library/shared-playlists/{shared_id}/join`, `POST /v1/library/playlists/{id}/shared-sync` | `library:write` | Subscribe (creates a local playlist) / merge both sides; the reply has `summary` (`sent_added`, `sent_removed`, `sent_moved`, `received`, `missing`) |
 | `GET /v1/controllers` | `read` | Connected and previously seen controllers: mapping file, decks, pad modes, per-controller settings (library settings `controller.<name>.jog_scale`, `ticks_per_rev`, `pickup`, `leds`, `mapping`) |
@@ -264,3 +265,13 @@ The engine's raw input tap feeds a recording; see docs/CAPTURE.md. All routes an
 | `PUT /v1/capture/tags` | `control` | `artist`, `album`, `genre`, `year`, `comment`, `titles` (one per piece) |
 | `POST /v1/capture/export` | `export` | `{"dir": "/abs/folder", "container": "wav", "bits": 24, "contiguous": false, "overwrite": false, "cleanup": {"remove_dc": true, "fade_in_ms": 10}}`: one file per piece |
 | `POST /v1/library/tracks/{id}/export-edit` | `export` | `{"out": "/abs/edited.wav", "start": 1.5, "end": 200, "cleanup": {"normalise": true, "target_lufs": -14}}`: an edited copy; the original is never written to |
+
+## Mixer laws and the metadata fill (protocol 12)
+
+| Route | Scope | Notes |
+|---|---|---|
+| `GET /v1/mixer/laws`, `PUT /v1/mixer/laws` | `read`, `control` | The mixer laws (settings keys `mixer.*`): `fader_law` (0 audio taper, 1 linear, 2 dB-linear), `fader_range_db`, `crossfader_law` (0 standard, 1 constant power, 2 linear, 3 sharp cut), `crossfader_cut_in`, `eq_kill_db`, `eq_boost_db`, `eq_low_hz`, `eq_high_hz`, `trim_max_db`, `trim_cut_db`. GET also gives `ranges`. PUT takes any subset, `reset: true` restores the defaults, a value out of range is refused (400). Sent to the engine (`Op::MixerSetting`, replayed after an engine restart) and to automix at once. Changing the EQ depth or the crossovers while a band is cut can click |
+| `GET /v1/metadata`, `PUT /v1/metadata` | `read`, `admin` | Status and proposals; `{"enabled": true}` is the opt-in (off by default; docs/METADATA.md says what is sent). 404 when the host has none |
+| `POST /v1/metadata/lookup` | `library:write` | `{"ids": [..], "overwrite": false, "min_confidence": 0.8}`: 202, runs on a worker thread (one request per second), poll `GET /v1/metadata`. 403 while the opt-in is off, 409 while a lookup runs. Nothing is written to the library |
+| `POST /v1/metadata/cancel`, `POST /v1/metadata/review` | `library:write` | Stop the lookup; `{"accepted": true, "track_id": 12, "field": "album"}` (or without track to take all) |
+| `POST /v1/metadata/apply`, `POST /v1/metadata/undo` | `library:write` | Apply the accepted proposals as one journal batch (source `metadata`, shown by `GET /v1/library/edits`); undo the last batch |
